@@ -38,9 +38,11 @@ type routingQuotaReadingsCredential struct {
 	// UrgencyPerHour is the remaining percent per hour until the ranking window
 	// resets, rounded to hundredths; null when unknown.
 	UrgencyPerHour *float64 `json:"urgency_per_hour"`
-	// Rank is the 1-based expiring-first order within the provider, or 0 for
-	// credentials the selector would not pick first: gated, unavailable, or
-	// outside the provider's top available priority tier.
+	// Rank is the 1-based expiring-first order within the provider: under that
+	// strategy, rank 1 is picked next unless a session binding, a model-scoped
+	// gate or the Codex websocket preference applies. It is 0 for credentials
+	// outside that order: gated, unavailable, or below the provider's top
+	// available priority tier.
 	Rank    int                          `json:"rank"`
 	Windows []routingQuotaReadingsWindow `json:"windows"`
 }

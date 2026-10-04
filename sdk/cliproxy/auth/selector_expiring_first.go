@@ -32,8 +32,9 @@ const expiringFirstMaxRotationKeys = 4096
 // ExpiringFirstSelector prefers the credential whose quota would be lost soonest.
 //
 // Urgency is the remaining percent of a credential's ranking window (its
-// longest long window, such as Claude's 7-day limit) divided by the hours until
-// that window resets, so quota that is about to reset unused is burned first.
+// longest window over 24 hours, such as Claude's 7-day limit, else its longest
+// window) divided by the hours until that window resets, so quota that is
+// about to reset unused is burned first.
 // Short windows (24 hours or less) and windows scoped to the requested model
 // family only gate: a credential is skipped while such a window has at most
 // GateRemainingPercent left and has not reset yet. Readings come from
