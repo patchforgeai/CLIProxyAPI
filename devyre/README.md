@@ -29,7 +29,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `devyre/scripts/backup.ps1` | Archives `config.yaml`, `auths\` and `secrets\` |
 | `devyre/scripts/new-secrets.ps1` | Creates the runtime folders and secrets, renders `config.yaml`, restarts the container on `-Rotate`, saves the public URL |
 | `devyre/scripts/sync-upstream.ps1` | Merges `upstream/main` into a sync branch and runs the checks |
-| `devyre/scripts/tailscale-serve.ps1` | Publishes CPA at `https://<machine>.<tailnet>.ts.net:8318` |
+| `devyre/scripts/tailscale-serve.ps1` | Publishes CPA on the tailnet at `<machine>.<tailnet>.ts.net:8318`: HTTPS when Serve HTTPS is enabled, otherwise tailnet-only HTTP (force it with `-Http`) |
 | `devyre/scripts/up.ps1` | Builds and tags the image, recreates the container, waits for `/healthz` and the panel |
 | `internal/api/devyre_routing_readings_route_test.go` | The readings endpoint is on `/v8` only, behind management auth |
 | `internal/api/devyre_t3_hub_contract_test.go` | `TestT3Hub_*`, the T3 Code hub contract |
@@ -124,8 +124,13 @@ Steps, from the repository root in PowerShell:
 1. **Secrets and config.** Run `devyre\scripts\new-secrets.ps1`. It creates `%USERPROFILE%\.cli-proxy-api\{auths,logs,static,plugins,secrets}`, restricts `secrets\` to your user, generates the management key and one key per client (`t3-code`, `claude-code-cli`, `codex-cli`, `other-devices`), and renders `config.yaml`. It prints the management key once: save it in your password manager. Client keys stay in `secrets\client-*.txt` and are never printed.
 2. **Compose variables.** Copy `devyre\deploy\.env.example` to `devyre\deploy\.env`, then set `CPA_HOME`, `CPA_TZ` and, after step 4, `CPA_PUBLIC_URL`.
 3. **Build and start.** Run `devyre\scripts\up.ps1`. It builds `cpa-devyre:current` and tags the same image `cpa-devyre:<git sha>` for rollback (`<git sha>-dirty` when tracked files have local changes). Then it recreates the container with `docker compose up -d --force-recreate` and waits for `http://127.0.0.1:8317/healthz` and `/management.html`.
-4. **Publish on the tailnet.** Run `devyre\scripts\tailscale-serve.ps1`, which serves `https://<machine>.<tailnet>.ts.net:8318`. Then save that URL for the PowerShell profile with `devyre\scripts\new-secrets.ps1 -PublicUrl https://<machine>.<tailnet>.ts.net:8318`. It goes to `%USERPROFILE%\.cli-proxy-api-client\public-url.txt`, outside the folder the container mounts, so nothing in the container can change where your clients send requests.
-5. **Log in accounts.** Open `https://<machine>.<tailnet>.ts.net:8318/management.html` and log in with the management key. Under OAuth Login, add each Claude account, using a separate browser profile or private window per account.
+4. **Publish on the tailnet.** Run `devyre\scripts\tailscale-serve.ps1`.
+   - When Tailscale Serve HTTPS is enabled for the tailnet, it serves `https://<machine>.<tailnet>.ts.net:8318`.
+   - Otherwise it prints the one-time enable link and falls back to `http://<machine>.<tailnet>.ts.net:8318`. That URL is tailnet-only and WireGuard-encrypted between devices, so the panel opens from your phone either way.
+   - The serve config persists across reboots.
+
+   Other devices use that URL; on the CPA host, `http://127.0.0.1:8317` keeps working. To point this PC's PowerShell profile at the tailnet URL instead, run `devyre\scripts\new-secrets.ps1 -PublicUrl <url>`. It writes `%USERPROFILE%\.cli-proxy-api-client\public-url.txt`, outside the folder the container mounts, so nothing in the container can change where your clients send requests.
+5. **Log in accounts.** Open the panel (`http://127.0.0.1:8317/management.html` on the host, or `<tailnet URL>/management.html` from another device) and log in with the management key. Under OAuth Login, add each Claude account, using a separate browser profile or private window per account.
 6. **Wire the clients.**
    - T3 Code: follow `devyre\clients\t3-code.md`.
    - Claude Code CLI: append `devyre\clients\powershell-profile.ps1` to `$PROFILE`. In a new shell, once the accounts are logged in, run `Enable-CpaPool`.

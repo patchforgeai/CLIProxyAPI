@@ -4,7 +4,11 @@ A click-by-click checklist for wiring T3 Code to the Devyre CLIProxyAPI (CPA) de
 
 Have these ready:
 
-- **Base URL:** on the PC that runs CPA, use `http://127.0.0.1:8317`; it works without Tailscale. From other tailnet devices, use `https://<machine>.<tailnet>.ts.net:8318`. That URL works only after Tailscale Serve is enabled for the tailnet (`devyre\scripts\tailscale-serve.ps1` prints the one-time enable link if it is not), and it is `CPA_PUBLIC_URL` in `devyre\deploy\.env`. Wherever this checklist shows the ts.net URL, use the base URL for your device.
+- **Base URL:** on the PC that runs CPA, use `http://127.0.0.1:8317`; it works without Tailscale. From other tailnet devices (laptop, phone), use the URL `devyre\scripts\tailscale-serve.ps1` prints, which is also `CPA_PUBLIC_URL` in `devyre\deploy\.env`:
+  - `http://<machine>.<tailnet>.ts.net:8318` while Tailscale Serve HTTPS is not enabled for the tailnet. The script falls back to tailnet-only HTTP, which is still WireGuard-encrypted between devices.
+  - `https://<machine>.<tailnet>.ts.net:8318` after you enable it with the one-time link the script prints.
+
+  Wherever this checklist shows the ts.net URL, use the base URL for your device.
 - **Management key:** from your password manager. `new-secrets.ps1` printed it once; `new-secrets.ps1 -ShowManagementKey` prints it again.
 - **`t3-code` client key:** copy it without displaying it:
 
