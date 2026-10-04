@@ -559,7 +559,7 @@ func (s *Server) AttachWebsocketRoute(path string, handler http.Handler) {
 	s.wsRoutes[trimmed] = struct{}{}
 	s.wsRouteMu.Unlock()
 
-	authMiddleware := AuthMiddleware(s.accessManager)
+	authMiddleware := devyreKeyOnlyAuthMiddleware(s.accessManager) // devyre: /v1/ws is never keyless (devyre_tailnet_auth.go)
 	conditionalAuth := func(c *gin.Context) {
 		if !s.wsAuthEnabled.Load() {
 			c.Next()

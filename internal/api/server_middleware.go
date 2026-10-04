@@ -93,6 +93,7 @@ func (s *Server) exampleAPIKeySafeModeMiddleware() gin.HandlerFunc {
 }
 
 func (s *Server) serveExampleAPIKeyWarningPage(c *gin.Context) {
+	devyreDenyFraming(c) // devyre: anti-framing for the keyless panel (devyre_tailnet_auth.go)
 	cfg := s.cfg
 	var keys []string
 	if cfg != nil {
@@ -172,6 +173,11 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
 					c.Set("accessMetadata", result.Metadata)
 				}
 			}
+			c.Next()
+			return
+		}
+		// devyre: trusted tailnet devices and this PC may skip the API key (devyre_tailnet_auth.go).
+		if devyreKeylessProxyAccess(c, err) {
 			c.Next()
 			return
 		}
