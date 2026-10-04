@@ -1,0 +1,71 @@
+# Devyre CPA runtime config (v8 layout). Rendered by devyre/scripts/new-secrets.ps1 into
+# %USERPROFILE%\.cli-proxy-api\config.yaml, which the container mounts as /data/config.yaml.
+# Never commit the rendered file. The quoted placeholders below (upper-case names between
+# double underscores) are replaced with generated secrets; keep them quoted and never put
+# a placeholder in a comment, or the rendered comment would hold the secret in plain text.
+config-version: 8
+
+server:
+  host: ""                 # all interfaces inside the container; the host publishes 127.0.0.1:8317 only
+  port: 8317
+  # tailscale serve -> 127.0.0.1:8317 -> Docker Desktop -> container. Trust those hops so the
+  # real tailnet client IP (X-Forwarded-For) drives bans and logs. Calibrate in DEP-6. Restart after edits.
+  trusted-proxies:
+    - 127.0.0.1
+    - 172.16.0.0/12
+    - 192.168.65.0/24
+
+management:
+  allow-remote: true                 # the container never sees loopback; panel and T3 hub arrive via tailscale
+  secret-key: "__MANAGEMENT_KEY__"   # plaintext here; hashed in place on first start
+  disable-control-panel: false
+  disable-auto-update-panel: false   # verified-digest updates from our fork at start and every 3h
+  panel-github-repository: "https://github.com/Devyre/Cli-Proxy-API-Management-Center"
+
+access:
+  api-keys:
+    - "__KEY_T3_CODE__"
+    - "__KEY_CLAUDE_CODE_CLI__"
+    - "__KEY_CODEX_CLI__"
+    - "__KEY_OTHER_DEVICES__"
+
+routing:
+  strategy: "expiring-first"         # burn the credential whose quota would be lost soonest
+  session-affinity: true             # bound threads keep their credential (the prompt cache is per account)
+  session-affinity-ttl: "1h"
+  session-affinity-subagents: true
+  retry:
+    request-retry: 3
+    max-retry-credentials: 0
+    max-retry-interval: 30
+  expiring-first:
+    gate-remaining-percent: 2        # skip a credential whose 5-hour (or matching model) window is this close to empty
+    log-picks: true                  # log every pick at info level (reason=most-urgent|no-data|all-gated)
+  quota-observation:
+    usage-cache:                     # shields Claude's rate-limited usage endpoint from the panel, T3 hub and poller
+      enabled: true
+      claude-usage-ttl: "5m"
+      codex-usage-ttl: "60s"
+      refresh-floor: "30s"
+    poller:                          # keeps quota readings fresh for idle credentials
+      enabled: true
+      claude-interval: "30m"
+      claude-min-gap: "10m"
+      codex-interval: "5m"
+
+oauth:
+  auth-dir: "/data/auths"
+
+observability:
+  logs:
+    debug: false
+    logging-to-file: true            # feeds the panel's Logs Viewer (written under WRITABLE_PATH/logs)
+    logs-max-total-size-mb: 200
+    request-log: false               # never record prompts by default
+  usage:
+    usage-statistics-enabled: true   # Dashboard throughput / usage
+    redis-usage-queue-retention-seconds: 60
+
+plugins:
+  enabled: true                      # Plugins / Plugin Store like Theo's sidebar; nothing installed
+  dir: "/data/plugins"
