@@ -9,7 +9,9 @@ server:
   host: ""                 # all interfaces inside the container; the host publishes 127.0.0.1:8317 only
   port: 8317
   # tailscale serve -> 127.0.0.1:8317 -> Docker Desktop -> container. Trust those hops so the
-  # real tailnet client IP (X-Forwarded-For) drives bans and logs. Calibrate in DEP-6. Restart after edits.
+  # real tailnet client IP (X-Forwarded-For) drives bans and logs. Passwordless access depends on
+  # it too: management.tailnet-auth trusts nothing unless the Docker gateway (inside
+  # 172.16.0.0/12 here) is in this list. Edits apply only after a container restart. Calibrate in DEP-6.
   trusted-proxies:
     - 127.0.0.1
     - 172.16.0.0/12
@@ -21,6 +23,16 @@ management:
   disable-control-panel: false
   disable-auto-update-panel: false   # verified-digest updates from our fork at start and every 3h
   panel-github-repository: "https://github.com/Devyre/Cli-Proxy-API-Management-Center"
+  # Passwordless access for allowed tailnet devices and this PC (devyre/README.md, "Tailnet-only
+  # and passwordless"). The lists start empty, so nothing is keyless until
+  # devyre/scripts/tailnet-trust.ps1 fills them through the management API.
+  tailnet-auth:
+    enabled: true
+    allowed-logins: []               # Tailscale-User-Login values; empty = no tailnet trust at all (fail closed)
+    allowed-devices: []              # tailnet IPs allowed without a key; empty = no tailnet device is keyless (fail closed)
+    allowed-hosts: []                # Host names keyless requests may target; empty = no keyless trust (fail closed)
+    allow-local: true                # trust direct requests from this PC to localhost or 127.0.0.1
+    proxy-api: true                  # trusted requests may also use the proxy API without an API key
 
 access:
   api-keys:

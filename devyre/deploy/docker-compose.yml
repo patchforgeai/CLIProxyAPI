@@ -2,6 +2,8 @@
 #   docker compose -f devyre/deploy/docker-compose.yml --env-file devyre/deploy/.env up -d --build
 # Every port is published on 127.0.0.1 only. tailscale serve (devyre/scripts/tailscale-serve.ps1)
 # is the only way in from the tailnet; never publish on 0.0.0.0 or turn on Tailscale Funnel.
+# Passwordless access (management.tailnet-auth) trusts what arrives through loopback, so up.ps1
+# refuses any other binding and devyre/scripts/exposure-check.ps1 verifies it.
 name: cpa
 services:
   cpa:

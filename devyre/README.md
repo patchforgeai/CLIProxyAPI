@@ -11,6 +11,7 @@ The design, the verified facts and the decisions behind this fork are in [PLAN.m
 - **Quota readings and usage cache.** One in-memory store of quota readings, fed by response headers, by usage bodies passing through `api-call`, and by an idle-credential poller. A usage cache inside `APICall` keeps the panel, the T3 hub and the poller from tripping Claude's rate-limited usage endpoint. See [Routing and quota readings](#routing-and-quota-readings).
 - **`expiring-first` routing.** A built-in strategy that prefers the credential whose quota would be lost soonest. Session affinity still keeps a thread on its credential. `GET /v8/management/routing/quota-readings` shows the ranking.
 - **Deploy kit.** Docker Compose on loopback only, `tailscale serve` on port 8318, PowerShell scripts for secrets, start-up, backup and upstream syncs, and client snippets.
+- **Tailnet-only and passwordless.** CPA is reachable only from this PC and the tailnet, and chosen tailnet devices plus this PC use it without a key (`management.tailnet-auth`). `exposure-check.ps1` verifies both. See [Tailnet-only and passwordless](#tailnet-only-and-passwordless).
 
 ### Fork-only files
 
@@ -26,13 +27,16 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `devyre/.gitattributes` | Keeps `*.cmd` files in CRLF for cmd.exe |
 | `devyre/clients/t3-code.md` | Click-by-click T3 Code setup: hub, pooled Claude instance, Claude Direct |
 | `devyre/deploy/.env.example` | Compose variables; copy it to the gitignored `.env` |
-| `devyre/deploy/config.template.yaml` | Runtime config template (v8 layout) that `new-secrets.ps1` renders |
+| `devyre/deploy/config.template.yaml` | Runtime config template (v8 layout) that `new-secrets.ps1` renders; `management.tailnet-auth` is on with empty, fail-closed lists |
 | `devyre/deploy/docker-compose.yml` | Builds `cpa-devyre:current`; publishes 8317, 54545 and 1455 on 127.0.0.1 only; mounts `CPA_HOME` at `/data` |
 | `devyre/scripts/backup.ps1` | Archives `config.yaml`, `auths\` and `secrets\` |
+| `devyre/scripts/cpa-common.ps1` | Helpers the scripts dot-source: native-command runner, tailscale and docker readers, HTTP and management API clients |
+| `devyre/scripts/exposure-check.ps1` | PASS/FAIL report: loopback-only publishing, no LAN or Funnel exposure, the serve mapping and the passwordless policy; exits 1 on any FAIL |
 | `devyre/scripts/new-secrets.ps1` | Creates the runtime folders and secrets, renders `config.yaml`, restarts the container on `-Rotate`, saves the public URL |
 | `devyre/scripts/sync-upstream.ps1` | Merges `upstream/main` into a sync branch and runs the checks |
-| `devyre/scripts/tailscale-serve.ps1` | Publishes CPA on the tailnet at `<machine>.<tailnet>.ts.net:8318`: HTTPS when Serve HTTPS is enabled, otherwise tailnet-only HTTP (force it with `-Http`) |
-| `devyre/scripts/up.ps1` | Builds and tags the image, recreates the container, waits for `/healthz` and the panel |
+| `devyre/scripts/tailnet-trust.ps1` | Writes `management.tailnet-auth` (allowed logins, devices and hosts) from `tailscale status` into the live config |
+| `devyre/scripts/tailscale-serve.ps1` | Publishes CPA on the tailnet at `<machine>.<tailnet>.ts.net:8318` (HTTPS when Serve HTTPS is enabled, otherwise tailnet-only HTTP), verifies `/healthz` and repairs a serve entry left on an old tailnet name |
+| `devyre/scripts/up.ps1` | Refuses to publish beyond 127.0.0.1, builds and tags the image, recreates the container, waits for `/healthz` and the panel |
 | `internal/api/devyre_routing_readings_route_test.go` | The readings endpoint is on `/v8` only, behind management auth |
 | `internal/api/devyre_t3_hub_contract_test.go` | `TestT3Hub_*`, the T3 Code hub contract |
 | `internal/api/handlers/management/devyre_quota_observer.go` | Idle-credential usage poller; also forgets the readings of removed credentials |
@@ -43,7 +47,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/handlers/management/devyre_routing_strategy_test.go` | `PUT /routing/strategy` accepts `expiring-first` and its aliases |
 | `internal/api/handlers/management/devyre_usage_cache.go` | Usage cache inside `APICall` |
 | `internal/api/handlers/management/devyre_usage_cache_test.go` | Usage cache tests: TTLs, single-flight, stale, backoff, bypass, query variants, writes |
-| `internal/config/devyre_deploy_template_test.go` | Loads the deploy template through the real config loader and checks the typed routing values |
+| `internal/config/devyre_deploy_template_test.go` | Loads the deploy template through the real config loader and checks the typed routing values; pins the `tailnet-auth` block and the keys `tailnet-trust.ps1` writes |
 | `internal/config/devyre_routing.go` | `routing.expiring-first` and `routing.quota-observation` config |
 | `internal/config/devyre_routing_test.go` | Routing config defaults, aliases and save round trips |
 | `internal/managementasset/devyre_updater_test.go` | Pins the panel source to the fork |
@@ -132,8 +136,9 @@ Steps, from the repository root in PowerShell:
    - The serve config persists across reboots.
 
    Other devices use that URL; on the CPA host, `http://127.0.0.1:8317` keeps working. To point this PC's PowerShell profile at the tailnet URL instead, run `devyre\scripts\new-secrets.ps1 -PublicUrl <url>`. It writes `%USERPROFILE%\.cli-proxy-api-client\public-url.txt`, outside the folder the container mounts, so nothing in the container can change where your clients send requests.
-5. **Log in accounts.** Open the panel (`http://127.0.0.1:8317/management.html` on the host, or `<tailnet URL>/management.html` from another device) and log in with the management key. Under OAuth Login, add each Claude account, using a separate browser profile or private window per account.
-6. **Wire the clients.**
+5. **Passwordless access and the exposure check.** Run `devyre\scripts\tailnet-trust.ps1 -Include <this PC>,<phone>,<laptop> -ShowOnly`, check the device table, then run it again without `-ShowOnly`. Then run `devyre\scripts\exposure-check.ps1`; it must end with 0 FAIL. Skip the first command to keep every request keyed. See [Tailnet-only and passwordless](#tailnet-only-and-passwordless).
+6. **Log in accounts.** Open the panel (`http://127.0.0.1:8317/management.html` on the host, or `<tailnet URL>/management.html` from another device). On an allowed device it opens straight into the dashboard; elsewhere, log in with the management key. Under OAuth Login, add each Claude account, using a separate browser profile or private window per account.
+7. **Wire the clients.**
    - T3 Code: follow `devyre\clients\t3-code.md`.
    - Claude Code CLI, either way:
      - **`claude-pool`.** Copy `devyre\clients\claude-pool.cmd` to a folder on PATH, for example `%USERPROFILE%\.local\bin`, next to `claude.exe`. Then `claude-pool` runs Claude Code through the pool and plain `claude` stays on your own login. It works in cmd, PowerShell and Git Bash with no execution-policy change.
@@ -147,6 +152,76 @@ Day to day:
 - Logs are in the panel's Logs Viewer, or run `docker logs -f cpa`.
 - To rotate secrets, run `new-secrets.ps1 -Rotate`. It keeps the previous `config.yaml` as `config.yaml.bak-<timestamp>` and restarts the running container, so the old keys stop working at once. Then update the password manager, the T3 hub key and T3's `ANTHROPIC_AUTH_TOKEN`.
 - To bypass the pool, use `claude-direct` for one run, or `Disable-CpaPool`. In T3, use the "Claude Direct" instance.
+- After a tailnet rename, run `tailscale-serve.ps1`, then `tailnet-trust.ps1` with no arguments, then `exposure-check.ps1`.
+
+## Tailnet-only and passwordless
+
+CPA is reachable only from this PC and from your tailnet, never from the LAN or the internet:
+
+- The container publishes 8317, 54545 and 1455 on 127.0.0.1 only. `up.ps1` refuses to start a compose file that publishes a port anywhere else, and stops a running container that does.
+- `tailscale serve` publishes `http(s)://<machine>.<tailnet>.ts.net:8318` to the tailnet only. Funnel stays off.
+
+On top of that, `management.tailnet-auth` lets chosen tailnet devices, and this PC, use CPA without a key. The panel opens straight into the dashboard, the management API needs no key, and with `proxy-api: true` the proxy API needs no API key either. Everything else still needs the key, exactly as before.
+
+### Set it up
+
+1. Preview: `devyre\scripts\tailnet-trust.ps1 -Include <this PC>,<phone>,<laptop> -ShowOnly`. Names are wildcards, matched against each device's host name and the first label of its MagicDNS name. iPhones report the host name `localhost`, so use their MagicDNS label, for example `iphone*`. `-Include *` takes every untagged device of your login except the automation names below. The table lists every device with its decision and the reason.
+2. Write: the same command without `-ShowOnly`. The script writes only `management.tailnet-auth`, with `PUT /v8/management/config/management/tailnet-auth`, then re-reads the management section and fails unless nothing else changed. The running server applies it at once. A server built before this feature refuses the write as an unknown field: run `up.ps1` first.
+3. Check: `devyre\scripts\exposure-check.ps1`. It must end with 0 FAIL.
+
+The block: `allowed-logins` holds the login that owns this PC; `allowed-devices` holds every Tailscale IP, IPv4 and IPv6, of the selected devices; `allowed-hosts` holds this PC's MagicDNS FQDN and short name, `localhost` and `127.0.0.1`. When the block is new, `enabled`, `allow-local` and `proxy-api` start as `true`, like the deploy template; afterwards the script keeps their live values. Each list fails closed: an empty list means no keyless access through it.
+
+- **Add a device:** re-run with `-Include` naming every device to allow (the selection replaces the list), `-ShowOnly` first. New devices of your login need the key until you do.
+- **Remove a device:** re-run without it in `-Include`, or add `-Exclude <name>`.
+- **After a tailnet rename:** run `tailscale-serve.ps1`, then `tailnet-trust.ps1` with no arguments. Without `-Include` it keeps the devices that are already allowed and refreshes the names: the FQDN in `allowed-hosts` goes stale on a rename while the short name keeps working.
+- **Turn it off:** `tailnet-trust.ps1 -Disable`. Every request needs a key again at once; `-Enable` turns it back on. `allow-local` and `proxy-api` are in the panel's config editor under `management.tailnet-auth`, or set one from this PC, for example: `Invoke-RestMethod -Method Put -Uri http://127.0.0.1:8317/v8/management/config/management/tailnet-auth/allow-local -Headers @{ 'X-CPA-Keyless' = '1' } -ContentType application/json -Body 'false'` (that request itself relies on `allow-local`; send `Authorization = "Bearer <management key>"` instead when it is off).
+
+Scripts and `curl` send `X-CPA-Keyless: 1`, or any `Authorization: Bearer` value, and no key: `curl.exe -H "X-CPA-Keyless: 1" http://127.0.0.1:8317/v8/management/auth/session` answers `{"authenticated":true,"method":"local",...}` (`"tailnet"` over the tailnet, `"key"` with a valid key, 401 otherwise). The panel probes that endpoint at start-up. The header is a constant, not a secret.
+
+### Who is trusted, and why
+
+A request skips the key only when all of these hold:
+
+- `tailnet-auth.enabled` is true, and the container's direct TCP peer is loopback or inside `server.trusted-proxies` (the Docker gateway).
+- It is not a Funnel request.
+- Its `Host` is in `allowed-hosts`, and an `X-Forwarded-Host` equals it.
+- It passes the browser guard. A present `Origin` must be this same origin, and a present `Sec-Fetch-Site` must be `same-origin` or `none`. Without `Origin`, the request must carry a non-browser signal: `X-CPA-Keyless: 1`, `Authorization: Bearer <non-empty token>`, or a non-empty `X-Management-Key`, `X-Api-Key` or `X-Goog-Api-Key`. Browsers never add these on their own; a page from another site can add one only in CORS mode, which always sends its `Origin`, and the guard rejects that `Origin`. Query keys, Basic and other schemes do not count.
+- Then exactly one path applies, chosen by the `Host`:
+  - **Tailnet** (this PC's MagicDNS name, through tailscale serve): `X-Forwarded-For` is exactly one tailnet IP that is listed in `allowed-devices`, and the `Tailscale-User-Login` that serve set is in `allowed-logins`. A listed tagged node, which serve stamps with no identity, needs only its IP, and only while `allowed-logins` is not empty. tailscale serve overwrites `X-Forwarded-For` and the `Tailscale-User-*` headers, so tailnet devices cannot forge them.
+  - **Local** (`localhost` or `127.0.0.1`, with `allow-local: true`): a direct request on this PC. Proxy headers (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`, `X-Forwarded-Host`, `Tailscale-*`) never arrive through serve on a loopback name, so with one the request is untrusted.
+- None of the headers the decision reads (`X-Forwarded-For`, `X-Forwarded-Host`, `Origin`, `Sec-Fetch-Site`, `X-CPA-Keyless`, `Tailscale-User-Login`, `Tailscale-User-Name`) appears twice.
+
+**`allowed-devices` is the only barrier against your own automation.** Every node on this tailnet, the CI runner and the bot VM included, is untagged and owned by the same login, so tailscale serve stamps them all with the allowed login. Only the device list keeps them out, and an allowed CI runner or bot could read the Claude OAuth tokens through the management API. `tailnet-trust.ps1` therefore leaves out any device whose name holds the token `ci`, `runner`, `bot`, `build` or `agent`, unless `-AllowAutomationName` names it exactly. As a second barrier, tag those hosts in the tailnet policy (for example `tag:ci` and `tag:bot`): tagged nodes get no identity headers, and the script never lists tagged nodes.
+
+**The trust boundary is this PC's loopback.** Inside the container, tailscale serve's hop, browsers and programs on this PC, and other containers reaching the host through `host.docker.internal` all arrive from the same Docker gateway, so the server cannot tell them apart. Anything that can reach `127.0.0.1:8317` can also send forged `X-Forwarded-For` and `Tailscale-*` headers with the tailnet name as `Host`. So:
+
+- The trusted set is the allowed tailnet devices plus anything that can reach this PC's loopback, containers included. `exposure-check.ps1` warns when a throwaway container is trusted as local.
+- `allow-local: false` is no barrier against software on this PC, which can forge the tailnet headers.
+- Processes running as your user can read `secrets\` and `auths\` anyway.
+- Passwordless access suits only a single-user PC whose containers you trust.
+- It depends on loopback-only publishing: published on the LAN, any device there could forge the headers. `up.ps1` refuses that and `exposure-check.ps1` checks it. `server.trusted-proxies` must also contain the Docker gateway, and a change there applies only after a container restart.
+
+### What still needs the key
+
+- Every device not in `allowed-devices`: the CI runner, the bot VM, devices of other users, tagged nodes you did not list, and new devices.
+- Funnel requests, cross-site browser requests, and requests without `Origin` that carry no keyless signal.
+- RESP on port 8317 and `/keep-alive` take only the key or the local password. `/v1/ws`, the AI Studio relay socket, is never keyless.
+- Unchanged and unauthenticated, as before: the OAuth callbacks (state-matched), `/v0/resource/plugins/*`, `/healthz`, `/` and `/management.html`.
+
+A request without a key no longer counts toward the ban; only a wrong non-empty key does, and five of them ban the client IP for 30 minutes. Trusted requests never touch the counter, and a wrong key on a trusted request is ignored, so T3 Code can keep any key.
+
+**Proxy API (`proxy-api: true`).** A valid API key always wins, so configured clients keep their own usage rows and isolation. A trusted request without a valid API key is attributed to `tailnet:<login>@<device IP>` (the login is empty for a listed tagged node) or to `local`. That principal also seeds caller-scope session isolation, the Claude MCP alias secret, the Codex prompt-cache key and the xAI reasoning-replay namespace, which is why it is per device. It need not be secret: the server derives it from verified identity, and only software inside the trust boundary could forge it.
+
+### Residual risks
+
+- **Plain HTTP.** Over plain HTTP, only DNS authenticates the tailnet URL. Never open it while Tailscale is off; if you did on an untrusted network, clear that site's data on the device. Enabling Serve HTTPS, with the one-time admin link that `tailscale-serve.ps1` prints, removes this risk and turns on the browser `Sec-Fetch` guard, which the plain-HTTP URL never triggers.
+- **Same-origin content.** Anything served from the CPA origin, the panel and the plugin resource pages, acts with keyless admin rights. Installing a plugin or publishing a release on the panel fork is therefore equivalent to admin access. `management.disable-auto-update-panel: true` pins the current panel.
+
+### What exposure-check.ps1 verifies
+
+Exposure: every port of the cpa container is published on 127.0.0.1; nothing listens on `0.0.0.0` or a LAN address for 8317, 54545 or 1455, and 8318 listens on Tailscale addresses only; this PC's LAN addresses cannot reach 8317 or 8318; Funnel is off; tailscale serve has exactly one web handler on port 8318, `/` to `http://127.0.0.1:8317`, keyed to the current MagicDNS name, and no raw TCP forward reaches CPA; both health URLs answer 200.
+
+Passwordless: the Docker gateway is inside `server.trusted-proxies`; `allowed-hosts` holds the current FQDN; over the tailnet the keyless session probe is 200 (SKIP when this PC is not in `allowed-devices`), the same request without a signal is 401, and with `Origin: http://evil.example` it is 401 or 403; direct `http://127.0.0.1:8317` follows `allow-local`, and forged tailnet headers or a foreign `Origin` there are refused; a throwaway container trusted as local is a WARN. It reads the live config with the management key, sends no wrong key, and changes nothing.
 
 ## Sync with upstream
 
@@ -164,6 +239,7 @@ The panel fork syncs separately in its own repository: merge `upstream/main`, ch
 - **Routing only.** In the panel, set `routing.strategy` back to `round-robin`. It hot-reloads.
 - **Panel.** Run `gh release edit <previous-tag> --repo Devyre/Cli-Proxy-API-Management-Center --latest`, delete `%USERPROFILE%\.cli-proxy-api\static\management.html`, then run `docker restart cpa`.
 - **Clients.** Run `Disable-CpaPool`. In T3, use the "Claude Direct" instance or remove the proxy variables from the Claude instance.
+- **Passwordless access only.** Run `devyre\scripts\tailnet-trust.ps1 -Disable`. Every request needs a key again at once; clients that send a real key keep working.
 
 ## Backup
 
@@ -174,18 +250,25 @@ Run `devyre\scripts\backup.ps1 -Destination <folder>`. It writes `config.yaml`, 
 ```powershell
 go test ./internal/api/ -run 'T3Hub|QuotaReadings'
 go test ./internal/managementasset/ -run DevyrePanelSource
-go test ./internal/config/ -run 'DevyreDeployTemplate|ExpiringFirst'
+go test ./internal/config/ -run 'DevyreDeployTemplate|ExpiringFirst'   # includes the tailnet-auth template block
 go test ./internal/quotareading/
 go test ./internal/api/handlers/management/ -run 'UsageCache|QuotaObserver|RoutingQuota|ExpiringFirst|RoutingStrategy'
 go test ./sdk/cliproxy/auth/ -run ExpiringFirst
 go test ./sdk/cliproxy/ -run ExpiringFirst
 ```
 
+The scripts must stay ASCII and parse in Windows PowerShell 5.1; this prints nothing when they do:
+
+```powershell
+Get-ChildItem devyre -Recurse -Filter *.ps1 | ForEach-Object { $e = $null; [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$e); if ($e) { "$($_.Name): $($e[0].Message)" } }
+```
+
 ## Safety
 
-- Personal use only. Never share client keys, serve other people, or expose CPA publicly: Tailscale Funnel stays off and every port binds to 127.0.0.1.
+- Personal use only. Never share client keys, serve other people, or expose CPA publicly: Tailscale Funnel stays off and every port binds to 127.0.0.1. `exposure-check.ps1` verifies both.
+- Allow only your personal devices in `management.tailnet-auth`, never a CI runner, bot or shared machine.
 - Keep session affinity on, so threads don't hop between accounts.
-- Never commit secrets, auth files, `config.yaml`, `.env`, real emails or the tailnet hostname.
+- Never commit secrets, auth files, `config.yaml`, `.env`, real emails, tailnet IPs, logins or the tailnet hostname.
 
 ## Credits
 
