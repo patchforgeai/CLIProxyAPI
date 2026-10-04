@@ -459,7 +459,8 @@ func usageCacheLabel(resp apiCallResponse) string {
 // devyreHandlerState is the fork's per-handler state. It lives in a side table
 // instead of a Handler field so the upstream struct stays untouched.
 type devyreHandlerState struct {
-	usage *usageCache
+	usage        *usageCache
+	observerOnce sync.Once
 }
 
 // devyreStates maps *Handler to *devyreHandlerState. A server owns one
