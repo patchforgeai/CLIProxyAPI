@@ -497,6 +497,7 @@ Parsers. Each one is pure and has table tests.
 
 - `type Store struct{…}`, concurrency-safe, with methods:
   - `Put(authID, provider string, ws []Window)`: per window ID, replace only if the new reading is newer.
+  - `Replace(authID, provider string, ws []Window, observedAt time.Time)`: `ws` is the complete set of windows of one usage body. Stored windows it lacks are dropped unless observed later, then it records like `Put`. Without this, a window the provider stopped reporting (a plan change, or positional Codex windows that changed meaning) would roll forward as a fresh full window forever.
   - `Get(authID) Reading`
   - `Forget(authID)`
   - `Snapshot() []Reading`
@@ -508,15 +509,17 @@ Parsers. Each one is pure and has table tests.
 ### RT-3 Usage cache in `APICall` (`internal/api/handlers/management/devyre_usage_cache.go`)
 
 - **Allowlist:** method `GET`, a non-empty auth index, and an exact URL of `https://api.anthropic.com/api/oauth/usage`, `https://api.anthropic.com/api/oauth/profile` or `https://chatgpt.com/backend-api/wham/usage`. Never cache POSTs or the Codex credits URLs, because T3 redeems resets through them.
+  - **Claude usage query variants**, such as the panel's reset-grant check `?cedar_ember=1&skip_spend=1`, are cached too, under their full URL with the Claude usage TTL. Anthropic rate limits the endpoint per account whatever the query, so they count toward the poller's Claude min-gap and share the credential's 429 backoff.
+  - **Writes:** a 2xx `POST`, `PUT`, `PATCH` or `DELETE` through `api-call` for a credential, such as a redeemed reset, makes all of that credential's cached responses stale. The next read goes upstream; the stale body stays as the fallback, and the Claude backoff is kept.
 - **Key:** `authIndex + "|" + url`. **TTL:** Claude usage 5 min, Claude profile 1 h, Codex usage 60 s, all configurable.
 - **Behavior:**
   - **hit:** return the cached `apiCallResponse` without touching tokens or upstream.
   - **miss:** single-flight. The leader calls upstream; followers wait on the leader's result, honoring the request ctx.
-  - **2xx:** store it, then feed `quotareading.Default().Put(auth.ID, provider, FromClaudeUsage|FromCodexUsage(...))` with `Source: usage`.
+  - **2xx:** store it, then feed `quotareading.Default().Replace(auth.ID, provider, UsageSnapshot(...))` with `Source: usage`. Only a body with the endpoint's usage shape is recorded, and a query variant's body is merged with `Put` instead.
   - **429 / 5xx / transport error:** if a cached 2xx exists, return it with `X-CPA-Usage-Cache: stale` in `apiCallResponse.Header`; otherwise pass the error through unchanged.
   - **Claude 429:** start a per-auth backoff of 5 min, doubling up to 60 min, cleared on the next 2xx. During backoff, don't call upstream; serve stale data or the last 429.
   - **Bypass:** if the management request header `X-CPA-Usage-Cache: refresh` is present **and** the last upstream call for the key is ≥ 30 s old, act as a miss. Otherwise serve the cache.
-  - Always annotate `X-CPA-Usage-Cache: hit|miss|stale|bypass` in the returned `header` map.
+  - Always annotate `X-CPA-Usage-Cache: hit|miss|stale|bypass` in the returned `header` map, or `backoff` when the stored Claude 429 is served.
 - **Hook** into `api_tools.go` with three small hunks: lookup after `authIndex` and `urlStr` are parsed (before token resolution), complete or fail after the upstream response or transport error, and record on success. Keep the APICall flow otherwise unchanged; v0 and v8 share it.
 - **Tests** in `devyre_usage_cache_test.go` (httptest upstream counting calls; fake clock):
   - TTL expiry.
@@ -536,6 +539,7 @@ Parsers. Each one is pure and has table tests.
   - For Claude, also require that the **provider-wide** gap since the last Claude usage call is ≥ `claude-min-gap` (10 min). With 3 accounts, the startup sweep finishes in about 20 min while header readings fill in from traffic.
 - **The request** goes through the same cache path as `APICall`: Claude uses `Authorization: Bearer <token>` and `anthropic-beta: oauth-2025-04-20`. Codex uses the header set T3 sends, which is in F6 and `apps/server/src/usage/cliproxyApi.ts`. Resolve the token and transport with the existing `h.authByIndex`, `h.resolveTokenForAuth` and `h.apiCallTransport`. A poll result therefore also warms the cache for the panel and T3.
 - Never poll disabled auths, xAI paid, or Meta (bandoyer #13, #14). xAI free and Kimi are out of scope until the user adds those credentials.
+- Each tick, poller on or off, also forgets the stored readings of credentials the manager no longer lists.
 - Logging is at debug level and never includes tokens or bodies.
 - **Tests:** a fake clock drives the scheduling decisions (who is due, the min-gap, skips) through a pure `nextPolls(now, auths, readings, lastCall) []authID` function.
 
