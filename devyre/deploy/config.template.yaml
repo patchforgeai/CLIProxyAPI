@@ -32,7 +32,7 @@ management:
     allowed-logins: []               # Tailscale-User-Login values; empty = no tailnet trust at all (fail closed)
     allowed-devices: []              # tailnet IPs allowed without a key; empty = no tailnet device is keyless (fail closed)
     allowed-hosts: []                # Hosts keyless requests may target, tailnet names with serve's port 8318; empty = no keyless trust (fail closed)
-    allow-local: true                # trust direct requests from this PC to localhost or 127.0.0.1
+    allow-local: false               # off: other Docker containers reach 127.0.0.1:8317 via host.docker.internal and would count as this PC; use the tailnet URL on this PC instead
     proxy-api: true                  # trusted requests may also use the proxy API without an API key
 
 access:

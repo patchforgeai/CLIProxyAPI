@@ -37,8 +37,8 @@
   Only management.tailnet-auth is written, with one
   PUT /v8/management/config/management/tailnet-auth to the CPA on this PC, using the management
   key in %USERPROFILE%\.cli-proxy-api\secrets\management-key.txt (never printed). enabled,
-  allow-local and proxy-api keep their live values; when the block does not exist yet they start
-  as true, like the deploy template. Lists are always sent whole. Afterwards the script re-reads
+  allow-local and proxy-api keep their live values; when the block does not exist yet enabled and
+  proxy-api start as true and allow-local as false, like the deploy template. Lists are always sent whole. Afterwards the script re-reads
   the management section and exits 1 unless tailnet-auth is exactly what was sent and nothing
   else changed. A server built before tailnet-auth existed has no
   GET /v8/management/auth/session and rejects the block; the script detects that and writes
@@ -558,7 +558,9 @@ foreach ($name in $flagKeys) {
     $policy[$name] = Get-BlockFlag $liveBlock $name
     $notes[$name] = 'kept from the live config'
   } else {
-    $policy[$name] = $true
+    # allow-local starts off: containers on this PC reach the loopback publish through
+    # host.docker.internal and would count as local. This PC uses the tailnet URL instead.
+    $policy[$name] = ($name -ne 'allow-local')
     $notes[$name] = 'deploy-template default for a new block'
   }
 }

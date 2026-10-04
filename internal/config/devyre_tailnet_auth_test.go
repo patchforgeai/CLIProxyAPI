@@ -292,8 +292,8 @@ func TestTailnetAuthConfig_DeployTemplateBlock(t *testing.T) {
 		t.Fatalf("LoadConfig(rendered template) error = %v", err)
 	}
 	got := cfg.RemoteManagement.TailnetAuth
-	if !got.Enabled || !got.AllowLocal || !got.ProxyAPI {
-		t.Errorf("deploy template tailnet-auth = %+v, want enabled, allow-local and proxy-api true", got)
+	if !got.Enabled || got.AllowLocal || !got.ProxyAPI {
+		t.Errorf("deploy template tailnet-auth = %+v, want enabled and proxy-api true, allow-local false", got)
 	}
 	if len(got.AllowedLogins)+len(got.AllowedDevices)+len(got.AllowedHosts) != 0 {
 		t.Errorf("deploy template tailnet-auth lists = %+v, want them empty (tailnet-trust.ps1 fills them at runtime)", got)

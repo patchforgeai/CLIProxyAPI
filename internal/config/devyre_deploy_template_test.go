@@ -205,7 +205,7 @@ func TestDevyreDeployTemplate_TailnetAuthBlock(t *testing.T) {
 		"allowed-logins":  []any{},
 		"allowed-devices": []any{},
 		"allowed-hosts":   []any{},
-		"allow-local":     true,
+		"allow-local":     false,
 		"proxy-api":       true,
 	}
 	if !reflect.DeepEqual(doc.Management.TailnetAuth, want) {
