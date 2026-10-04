@@ -230,6 +230,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	// subscribe-config heartbeat connection is healthy.
 	engine.Use(s.homeHeartbeatMiddleware())
 	engine.Use(s.exampleAPIKeySafeModeMiddleware())
+	engine.Use(s.devyreTailnetContext()) // devyre: tailnet passwordless proxy access (devyre_tailnet_auth.go)
 
 	// Setup routes
 	s.setupRoutes()

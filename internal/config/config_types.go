@@ -331,6 +331,8 @@ type RemoteManagement struct {
 	PanelGitHubRepository string `yaml:"panel-github-repository"`
 	// BaseURL specifies the base URL of the remote management API for TUI client mode (e.g. "https://proxy.example.com").
 	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
+	// devyre: passwordless access for allowed tailnet devices and this PC (devyre_tailnet_auth.go).
+	TailnetAuth TailnetAuthConfig `yaml:"tailnet-auth" json:"tailnet-auth"`
 }
 
 // QuotaExceeded defines the behavior when API quota limits are exceeded.

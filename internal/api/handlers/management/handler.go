@@ -270,6 +270,12 @@ func (h *Handler) Middleware() gin.HandlerFunc {
 		c.Header("X-CPA-BUILD-DATE", buildinfo.BuildDate)
 		c.Header("X-CPA-SUPPORT-PLUGIN", pluginhost.SupportPluginHeaderValue())
 
+		// devyre: allowed tailnet devices and this PC skip the key (devyre_tailnet_auth.go).
+		if h.devyreTailnetAuthorize(c) {
+			c.Next()
+			return
+		}
+
 		clientIP := c.ClientIP()
 		localClient := clientIP == "127.0.0.1" || clientIP == "::1"
 
@@ -369,7 +375,7 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	}
 
 	if provided == "" {
-		fail()
+		// devyre: a missing key is not a guess, so it never counts toward the ban.
 		return false, http.StatusUnauthorized, "missing management key"
 	}
 

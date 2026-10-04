@@ -32,6 +32,7 @@ func (s *Server) registerManagementV8Routes() {
 	v8.POST("/routing/cooldown/reset", s.mgmt.ResetQuota)
 	v8.GET("/routing/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 	v8.GET("/routing/quota-readings", s.mgmt.GetRoutingQuotaReadings) // devyre: expiring-first readings
+	v8.GET("/auth/session", s.mgmt.GetAuthSession)                    // devyre: tailnet passwordless session probe
 
 	v8.GET("/observability/logs", s.mgmt.GetLogs)
 	v8.DELETE("/observability/logs", s.mgmt.DeleteLogs)
