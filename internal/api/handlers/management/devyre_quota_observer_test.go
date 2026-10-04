@@ -311,6 +311,36 @@ func TestQuotaObserverCountsEveryClaudeUsageCallForTheMinGap(t *testing.T) {
 	}
 }
 
+// Each tick drops the readings of credentials the manager no longer lists,
+// whether or not the poller is enabled.
+func TestQuotaObserverForgetsRemovedCredentials(t *testing.T) {
+	t.Parallel()
+	hs, claudeB := newObserverHarness(t, config.RoutingConfig{Strategy: "round-robin"})
+	week := quotareading.Window{ID: "7d", Kind: quotareading.KindLong, UsedPercent: 10, Length: 7 * 24 * time.Hour, ObservedAt: usageTestStart, Source: quotareading.SourcePoll}
+	for _, authID := range []string{hs.claude.ID, claudeB.ID, "claude-removed.json"} {
+		hs.readings.Put(authID, "claude", []quotareading.Window{week})
+	}
+
+	hs.tick(t, "poller off", 0, 0)
+	if windows := hs.readings.Get("claude-removed.json").Windows; len(windows) != 0 {
+		t.Fatalf("a credential missing from the manager kept its readings: %+v", windows)
+	}
+	for _, authID := range []string{hs.claude.ID, claudeB.ID} {
+		if windows := hs.readings.Get(authID).Windows; len(windows) != 1 {
+			t.Fatalf("registered credential %s lost its readings: %+v", authID, windows)
+		}
+	}
+
+	hs.manager.Remove(context.Background(), claudeB.ID)
+	hs.tick(t, "after removing claude-b", 0, 0)
+	if windows := hs.readings.Get(claudeB.ID).Windows; len(windows) != 0 {
+		t.Fatalf("removed credential kept its readings: %+v", windows)
+	}
+	if windows := hs.readings.Get(hs.claude.ID).Windows; len(windows) != 1 {
+		t.Fatalf("claude-a lost its readings: %+v", windows)
+	}
+}
+
 func TestQuotaObserverSkipsCredentialsInBackoff(t *testing.T) {
 	t.Parallel()
 	hs := newUsageCacheHarness(t, config.RoutingConfig{

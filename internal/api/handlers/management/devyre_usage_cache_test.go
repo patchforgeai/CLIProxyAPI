@@ -975,3 +975,38 @@ func TestUsageCacheHandlerUsesDefaultReadingsStore(t *testing.T) {
 		t.Fatalf("targets = %v, want the production allowlist", cache.targets)
 	}
 }
+
+// evaluate is how expiring-first sees auth for model at the harness clock.
+func (hs *usageCacheHarness) evaluate(auth *coreauth.Auth, model string) quotareading.Evaluation {
+	now := hs.clock.Now()
+	reading := quotareading.Effective(hs.readings, auth.ID, auth.Provider, nil, time.Time{}, now)
+	return quotareading.Evaluate(reading, model, now, config.ExpiringFirstConfig{}.GatePercent())
+}
+
+// A Codex account can move from {primary 5h, secondary weekly} to {primary
+// weekly, secondary null} without a new login. The secondary window the newer
+// body no longer reports must not stay behind and be ranked as a fresh window.
+func TestUsageCacheUsageBodyReplacesWindowsItNoLongerReports(t *testing.T) {
+	t.Parallel()
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	path := usageTestCodexUsagePath
+	hs.upstream.respondJSON(path, http.StatusOK, usageTestCodexBody)
+	hs.get(t, hs.codex, path)
+	assertUsageReadings(t, hs.readings, hs.codex.ID, quotareading.SourceUsage, usageTestStart, map[string]float64{"primary": 25, "secondary": 60})
+
+	hs.clock.Advance(time.Minute)
+	weeklyPrimary := fmt.Sprintf(`{"rate_limit":{"primary_window":{"used_percent":95,"limit_window_seconds":604800,"reset_at":%d},"secondary_window":null}}`,
+		usageTestStart.Add(6*24*time.Hour).Unix())
+	hs.upstream.respondJSON(path, http.StatusOK, weeklyPrimary)
+	expectUpstream(t, "new layout", hs, path, hs.get(t, hs.codex, path), http.StatusOK, weeklyPrimary, usageCacheMiss, 2)
+	assertUsageReadings(t, hs.readings, hs.codex.ID, quotareading.SourceUsage, hs.clock.Now(), map[string]float64{"primary": 95})
+	if eval := hs.evaluate(hs.codex, "gpt-5.5"); eval.RankWindowID != "primary" {
+		t.Fatalf("evaluation = %+v, want it ranked on the weekly primary", eval)
+	}
+
+	// A 2xx body without the usage shape is not a snapshot and changes nothing.
+	hs.clock.Advance(time.Minute)
+	hs.upstream.respondJSON(path, http.StatusOK, `{"detail":"try again"}`)
+	hs.get(t, hs.codex, path)
+	assertUsageReadings(t, hs.readings, hs.codex.ID, quotareading.SourceUsage, hs.clock.Now().Add(-time.Minute), map[string]float64{"primary": 95})
+}

@@ -408,14 +408,17 @@ func (call *usageCacheCall) finishLocked(entry *usageCacheEntry, result *apiCall
 }
 
 // recordReadings feeds the windows of a successful usage body to the readings
-// store. Profile bodies carry no windows. Parse errors never include the body.
+// store. Only a body with the endpoint's normal usage shape is recorded. It
+// lists every window the provider reports, so it replaces the credential's
+// stored windows and a window it no longer reports is dropped. Profile bodies
+// carry no windows. Parse errors never include the body.
 func (c *usageCache) recordReadings(req usageRequest, body string, now time.Time) {
-	windows, errParse := quotareading.FromUsageBody(req.provider, req.target.canonicalURL, []byte(body), now)
+	windows, ok, errParse := quotareading.UsageSnapshot(req.provider, req.target.canonicalURL, []byte(body), now)
 	if errParse != nil {
 		log.WithError(errParse).WithField("provider", req.provider).Debug("usage cache: usage body not recorded")
 		return
 	}
-	if len(windows) == 0 {
+	if !ok {
 		return
 	}
 	if req.source != "" {
@@ -423,7 +426,7 @@ func (c *usageCache) recordReadings(req usageRequest, body string, now time.Time
 			windows[i].Source = req.source
 		}
 	}
-	c.store().Put(req.authID, req.provider, windows)
+	c.store().Replace(req.authID, req.provider, windows, now)
 }
 
 // clone returns a deep copy so cached responses never share header slices.
