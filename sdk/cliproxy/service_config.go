@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/watcher/synthesizer"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
@@ -29,6 +30,9 @@ type routingRuntimeState struct {
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
+	// devyre: expiring-first settings, plain values so the state stays comparable.
+	expiringFirstGatePercent float64
+	expiringFirstLogPicks    bool
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -46,6 +50,13 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		state.strategy = "weighted-round-robin"
 	case "fill-first", "fillfirst", "ff":
 		state.strategy = "fill-first"
+	}
+	// devyre: the settings are only copied while expiring-first is active, so
+	// editing them under another strategy does not rebuild the selector.
+	if internalconfig.IsExpiringFirstStrategy(cfg.Routing.Strategy) {
+		state.strategy = "expiring-first"
+		state.expiringFirstGatePercent = cfg.Routing.ExpiringFirst.GatePercent()
+		state.expiringFirstLogPicks = cfg.Routing.ExpiringFirst.LogPicks
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
 	if ttl := strings.TrimSpace(cfg.Routing.SessionAffinityTTL); ttl != "" {
@@ -69,6 +80,11 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 		selector = &coreauth.WeightedRoundRobinSelector{}
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
+	case "expiring-first": // devyre
+		selector = &coreauth.ExpiringFirstSelector{
+			GateRemainingPercent: state.expiringFirstGatePercent,
+			LogPicks:             state.expiringFirstLogPicks,
+		}
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}
