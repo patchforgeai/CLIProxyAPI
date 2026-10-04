@@ -4,12 +4,63 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// The selector, usage cache and poller are written against this exact API.
+// These assignments fail to compile if it drifts.
+var (
+	_ func(ExpiringFirstConfig) float64     = ExpiringFirstConfig.GatePercent
+	_ func(UsageCacheConfig) bool           = UsageCacheConfig.IsEnabled
+	_ func(UsageCacheConfig) time.Duration  = UsageCacheConfig.ClaudeUsageTTLDuration
+	_ func(UsageCacheConfig) time.Duration  = UsageCacheConfig.CodexUsageTTLDuration
+	_ func(UsageCacheConfig) time.Duration  = UsageCacheConfig.RefreshFloorDuration
+	_ func(QuotaPollerConfig) time.Duration = QuotaPollerConfig.ClaudeIntervalDuration
+	_ func(QuotaPollerConfig) time.Duration = QuotaPollerConfig.ClaudeMinGapDuration
+	_ func(QuotaPollerConfig) time.Duration = QuotaPollerConfig.CodexIntervalDuration
+	_ func(string) bool                     = IsExpiringFirstStrategy
+	_ func(RoutingConfig) bool              = RoutingConfig.QuotaPollerEnabled
+)
+
+var _ = RoutingConfig{
+	ExpiringFirst: ExpiringFirstConfig{GateRemainingPercent: (*float64)(nil), LogPicks: false},
+	QuotaObservation: QuotaObservationConfig{
+		UsageCache: UsageCacheConfig{Enabled: (*bool)(nil), ClaudeUsageTTL: "", CodexUsageTTL: "", RefreshFloor: ""},
+		Poller:     QuotaPollerConfig{Enabled: (*bool)(nil), ClaudeInterval: "", ClaudeMinGap: "", CodexInterval: ""},
+	},
+}
+
+func TestExpiringFirstRoutingConfigTags(t *testing.T) {
+	want := map[reflect.Type][]string{
+		reflect.TypeOf(ExpiringFirstConfig{}):    {"gate-remaining-percent,omitempty", "log-picks,omitempty"},
+		reflect.TypeOf(UsageCacheConfig{}):       {"enabled,omitempty", "claude-usage-ttl,omitempty", "codex-usage-ttl,omitempty", "refresh-floor,omitempty"},
+		reflect.TypeOf(QuotaPollerConfig{}):      {"enabled,omitempty", "claude-interval,omitempty", "claude-min-gap,omitempty", "codex-interval,omitempty"},
+		reflect.TypeOf(QuotaObservationConfig{}): {"usage-cache,omitempty", "poller,omitempty"},
+	}
+	for typ, tags := range want {
+		if typ.NumField() != len(tags) {
+			t.Fatalf("%s has %d fields, want %d", typ.Name(), typ.NumField(), len(tags))
+		}
+		for i, tag := range tags {
+			field := typ.Field(i)
+			if field.Tag.Get("yaml") != tag || field.Tag.Get("json") != tag {
+				t.Fatalf("%s.%s tags = yaml:%q json:%q, want %q", typ.Name(), field.Name, field.Tag.Get("yaml"), field.Tag.Get("json"), tag)
+			}
+		}
+	}
+	routing := reflect.TypeOf(RoutingConfig{})
+	for name, tag := range map[string]string{"ExpiringFirst": "expiring-first,omitempty", "QuotaObservation": "quota-observation,omitempty"} {
+		field, ok := routing.FieldByName(name)
+		if !ok || field.Tag.Get("yaml") != tag || field.Tag.Get("json") != tag {
+			t.Fatalf("RoutingConfig.%s tags = %q", name, field.Tag)
+		}
+	}
+}
 
 func TestExpiringFirstRoutingConfigDefaults(t *testing.T) {
 	var routing RoutingConfig
