@@ -81,6 +81,19 @@ management:
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
   panel-github-repository: "https://github.com/Devyre/Cli-Proxy-API-Management-Center"
 
+  # Passwordless access for allowed tailnet devices behind tailscale serve and, optionally, this PC.
+  # Every setting defaults to off and every empty list fails closed. Trusted requests skip the
+  # management key (and the API key with proxy-api); everyone else still needs it. Non-browser
+  # clients must send "X-CPA-Keyless: 1" or any Bearer token. Safe only while the server is
+  # reachable solely through loopback and tailscale serve; see devyre/README.md.
+  # tailnet-auth:
+  #   enabled: false          # Master switch.
+  #   allowed-logins: []      # Tailscale-User-Login values allowed without a key; empty = no tailnet trust at all.
+  #   allowed-devices: []     # Tailnet IPs allowed without a key; empty = no tailnet device is keyless.
+  #   allowed-hosts: []       # Request Host names (no port, case-insensitive) keyless requests may target; empty = none.
+  #   allow-local: false      # Trust direct requests from this PC whose Host is localhost, 127.0.0.1 or ::1.
+  #   proxy-api: false        # Also accept trusted requests on the proxy API without an API key.
+
 # Client authentication for the proxy API. These are not upstream provider keys.
 access:
   # API keys for authentication
