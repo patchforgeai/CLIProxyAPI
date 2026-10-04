@@ -296,8 +296,10 @@ type usageCacheCall struct {
 // while waiting for another request's upstream call.
 //
 //   - hit: a fresh cached 2xx is served.
-//   - miss: one caller leads the upstream call; others wait for its result,
-//     unless that call started before a write made the key stale.
+//   - miss: one caller leads the upstream call; others wait for its result.
+//     A call that started before a write made the key stale is not waited
+//     for: the first request after the write leads a new upstream call in its
+//     place, and the requests after it wait for that one.
 //   - backoff: during a Claude usage backoff upstream is not called; the cached
 //     2xx is served as stale, otherwise the stored 429.
 //   - bypass: req.refresh forces an upstream call once the newest upstream
@@ -308,8 +310,8 @@ func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.Usa
 		ctx = context.Background()
 	}
 	if !cfg.IsEnabled() {
-		now := c.now()
 		c.mu.Lock()
+		now := c.now()
 		c.noteUpstreamCallLocked(c.entryLocked(req.key, req.authIndex), req, now)
 		c.mu.Unlock()
 		return &usageCacheCall{cache: c, req: req, observeOnly: true, started: now}
@@ -317,12 +319,18 @@ func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.Usa
 	ttl, floor := req.target.ttl(cfg), cfg.RefreshFloorDuration()
 	waited := false
 	for {
-		now := c.now()
 		c.mu.Lock()
+		// Read under the lock, so a request that sees a write's invalidation
+		// never starts before that write: the call it leads stays joinable.
+		now := c.now()
 		entry := c.entryLocked(req.key, req.authIndex)
 		forced := req.refresh && (entry.lastCall.IsZero() || now.Sub(entry.lastCall) >= floor)
 		fresh := entry.cached != nil && !entry.cachedAt.IsZero() && now.Sub(entry.cachedAt) < ttl
 		rejected, backoff := c.backoffLocked(req, now)
+		// joinable: the call in flight started no earlier than the newest write
+		// for the credential. One that started before it may have been
+		// answered before the write took effect.
+		joinable := entry.flight != nil && !entry.flight.started.Before(entry.invalidatedAt)
 		switch {
 		case fresh && (!forced || backoff):
 			served := entry.cached.withUsageCacheLabel(usageCacheHit)
@@ -335,7 +343,7 @@ func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.Usa
 			}
 			c.mu.Unlock()
 			return &usageCacheCall{cache: c, req: req, served: &served}
-		case entry.flight != nil && !waited && !entry.flight.started.Before(entry.invalidatedAt):
+		case joinable && !waited:
 			flight := entry.flight
 			hook := c.testHookFollowerWaiting
 			c.mu.Unlock()
@@ -360,7 +368,12 @@ func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.Usa
 		if forced {
 			call.label = usageCacheBypass
 		}
-		if entry.flight == nil {
+		// Lead when no call is in flight, or in place of one that started
+		// before a write, so the requests after the write wait for this call;
+		// the older call still answers its own followers (finishLocked). A
+		// request that already waited once goes upstream on its own beside a
+		// joinable call.
+		if !joinable {
 			call.flight = &usageFlight{done: make(chan struct{}), started: now}
 			entry.flight = call.flight
 		}
@@ -498,7 +511,10 @@ func (call *usageCacheCall) release() {
 }
 
 // finishLocked marks the call done and hands result to the requests waiting
-// on its upstream call. Callers hold the cache mutex.
+// on its upstream call. It clears the key's flight only while that is still
+// this call's own: after a write, a later request may have replaced it with
+// a new upstream call (begin), which its own followers keep waiting for.
+// Callers hold the cache mutex.
 func (call *usageCacheCall) finishLocked(entry *usageCacheEntry, result *apiCallResponse) {
 	call.done = true
 	flight := call.flight
@@ -521,8 +537,9 @@ func (call *usageCacheCall) finishLocked(entry *usageCacheEntry, result *apiCall
 // upstream whatever the TTL and the refresh floor, and the stale body stays as
 // the fallback should that call fail. Call times and the Claude 429 backoff
 // are kept, so the provider's rate limiter stays protected. A call already in
-// flight is not joined (begin), and its body is kept only as a fallback
-// (complete).
+// flight is not joined: the next request for its key leads a new upstream
+// call in its place (begin), and the older call's body is kept only as a
+// fallback (complete).
 func (c *usageCache) invalidate(authIndex string, now time.Time) {
 	if authIndex == "" {
 		return
