@@ -1,0 +1,346 @@
+package quotareading
+
+import (
+	"fmt"
+	"math"
+	"strconv"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestQuotaReadingStorePutKeepsNewestPerWindow(t *testing.T) {
+	t0 := testNow.Add(-time.Hour)
+	t1 := testNow
+	week := Window{ID: "7d", Kind: KindLong, UsedPercent: 40, Length: 7 * 24 * time.Hour, ObservedAt: t1, Source: SourceUsage}
+	short := Window{ID: "5h", Kind: KindShort, UsedPercent: 10, Length: 5 * time.Hour, ObservedAt: t0, Source: SourceHeader}
+
+	tests := []struct {
+		name string
+		puts [][]Window
+		want map[string]float64 // used percent per window ID
+	}{
+		{
+			name: "older observation is ignored",
+			puts: [][]Window{{week, short}, {withUsage(week, 99, t0)}},
+			want: map[string]float64{"7d": 40, "5h": 10},
+		},
+		{
+			name: "equal observation replaces",
+			puts: [][]Window{{week, short}, {withUsage(week, 55, t1)}},
+			want: map[string]float64{"7d": 55, "5h": 10},
+		},
+		{
+			name: "newer observation replaces only its own window",
+			puts: [][]Window{{week, short}, {withUsage(short, 70, t1)}},
+			want: map[string]float64{"7d": 40, "5h": 70},
+		},
+		{
+			name: "out of order puts converge on the newest",
+			puts: [][]Window{{withUsage(week, 80, t1.Add(time.Minute))}, {week}, {withUsage(week, 5, t0)}},
+			want: map[string]float64{"7d": 80},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore()
+			for _, put := range tc.puts {
+				store.Put("auth-a", "claude", put)
+			}
+			got := store.Get("auth-a")
+			if got.AuthID != "auth-a" || got.Provider != "claude" {
+				t.Fatalf("reading identity = %q/%q", got.AuthID, got.Provider)
+			}
+			used := map[string]float64{}
+			for _, w := range got.Windows {
+				used[w.ID] = w.UsedPercent
+			}
+			if fmt.Sprint(used) != fmt.Sprint(tc.want) {
+				t.Fatalf("used = %v, want %v", used, tc.want)
+			}
+		})
+	}
+}
+
+func withUsage(w Window, used float64, observedAt time.Time) Window {
+	w.UsedPercent = used
+	w.ObservedAt = observedAt
+	return w
+}
+
+func TestQuotaReadingStoreSanitizesInput(t *testing.T) {
+	store := NewStore()
+	store.Put("", "claude", []Window{{ID: "7d", UsedPercent: 10, ObservedAt: testNow}})
+	store.Put("auth-a", " Codex ", []Window{
+		{ID: "", UsedPercent: 10, ObservedAt: testNow},
+		{ID: "primary", UsedPercent: math.NaN(), ObservedAt: testNow},
+		{ID: "secondary", UsedPercent: 150, ObservedAt: testNow},
+		{ID: "tertiary", UsedPercent: -3, ObservedAt: testNow},
+	})
+	store.Put("auth-b", "codex", nil)
+
+	snapshot := store.Snapshot()
+	if len(snapshot) != 1 || snapshot[0].AuthID != "auth-a" || snapshot[0].Provider != "codex" {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
+	got := snapshot[0].Windows
+	if len(got) != 2 || got[0].ID != "secondary" || got[0].UsedPercent != 100 || got[1].ID != "tertiary" || got[1].UsedPercent != 0 {
+		t.Fatalf("sanitized windows = %v", formatWindows(got))
+	}
+	if reading := store.Get("missing"); reading.AuthID != "missing" || reading.Provider != "" || reading.Windows != nil {
+		t.Fatalf("unknown credential reading = %+v", reading)
+	}
+}
+
+func TestQuotaReadingStoreForgetAndSnapshotCopies(t *testing.T) {
+	store := NewStore()
+	store.Put("auth-c", "codex", []Window{{ID: "primary", UsedPercent: 30, ObservedAt: testNow}})
+	store.Put("auth-a", "claude", []Window{{ID: "7d", UsedPercent: 10, ObservedAt: testNow}, {ID: "5h", UsedPercent: 20, ObservedAt: testNow}})
+	store.Put("auth-b", "claude", []Window{{ID: "7d", UsedPercent: 50, ObservedAt: testNow}})
+
+	snapshot := store.Snapshot()
+	var order []string
+	for _, reading := range snapshot {
+		order = append(order, reading.AuthID)
+	}
+	if fmt.Sprint(order) != "[auth-a auth-b auth-c]" {
+		t.Fatalf("snapshot order = %v", order)
+	}
+	if ids := []string{snapshot[0].Windows[0].ID, snapshot[0].Windows[1].ID}; fmt.Sprint(ids) != "[5h 7d]" {
+		t.Fatalf("windows are not sorted by ID: %v", ids)
+	}
+
+	snapshot[0].Windows[0].UsedPercent = 99
+	snapshot[0].Windows = append(snapshot[0].Windows, Window{ID: "extra"})
+	got := store.Get("auth-a")
+	got.Windows[1].UsedPercent = 77
+	again := store.Get("auth-a")
+	if len(again.Windows) != 2 || again.Windows[0].UsedPercent != 20 || again.Windows[1].UsedPercent != 10 {
+		t.Fatalf("store was mutated through a returned copy: %v", formatWindows(again.Windows))
+	}
+
+	store.Forget("auth-a")
+	store.Forget("never-stored")
+	if reading := store.Get("auth-a"); len(reading.Windows) != 0 || reading.Provider != "" {
+		t.Fatalf("forgotten credential still has readings: %+v", reading)
+	}
+	if len(store.Snapshot()) != 2 {
+		t.Fatalf("forget removed more than one credential")
+	}
+}
+
+func TestQuotaReadingStoreNilAndDefault(t *testing.T) {
+	var nilStore *Store
+	nilStore.Put("auth-a", "claude", []Window{{ID: "7d", ObservedAt: testNow}})
+	nilStore.Forget("auth-a")
+	if got := nilStore.Get("auth-a"); got.AuthID != "auth-a" || got.Windows != nil {
+		t.Fatalf("nil store Get = %+v", got)
+	}
+	if got := nilStore.Snapshot(); got != nil {
+		t.Fatalf("nil store Snapshot = %+v", got)
+	}
+	if Default() == nil || Default() != Default() {
+		t.Fatal("Default must return one process-wide store")
+	}
+}
+
+func TestQuotaReadingStoreConcurrentAccess(t *testing.T) {
+	store := NewStore()
+	var wg sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		wg.Add(1)
+		go func(worker int) {
+			defer wg.Done()
+			authID := "auth-" + strconv.Itoa(worker%3)
+			for i := 0; i < 200; i++ {
+				observed := testNow.Add(time.Duration(i) * time.Second)
+				store.Put(authID, "claude", []Window{{ID: "7d", Kind: KindLong, UsedPercent: float64(i % 100), ObservedAt: observed}})
+				_ = store.Get(authID)
+				_ = store.Snapshot()
+				_ = Effective(store, authID, "claude", map[string]string{"Anthropic-Ratelimit-Unified-5h-Utilization": "0.5"}, observed, testNow)
+			}
+		}(worker)
+	}
+	wg.Wait()
+	for _, reading := range store.Snapshot() {
+		if len(reading.Windows) != 1 || !reading.Windows[0].ObservedAt.Equal(testNow.Add(199*time.Second)) {
+			t.Fatalf("reading %s did not converge on the newest observation: %v", reading.AuthID, formatWindows(reading.Windows))
+		}
+	}
+}
+
+func TestQuotaReadingEffectiveMergesNewestPerWindow(t *testing.T) {
+	headerAt := testNow.Add(-2 * time.Minute)
+	reset7d := testNow.Add(3 * 24 * time.Hour).Truncate(time.Second)
+	reset5h := testNow.Add(2 * time.Hour).Truncate(time.Second)
+	signals := map[string]string{
+		"Anthropic-Ratelimit-Unified-5h-Utilization": "0.30",
+		"Anthropic-Ratelimit-Unified-5h-Reset":       strconv.FormatInt(reset5h.Unix(), 10),
+		"Anthropic-Ratelimit-Unified-7d-Utilization": "0.60",
+		"Anthropic-Ratelimit-Unified-7d-Reset":       strconv.FormatInt(reset7d.Unix(), 10),
+	}
+
+	tests := []struct {
+		name       string
+		stored     []Window
+		provider   string
+		want5h     float64
+		want7d     float64
+		wantSource Source
+		wantOpus   bool
+	}{
+		{
+			name: "newer usage window beats older headers",
+			stored: []Window{
+				{ID: "7d", Kind: KindLong, UsedPercent: 64, ResetsAt: reset7d, Length: 7 * 24 * time.Hour, ObservedAt: headerAt.Add(time.Minute), Source: SourceUsage},
+				{ID: "7d:opus", Kind: KindScoped, Model: "opus", UsedPercent: 5, Length: 7 * 24 * time.Hour, ObservedAt: headerAt.Add(-time.Hour), Source: SourceUsage},
+			},
+			provider: "claude",
+			want5h:   30, want7d: 64, wantSource: SourceUsage, wantOpus: true,
+		},
+		{
+			name: "newer headers beat an older usage window",
+			stored: []Window{
+				{ID: "7d", Kind: KindLong, UsedPercent: 64, ResetsAt: reset7d, Length: 7 * 24 * time.Hour, ObservedAt: headerAt.Add(-time.Minute), Source: SourcePoll},
+			},
+			provider: "claude",
+			want5h:   30, want7d: 60, wantSource: SourceHeader,
+		},
+		{
+			name: "headers win a tie",
+			stored: []Window{
+				{ID: "7d", Kind: KindLong, UsedPercent: 64, ResetsAt: reset7d, Length: 7 * 24 * time.Hour, ObservedAt: headerAt, Source: SourceUsage},
+			},
+			provider: "claude",
+			want5h:   30, want7d: 60, wantSource: SourceHeader,
+		},
+		{
+			name: "stored provider selects the parser when none is given",
+			stored: []Window{
+				{ID: "7d", Kind: KindLong, UsedPercent: 64, ResetsAt: reset7d, Length: 7 * 24 * time.Hour, ObservedAt: headerAt.Add(-time.Minute), Source: SourceUsage},
+			},
+			provider: "",
+			want5h:   30, want7d: 60, wantSource: SourceHeader,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore()
+			store.Put("auth-a", "claude", tc.stored)
+			got := Effective(store, "auth-a", tc.provider, signals, headerAt, testNow)
+			if got.AuthID != "auth-a" || got.Provider != "claude" {
+				t.Fatalf("identity = %q/%q", got.AuthID, got.Provider)
+			}
+			byID := map[string]Window{}
+			for i, w := range got.Windows {
+				if i > 0 && got.Windows[i-1].ID >= w.ID {
+					t.Fatalf("windows not sorted: %v", formatWindows(got.Windows))
+				}
+				byID[w.ID] = w
+			}
+			if byID["5h"].UsedPercent != tc.want5h || byID["7d"].UsedPercent != tc.want7d || byID["7d"].Source != tc.wantSource {
+				t.Fatalf("merged = %v", formatWindows(got.Windows))
+			}
+			if _, ok := byID["7d:opus"]; ok != tc.wantOpus {
+				t.Fatalf("opus window present = %v, want %v", ok, tc.wantOpus)
+			}
+			if stored := store.Get("auth-a"); len(stored.Windows) != len(tc.stored) {
+				t.Fatalf("Effective wrote header windows into the store: %v", formatWindows(stored.Windows))
+			}
+		})
+	}
+}
+
+func TestQuotaReadingEffectiveNormalizesPassedResets(t *testing.T) {
+	week := 7 * 24 * time.Hour
+	tests := []struct {
+		name       string
+		window     Window
+		wantUsed   float64
+		wantResets time.Time
+	}{
+		{
+			name:       "future reset is untouched",
+			window:     Window{ID: "7d", Kind: KindLong, UsedPercent: 90, ResetsAt: testNow.Add(time.Hour), Length: week},
+			wantUsed:   90,
+			wantResets: testNow.Add(time.Hour),
+		},
+		{
+			name:       "passed reset rolls forward one period",
+			window:     Window{ID: "7d", Kind: KindLong, UsedPercent: 90, ResetsAt: testNow.Add(-time.Hour), Length: week},
+			wantUsed:   0,
+			wantResets: testNow.Add(week - time.Hour),
+		},
+		{
+			name:       "reset exactly now counts as passed",
+			window:     Window{ID: "5h", Kind: KindShort, UsedPercent: 100, ResetsAt: testNow, Length: 5 * time.Hour},
+			wantUsed:   0,
+			wantResets: testNow.Add(5 * time.Hour),
+		},
+		{
+			name:       "several missed periods roll past now",
+			window:     Window{ID: "5h", Kind: KindShort, UsedPercent: 100, ResetsAt: testNow.Add(-11 * time.Hour), Length: 5 * time.Hour},
+			wantUsed:   0,
+			wantResets: testNow.Add(4 * time.Hour),
+		},
+		{
+			name:       "exact multiple of the length still lands after now",
+			window:     Window{ID: "5h", Kind: KindShort, UsedPercent: 100, ResetsAt: testNow.Add(-10 * time.Hour), Length: 5 * time.Hour},
+			wantUsed:   0,
+			wantResets: testNow.Add(5 * time.Hour),
+		},
+		{
+			name:       "unknown length makes the next reset unknown",
+			window:     Window{ID: "primary", Kind: KindShort, UsedPercent: 100, ResetsAt: testNow.Add(-time.Minute)},
+			wantUsed:   0,
+			wantResets: time.Time{},
+		},
+		{
+			name:       "unknown reset is untouched",
+			window:     Window{ID: "7d", Kind: KindLong, UsedPercent: 35, Length: week},
+			wantUsed:   35,
+			wantResets: time.Time{},
+		},
+		{
+			name:       "a tiny length rolls forward without overflow",
+			window:     Window{ID: "5h", Kind: KindShort, UsedPercent: 100, ResetsAt: time.Unix(1, 0), Length: time.Nanosecond},
+			wantUsed:   0,
+			wantResets: testNow.Add(time.Nanosecond),
+		},
+		{
+			name:       "a reset more than a century old becomes unknown",
+			window:     Window{ID: "5h", Kind: KindShort, UsedPercent: 100, ResetsAt: time.Date(1900, 1, 1, 0, 0, 0, 0, time.UTC), Length: 5 * time.Hour},
+			wantUsed:   0,
+			wantResets: time.Time{},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore()
+			window := tc.window
+			window.ObservedAt = testNow.Add(-2 * time.Hour)
+			store.Put("auth-a", "claude", []Window{window})
+			got := Effective(store, "auth-a", "claude", nil, time.Time{}, testNow)
+			if len(got.Windows) != 1 {
+				t.Fatalf("windows = %v", formatWindows(got.Windows))
+			}
+			if got.Windows[0].UsedPercent != tc.wantUsed || !got.Windows[0].ResetsAt.Equal(tc.wantResets) {
+				t.Fatalf("normalized = %s, want used %v resets %v", formatWindow(got.Windows[0]), tc.wantUsed, tc.wantResets)
+			}
+			if stored := store.Get("auth-a").Windows[0]; stored.UsedPercent != tc.window.UsedPercent || !stored.ResetsAt.Equal(tc.window.ResetsAt) {
+				t.Fatalf("normalization mutated the store: %s", formatWindow(stored))
+			}
+		})
+	}
+}
+
+func TestQuotaReadingEffectiveWithoutStore(t *testing.T) {
+	signals := map[string]string{"X-Codex-Primary-Used-Percent": "25", "X-Codex-Primary-Window-Minutes": "300"}
+	got := Effective(nil, "auth-x", "codex", signals, testNow, testNow)
+	if got.AuthID != "auth-x" || got.Provider != "codex" || len(got.Windows) != 1 || got.Windows[0].UsedPercent != 25 {
+		t.Fatalf("Effective(nil store) = %+v", got)
+	}
+	if empty := Effective(NewStore(), "auth-y", "", nil, time.Time{}, testNow); empty.AuthID != "auth-y" || len(empty.Windows) != 0 {
+		t.Fatalf("Effective without data = %+v", empty)
+	}
+}
