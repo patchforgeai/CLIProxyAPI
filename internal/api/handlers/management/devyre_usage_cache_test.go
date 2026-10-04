@@ -661,7 +661,7 @@ func TestUsageCacheNeverCachesPostsOrOtherURLs(t *testing.T) {
 	}
 }
 
-func TestDefaultUsageTargetsAllowlistExactUsageURLs(t *testing.T) {
+func TestUsageCacheDefaultAllowlistIsExactUsageURLs(t *testing.T) {
 	t.Parallel()
 	want := map[string]usageTarget{
 		"https://api.anthropic.com/api/oauth/usage":   {endpoint: usageEndpointClaudeUsage, canonicalURL: quotareading.ClaudeUsageURL},
@@ -893,7 +893,7 @@ func TestUsageCacheCanceledFollowerStopsWaiting(t *testing.T) {
 	}
 }
 
-func TestClaudeUsageBackoffDoublesToCap(t *testing.T) {
+func TestUsageCacheClaudeBackoffDoublesToCap(t *testing.T) {
 	t.Parallel()
 	want := []time.Duration{5 * time.Minute, 10 * time.Minute, 20 * time.Minute, 40 * time.Minute, 60 * time.Minute, 60 * time.Minute}
 	for i, backoff := range want {
@@ -960,7 +960,7 @@ func TestUsageCacheNilCallIsPassThrough(t *testing.T) {
 	call.release()
 }
 
-func TestHandlerUsesDefaultReadingsStore(t *testing.T) {
+func TestUsageCacheHandlerUsesDefaultReadingsStore(t *testing.T) {
 	t.Parallel()
 	h := &Handler{}
 	t.Cleanup(func() { devyreStates.Delete(h) })

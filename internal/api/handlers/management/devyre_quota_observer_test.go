@@ -30,7 +30,7 @@ func calledAt(at time.Time) func(*quotaPollCandidate) {
 	return func(c *quotaPollCandidate) { c.lastCall = at }
 }
 
-func TestNextPolls(t *testing.T) {
+func TestQuotaObserverNextPolls(t *testing.T) {
 	t.Parallel()
 	now := usageTestStart
 	ago := func(d time.Duration) time.Time { return now.Add(-d) }
@@ -152,7 +152,7 @@ func TestNextPolls(t *testing.T) {
 	}
 }
 
-func TestQuotaPollCandidatesUseEffectiveReadings(t *testing.T) {
+func TestQuotaObserverCandidatesUseEffectiveReadings(t *testing.T) {
 	t.Parallel()
 	clock := newUsageTestClock()
 	store := quotareading.NewStore()
@@ -393,7 +393,7 @@ func TestQuotaObserverPollsWithCacheDisabled(t *testing.T) {
 	hs.tick(t, "t0+1m: min gap and per-credential interval still apply", 1, 1)
 }
 
-func TestQuotaPollHeaders(t *testing.T) {
+func TestQuotaObserverPollHeaders(t *testing.T) {
 	t.Parallel()
 	withIDToken := usageTestCodexAuth("codex-c.json", "codex-token", "acc-from-id-token")
 	withIDToken.Metadata["account_id"] = "acc-from-metadata"
