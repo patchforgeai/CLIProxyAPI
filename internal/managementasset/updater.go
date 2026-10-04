@@ -26,8 +26,8 @@ import (
 )
 
 const (
-	defaultManagementReleaseURL  = "https://api.github.com/repos/router-for-me/Cli-Proxy-API-Management-Center/releases/latest"
-	defaultManagementFallbackURL = "https://cpamc.router-for.me/"
+	defaultManagementReleaseURL  = "https://api.github.com/repos/Devyre/Cli-Proxy-API-Management-Center/releases/latest"
+	defaultManagementFallbackURL = "https://github.com/Devyre/Cli-Proxy-API-Management-Center/releases/latest/download/management.html" // devyre: never fall back to the stock panel
 	managementAssetName          = "management.html"
 	httpUserAgent                = "CLIProxyAPI-management-updater"
 	managementSyncMinInterval    = 30 * time.Second
