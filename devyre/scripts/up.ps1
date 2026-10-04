@@ -5,12 +5,17 @@
 
 .DESCRIPTION
   Builds cpa-devyre:current with docker compose, also tags it cpa-devyre:<git sha> for
-  rollback (cpa-devyre:<sha>-dirty when tracked files have local changes), runs
-  docker compose up -d, then waits until the server answers /healthz and serves the
-  management panel on http://127.0.0.1:8317.
+  rollback (cpa-devyre:<sha>-dirty when tracked files have local changes), recreates the cpa
+  container with docker compose up -d --force-recreate, then waits until the server answers
+  /healthz and serves the management panel on http://127.0.0.1:8317.
+
+  The container is always recreated, even when the image and compose file are unchanged:
+  the running server does not see host-side edits to config.yaml or auths\ (Docker Desktop
+  delivers no file events for bind mounts), so a restart is how such edits take effect.
 
 .PARAMETER NoBuild
-  Restart with the existing cpa-devyre:current image (after a rollback or a secret rotation).
+  Restart with the existing cpa-devyre:current image (after a rollback, or to apply host-side
+  edits to config.yaml).
 #>
 [CmdletBinding()]
 param([switch]$NoBuild)
@@ -45,7 +50,9 @@ if (-not $NoBuild) {
   if ($LASTEXITCODE -ne 0) { throw "docker tag cpa-devyre:$imageTag failed." }
 }
 
-& docker compose -f $compose --env-file $envFile up -d
+# --force-recreate: compose leaves a running container alone when nothing in its definition
+# changed, and the server would keep the config it loaded at start.
+& docker compose -f $compose --env-file $envFile up -d --force-recreate
 if ($LASTEXITCODE -ne 0) { throw 'docker compose up failed.' }
 
 function Test-CpaUrl([string]$Url) {
