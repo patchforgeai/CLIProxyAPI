@@ -807,11 +807,12 @@ func TestUsageCacheKeyIgnoresCallerHeadersAndRoute(t *testing.T) {
 // usageTestRequest is a cache-level request for the leader/follower tests.
 func usageTestRequest() usageRequest {
 	return usageRequest{
-		key:      usageCacheKey("idx", quotareading.ClaudeUsageURL),
-		target:   usageTarget{endpoint: usageEndpointClaudeUsage, canonicalURL: quotareading.ClaudeUsageURL},
-		authID:   "claude-a.json",
-		provider: "claude",
-		source:   quotareading.SourceUsage,
+		key:       usageCacheKey("idx", quotareading.ClaudeUsageURL),
+		authIndex: "idx",
+		target:    usageTarget{endpoint: usageEndpointClaudeUsage, canonicalURL: quotareading.ClaudeUsageURL},
+		authID:    "claude-a.json",
+		provider:  "claude",
+		source:    quotareading.SourceUsage,
 	}
 }
 
@@ -1150,4 +1151,197 @@ func TestUsageCacheClaudeUsageVariantsShareTheBackoff(t *testing.T) {
 	}
 	hs.upstream.respondJSON(plain, http.StatusOK, usageTestClaudeBody)
 	expectUpstream(t, "plain after the backoff", hs, plain, hs.get(t, hs.claude, plain), http.StatusOK, usageTestClaudeBody, usageCacheMiss, 4)
+}
+
+// usageTestCodexBodyWith is a Codex usage body with a five-hour primary window
+// at primaryUsed percent and the weekly secondary window at 60 percent.
+func usageTestCodexBodyWith(primaryUsed int) string {
+	return fmt.Sprintf(`{"rate_limit":{`+
+		`"primary_window":{"used_percent":%d,"limit_window_seconds":18000,"reset_at":%d},`+
+		`"secondary_window":{"used_percent":60,"limit_window_seconds":604800,"reset_at":%d}}}`,
+		primaryUsed, usageTestStart.Add(2*time.Hour).Unix(), usageTestStart.Add(5*24*time.Hour).Unix())
+}
+
+// T3 Code redeems a Codex reset credit with a POST through api-call, then reads
+// the usage again; the panel does the same with a refresh. Both reads must see
+// the post-reset body, so routing stops gating the credential at once.
+func TestUsageCacheWriteMakesTheCredentialStale(t *testing.T) {
+	t.Parallel()
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	usage, consume := usageTestCodexUsagePath, usageTestCodexCreditsPath+"/consume"
+	exhausted, reset := usageTestCodexBodyWith(100), usageTestCodexBodyWith(0)
+	hs.upstream.respondJSON(usage, http.StatusOK, exhausted)
+	expectUpstream(t, "before the reset", hs, usage, hs.get(t, hs.codex, usage), http.StatusOK, exhausted, usageCacheMiss, 1)
+	if eval := hs.evaluate(hs.codex, "gpt-5.5"); eval.Usable || eval.GateReason != "primary exhausted" {
+		t.Fatalf("evaluation before the reset = %+v, want gated on the primary window", eval)
+	}
+
+	hs.clock.Advance(10 * time.Second)
+	hs.upstream.respondJSON(consume, http.StatusOK, `{"code":"reset"}`)
+	redeemed := hs.mustDo(t, usageTestCall{authIndex: hs.codex.Index, method: http.MethodPost, url: hs.url(consume)})
+	if redeemed.code != http.StatusOK || redeemed.resp.StatusCode != http.StatusOK || redeemed.label() != "" {
+		t.Fatalf("redeem: status=%d upstream=%d label=%q", redeemed.code, redeemed.resp.StatusCode, redeemed.label())
+	}
+
+	hs.upstream.respondJSON(usage, http.StatusOK, reset)
+	expectUpstream(t, "plain read after the reset", hs, usage, hs.get(t, hs.codex, usage), http.StatusOK, reset, usageCacheMiss, 2)
+	expectUpstream(t, "refresh inside the floor", hs, usage, hs.refresh(t, hs.codex, usage), http.StatusOK, reset, usageCacheHit, 2)
+	if eval := hs.evaluate(hs.codex, "gpt-5.5"); !eval.Usable {
+		t.Fatalf("evaluation after the reset = %+v, want usable", eval)
+	}
+}
+
+func TestUsageCacheWriteInvalidationRules(t *testing.T) {
+	t.Parallel()
+	usage := usageTestClaudeUsagePath
+	variant := usage + usageTestResetGrantQuery
+	claim := "/api/organizations/org-1/reset_rate_limits"
+	write := func(t *testing.T, hs *usageCacheHarness, auth *coreauth.Auth, method string, status int) {
+		t.Helper()
+		hs.upstream.respondJSON(claim, status, `{"result":"reset"}`)
+		if result := hs.mustDo(t, usageTestCall{authIndex: auth.Index, method: method, url: hs.url(claim)}); result.resp.StatusCode != status {
+			t.Fatalf("%s %s: upstream status = %d, want %d", method, claim, result.resp.StatusCode, status)
+		}
+	}
+
+	t.Run("every URL of the credential goes stale", func(t *testing.T) {
+		t.Parallel()
+		hs := newUsageCacheHarness(t, config.RoutingConfig{})
+		hs.upstream.respondJSON(usage, http.StatusOK, `{"n":1}`)
+		hs.upstream.respondJSON(variant, http.StatusOK, `{"grants":1}`)
+		hs.get(t, hs.claude, usage)
+		hs.get(t, hs.claude, variant)
+		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+			hs.clock.Advance(time.Second)
+			write(t, hs, hs.claude, method, http.StatusOK)
+			calls := hs.upstream.callCount(usage)
+			expectUpstream(t, method+" then usage", hs, usage, hs.get(t, hs.claude, usage), http.StatusOK, `{"n":1}`, usageCacheMiss, calls+1)
+			calls = hs.upstream.callCount(variant)
+			expectUpstream(t, method+" then reset grants", hs, variant, hs.get(t, hs.claude, variant), http.StatusOK, `{"grants":1}`, usageCacheMiss, calls+1)
+		}
+	})
+
+	t.Run("a failed write keeps the cache", func(t *testing.T) {
+		t.Parallel()
+		hs := newUsageCacheHarness(t, config.RoutingConfig{})
+		hs.upstream.respondJSON(usage, http.StatusOK, `{"n":1}`)
+		hs.get(t, hs.claude, usage)
+		write(t, hs, hs.claude, http.MethodPost, http.StatusTooManyRequests)
+		write(t, hs, hs.claude, http.MethodPost, http.StatusInternalServerError)
+		expectUpstream(t, "after failed writes", hs, usage, hs.get(t, hs.claude, usage), http.StatusOK, `{"n":1}`, usageCacheHit, 1)
+	})
+
+	t.Run("a write for another credential keeps this one's cache", func(t *testing.T) {
+		t.Parallel()
+		hs := newUsageCacheHarness(t, config.RoutingConfig{})
+		other := hs.register(t, usageTestClaudeAuth("claude-b.json", "claude-b-token"))
+		hs.upstream.respondJSON(usage, http.StatusOK, `{"n":1}`)
+		hs.get(t, hs.claude, usage)
+		write(t, hs, other, http.MethodPost, http.StatusOK)
+		expectUpstream(t, "after another credential's write", hs, usage, hs.get(t, hs.claude, usage), http.StatusOK, `{"n":1}`, usageCacheHit, 1)
+	})
+
+	t.Run("the Claude backoff outlives a write", func(t *testing.T) {
+		t.Parallel()
+		hs := newUsageCacheHarness(t, config.RoutingConfig{})
+		hs.upstream.respondJSON(usage, http.StatusOK, `{"n":1}`)
+		hs.get(t, hs.claude, usage)
+		hs.clock.Advance(5 * time.Minute)
+		hs.upstream.respondJSON(usage, http.StatusTooManyRequests, `{"error":"rate_limited"}`)
+		expectUpstream(t, "429", hs, usage, hs.get(t, hs.claude, usage), http.StatusOK, `{"n":1}`, usageCacheStale, 2)
+		write(t, hs, hs.claude, http.MethodPost, http.StatusOK)
+		expectUpstream(t, "refresh after a write in backoff", hs, usage, hs.refresh(t, hs.claude, usage), http.StatusOK, `{"n":1}`, usageCacheStale, 2)
+		hs.clock.Advance(5 * time.Minute)
+		hs.upstream.respondJSON(usage, http.StatusOK, `{"n":2}`)
+		expectUpstream(t, "after the backoff", hs, usage, hs.get(t, hs.claude, usage), http.StatusOK, `{"n":2}`, usageCacheMiss, 3)
+	})
+
+	t.Run("a stale body still answers an upstream failure", func(t *testing.T) {
+		t.Parallel()
+		hs := newUsageCacheHarness(t, config.RoutingConfig{})
+		path := usageTestCodexUsagePath
+		hs.upstream.respondJSON(path, http.StatusOK, `{"n":1}`)
+		hs.get(t, hs.codex, path)
+		write(t, hs, hs.codex, http.MethodPost, http.StatusOK)
+		hs.upstream.respondJSON(path, http.StatusBadGateway, `{"error":"upstream"}`)
+		expectUpstream(t, "failure after a write", hs, path, hs.get(t, hs.codex, path), http.StatusOK, `{"n":1}`, usageCacheStale, 2)
+	})
+}
+
+// A write can complete while a read of the credential is in flight. That read
+// may have been answered before the write took effect, so later requests do
+// not wait for it, its body never displaces one read after the write, and its
+// windows are not recorded.
+func TestUsageCacheWriteDuringAnUpstreamCall(t *testing.T) {
+	t.Parallel()
+	before := apiCallResponse{StatusCode: http.StatusOK, Body: usageTestClaudeBody}
+	after := apiCallResponse{StatusCode: http.StatusOK, Body: `{"five_hour":{"utilization":0},"seven_day":{"utilization":40}}`}
+	for _, inFlightLast := range []bool{false, true} {
+		t.Run(fmt.Sprintf("in-flight call finishes last: %v", inFlightLast), func(t *testing.T) {
+			t.Parallel()
+			clock := newUsageTestClock()
+			store := quotareading.NewStore()
+			cache := &usageCache{nowFunc: clock.Now, readings: store}
+			// Waiting would block this goroutine for good, since it also has to
+			// finish the call waited on: cancel instead, so begin returns nil.
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cache.testHookFollowerWaiting = func() {
+				t.Error("a request waited for a call that started before the write")
+				cancel()
+			}
+			req, cfg := usageTestRequest(), config.UsageCacheConfig{}
+			inFlight := cache.begin(context.Background(), req, cfg)
+			clock.Advance(time.Second)
+			cache.invalidate(req.authIndex, clock.Now())
+			fresh := cache.begin(ctx, req, cfg)
+			if fresh == nil || fresh.served != nil || fresh.flight != nil || fresh.label != usageCacheMiss {
+				t.Fatalf("request after the write = %+v, want its own upstream call", fresh)
+			}
+			finish := func(call *usageCacheCall, resp apiCallResponse) {
+				call.complete(resp)
+				call.release()
+			}
+			if inFlightLast {
+				finish(fresh, after)
+				finish(inFlight, before)
+			} else {
+				finish(inFlight, before)
+				cache.mu.Lock()
+				entry := cache.entries[req.key]
+				fallbackOnly := entry.cached != nil && entry.cached.Body == before.Body && entry.cachedAt.IsZero()
+				cache.mu.Unlock()
+				if !fallbackOnly {
+					t.Fatal("the in-flight body must be kept as a fallback only")
+				}
+				finish(fresh, after)
+			}
+			hit := cache.begin(context.Background(), req, cfg)
+			if got, ok := hit.cachedResponse(); !ok || got.Body != after.Body || usageCacheLabel(got) != usageCacheHit {
+				t.Fatalf("served=%v %+v, want the body read after the write", ok, got)
+			}
+			if got := fmt.Sprint(usedByWindow(store, req.authID)); got != "map[5h:0 7d:40]" {
+				t.Fatalf("readings = %s, want only the windows read after the write", got)
+			}
+		})
+	}
+
+	t.Run("cache disabled", func(t *testing.T) {
+		t.Parallel()
+		clock := newUsageTestClock()
+		store := quotareading.NewStore()
+		cache := &usageCache{nowFunc: clock.Now, readings: store}
+		req, disabled := usageTestRequest(), config.UsageCacheConfig{Enabled: new(false)}
+		inFlight := cache.begin(context.Background(), req, disabled)
+		clock.Advance(time.Second)
+		cache.invalidate(req.authIndex, clock.Now())
+		inFlight.complete(before)
+		if windows := store.Get(req.authID).Windows; len(windows) != 0 {
+			t.Fatalf("readings = %+v, want none from a read that straddled a write", windows)
+		}
+		cache.begin(context.Background(), req, disabled).complete(after)
+		if got := fmt.Sprint(usedByWindow(store, req.authID)); got != "map[5h:0 7d:40]" {
+			t.Fatalf("readings = %s, want the windows read after the write", got)
+		}
+	})
 }

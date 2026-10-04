@@ -274,11 +274,12 @@ func (h *Handler) pollUsage(ctx context.Context, cache *usageCache, poll quotaPo
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	logEntry := log.WithFields(log.Fields{"provider": provider, "auth_index": auth.Index})
 	call := cache.begin(ctx, usageRequest{
-		key:      usageCacheKey(auth.Index, poll.url),
-		target:   poll.target,
-		authID:   auth.ID,
-		provider: provider,
-		source:   quotareading.SourcePoll,
+		key:       usageCacheKey(auth.Index, poll.url),
+		authIndex: auth.Index,
+		target:    poll.target,
+		authID:    auth.ID,
+		provider:  provider,
+		source:    quotareading.SourcePoll,
 	}, cfg)
 	if call == nil {
 		return

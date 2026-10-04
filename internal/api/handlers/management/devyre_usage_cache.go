@@ -8,6 +8,8 @@ package management
 // coalesced while an upstream call is in flight, answered from cache when
 // upstream fails, and backed off after a Claude 429. Every successful usage
 // body also feeds the quota readings store that expiring-first routing reads.
+// A successful write through api-call for a credential, such as a redeemed
+// reset, makes that credential's cached responses stale.
 
 import (
 	"context"
@@ -121,9 +123,15 @@ type usageCache struct {
 
 // usageCacheEntry is the state of one key.
 type usageCacheEntry struct {
+	// authIndex is the credential the key belongs to.
+	authIndex string
 	// cached is the newest 2xx response, stored without the annotation.
-	cached   *apiCallResponse
+	cached *apiCallResponse
+	// cachedAt is when cached was stored. It is zero while cached is only a
+	// fallback: after a write for the credential made it stale (invalidate).
 	cachedAt time.Time
+	// invalidatedAt is the newest write for the credential that made cached stale.
+	invalidatedAt time.Time
 	// lastCall is the start of the newest upstream call.
 	lastCall time.Time
 	// backoffUntil and backoffLevel track Claude usage 429s; rejected is the
@@ -139,6 +147,8 @@ type usageCacheEntry struct {
 // usageFlight lets requests wait for the upstream call of another request.
 type usageFlight struct {
 	done chan struct{}
+	// started is when the leader's upstream call began.
+	started time.Time
 	// result is the response the leader returned. It is nil when the leader
 	// ended without one, in which case each waiter proceeds on its own.
 	result *apiCallResponse
@@ -166,14 +176,15 @@ func (c *usageCache) store() *quotareading.Store {
 	return quotareading.Default()
 }
 
-// entryLocked returns the entry of key, creating it. Callers hold c.mu.
-func (c *usageCache) entryLocked(key string) *usageCacheEntry {
+// entryLocked returns the entry of key, creating it for authIndex. Callers
+// hold c.mu.
+func (c *usageCache) entryLocked(key, authIndex string) *usageCacheEntry {
 	if c.entries == nil {
 		c.entries = make(map[string]*usageCacheEntry)
 	}
 	entry := c.entries[key]
 	if entry == nil {
-		entry = &usageCacheEntry{}
+		entry = &usageCacheEntry{authIndex: authIndex}
 		c.entries[key] = entry
 	}
 	return entry
@@ -203,10 +214,11 @@ func (c *usageCache) backoffLocked(req usageRequest, now time.Time) (*apiCallRes
 
 // usageRequest is one allowlisted usage GET.
 type usageRequest struct {
-	key      string
-	target   usageTarget
-	authID   string
-	provider string
+	key       string
+	authIndex string
+	target    usageTarget
+	authID    string
+	provider  string
 	// backoffKey is the key whose entry holds the credential's Claude usage
 	// backoff: the plain usage URL's key for a query variant, empty (the key
 	// itself) otherwise.
@@ -238,7 +250,7 @@ func (r usageRequest) backoffEntryKey() string {
 // backoff. Other variants are not matched.
 func (c *usageCache) usageRequestFor(authIndex, rawURL string) (usageRequest, bool) {
 	if target, ok := c.targets[rawURL]; ok {
-		return usageRequest{key: usageCacheKey(authIndex, rawURL), target: target}, true
+		return usageRequest{key: usageCacheKey(authIndex, rawURL), authIndex: authIndex, target: target}, true
 	}
 	base, _, hasQuery := strings.Cut(rawURL, "?")
 	target, ok := c.targets[base]
@@ -247,6 +259,7 @@ func (c *usageCache) usageRequestFor(authIndex, rawURL string) (usageRequest, bo
 	}
 	return usageRequest{
 		key:        usageCacheKey(authIndex, rawURL),
+		authIndex:  authIndex,
 		target:     target,
 		backoffKey: usageCacheKey(authIndex, base),
 		variant:    true,
@@ -263,8 +276,14 @@ type usageCacheCall struct {
 	// observeOnly is set while the cache is disabled: the call goes upstream
 	// unchanged and only feeds readings and call times.
 	observeOnly bool
+	// invalidates marks a write (POST, PUT, PATCH or DELETE) for the
+	// credential req.authIndex: the call passes through, and a 2xx answer makes
+	// the credential's cached responses stale.
+	invalidates bool
 	// label annotates the response of the upstream call: miss or bypass.
 	label string
+	// started is when the upstream call began.
+	started time.Time
 	// flight is set while this call leads the upstream call of its key.
 	flight *usageFlight
 	done   bool
@@ -277,7 +296,8 @@ type usageCacheCall struct {
 // while waiting for another request's upstream call.
 //
 //   - hit: a fresh cached 2xx is served.
-//   - miss: one caller leads the upstream call; others wait for its result.
+//   - miss: one caller leads the upstream call; others wait for its result,
+//     unless that call started before a write made the key stale.
 //   - backoff: during a Claude usage backoff upstream is not called; the cached
 //     2xx is served as stale, otherwise the stored 429.
 //   - bypass: req.refresh forces an upstream call once the newest upstream
@@ -288,19 +308,20 @@ func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.Usa
 		ctx = context.Background()
 	}
 	if !cfg.IsEnabled() {
+		now := c.now()
 		c.mu.Lock()
-		c.noteUpstreamCallLocked(c.entryLocked(req.key), req, c.now())
+		c.noteUpstreamCallLocked(c.entryLocked(req.key, req.authIndex), req, now)
 		c.mu.Unlock()
-		return &usageCacheCall{cache: c, req: req, observeOnly: true}
+		return &usageCacheCall{cache: c, req: req, observeOnly: true, started: now}
 	}
 	ttl, floor := req.target.ttl(cfg), cfg.RefreshFloorDuration()
 	waited := false
 	for {
 		now := c.now()
 		c.mu.Lock()
-		entry := c.entryLocked(req.key)
+		entry := c.entryLocked(req.key, req.authIndex)
 		forced := req.refresh && (entry.lastCall.IsZero() || now.Sub(entry.lastCall) >= floor)
-		fresh := entry.cached != nil && now.Sub(entry.cachedAt) < ttl
+		fresh := entry.cached != nil && !entry.cachedAt.IsZero() && now.Sub(entry.cachedAt) < ttl
 		rejected, backoff := c.backoffLocked(req, now)
 		switch {
 		case fresh && (!forced || backoff):
@@ -314,7 +335,7 @@ func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.Usa
 			}
 			c.mu.Unlock()
 			return &usageCacheCall{cache: c, req: req, served: &served}
-		case entry.flight != nil && !waited:
+		case entry.flight != nil && !waited && !entry.flight.started.Before(entry.invalidatedAt):
 			flight := entry.flight
 			hook := c.testHookFollowerWaiting
 			c.mu.Unlock()
@@ -335,18 +356,37 @@ func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.Usa
 			waited = true
 			continue
 		}
-		call := &usageCacheCall{cache: c, req: req, label: usageCacheMiss}
+		call := &usageCacheCall{cache: c, req: req, label: usageCacheMiss, started: now}
 		if forced {
 			call.label = usageCacheBypass
 		}
 		if entry.flight == nil {
-			call.flight = &usageFlight{done: make(chan struct{})}
+			call.flight = &usageFlight{done: make(chan struct{}), started: now}
 			entry.flight = call.flight
 		}
 		c.noteUpstreamCallLocked(entry, req, now)
 		c.mu.Unlock()
 		return call
 	}
+}
+
+// beginWrite returns a pass-through call for a write through api-call for the
+// credential authIndex: a POST, PUT, PATCH or DELETE, such as a redeemed Codex
+// reset credit or a claimed Claude reset grant. Its 2xx answer makes the
+// credential's cached responses stale (invalidate). Other methods get nil.
+func (c *usageCache) beginWrite(method, authIndex string) *usageCacheCall {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return &usageCacheCall{cache: c, req: usageRequest{authIndex: authIndex}, invalidates: true}
+	default:
+		return nil
+	}
+}
+
+// passThrough reports whether the call skips the cache: a write, or a read
+// while the cache is disabled.
+func (call *usageCacheCall) passThrough() bool {
+	return call.observeOnly || call.invalidates
 }
 
 // cachedResponse returns the response to send without calling upstream.
@@ -361,7 +401,7 @@ func (call *usageCacheCall) cachedResponse() (apiCallResponse, bool) {
 // A 2xx is stored and its windows are recorded as readings. A Claude usage
 // 429 starts or extends the credential's backoff. A 429 or 5xx is answered
 // with the cached 2xx marked stale when one exists; anything else passes
-// through annotated.
+// through annotated. A write's 2xx makes the credential's cache stale.
 func (call *usageCacheCall) complete(resp apiCallResponse) apiCallResponse {
 	if call == nil || call.done || call.served != nil {
 		return resp
@@ -369,27 +409,40 @@ func (call *usageCacheCall) complete(resp apiCallResponse) apiCallResponse {
 	c := call.cache
 	now := c.now()
 	success := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
-	if call.observeOnly {
+	if call.passThrough() {
 		call.done = true
-		if success {
+		switch {
+		case call.invalidates && success:
+			c.invalidate(call.req.authIndex, now)
+		case call.observeOnly && success && !c.startedBeforeInvalidation(call):
 			c.recordReadings(call.req, resp.Body, now)
 		}
 		return resp
 	}
 	c.mu.Lock()
-	entry := c.entryLocked(call.req.key)
+	entry := c.entryLocked(call.req.key, call.req.authIndex)
+	// straddled: a write for the credential completed while this call was in
+	// flight, so its body may predate the write.
+	straddled := call.started.Before(entry.invalidatedAt)
 	out := resp.withUsageCacheLabel(call.label)
 	switch {
 	case success:
-		stored := resp.clone()
-		entry.cached, entry.cachedAt = &stored, now
+		// A straddled body is kept only as a fallback, and never over a body
+		// read after the write.
+		if !straddled || entry.cachedAt.IsZero() {
+			stored := resp.clone()
+			entry.cached, entry.cachedAt = &stored, now
+			if straddled {
+				entry.cachedAt = time.Time{}
+			}
+		}
 		if shared := c.entries[call.req.backoffEntryKey()]; shared != nil {
 			shared.backoffUntil, shared.backoffLevel, shared.rejected = time.Time{}, 0, nil
 		}
 	case resp.StatusCode == http.StatusTooManyRequests && call.req.target.endpoint == usageEndpointClaudeUsage:
 		// Only a call made after the previous backoff ended escalates it; a
 		// 429 from a call that overlapped the one starting it does not.
-		shared := c.entryLocked(call.req.backoffEntryKey())
+		shared := c.entryLocked(call.req.backoffEntryKey(), call.req.authIndex)
 		if !now.Before(shared.backoffUntil) {
 			shared.backoffLevel++
 			shared.backoffUntil = now.Add(claudeUsageBackoff(shared.backoffLevel))
@@ -406,7 +459,7 @@ func (call *usageCacheCall) complete(resp apiCallResponse) apiCallResponse {
 	}
 	call.finishLocked(entry, &out)
 	c.mu.Unlock()
-	if success {
+	if success && !straddled {
 		c.recordReadings(call.req, resp.Body, now)
 	}
 	return out
@@ -415,12 +468,12 @@ func (call *usageCacheCall) complete(resp apiCallResponse) apiCallResponse {
 // fail records a transport error. It returns the cached 2xx marked stale, or
 // nil when nothing is cached and the caller should report its own error.
 func (call *usageCacheCall) fail() *apiCallResponse {
-	if call == nil || call.done || call.served != nil || call.observeOnly {
+	if call == nil || call.done || call.served != nil || call.passThrough() {
 		return nil
 	}
 	c := call.cache
 	c.mu.Lock()
-	entry := c.entryLocked(call.req.key)
+	entry := c.entryLocked(call.req.key, call.req.authIndex)
 	var out *apiCallResponse
 	if entry.cached != nil {
 		stale := entry.cached.withUsageCacheLabel(usageCacheStale)
@@ -435,12 +488,12 @@ func (call *usageCacheCall) fail() *apiCallResponse {
 // waiting on this call on every exit path, including early error returns;
 // without a result they proceed on their own.
 func (call *usageCacheCall) release() {
-	if call == nil || call.done || call.served != nil || call.observeOnly {
+	if call == nil || call.done || call.served != nil || call.passThrough() {
 		return
 	}
 	c := call.cache
 	c.mu.Lock()
-	call.finishLocked(c.entryLocked(call.req.key), nil)
+	call.finishLocked(c.entryLocked(call.req.key, call.req.authIndex), nil)
 	c.mu.Unlock()
 }
 
@@ -461,6 +514,36 @@ func (call *usageCacheCall) finishLocked(entry *usageCacheEntry, result *apiCall
 		flight.result = &shared
 	}
 	close(flight.done)
+}
+
+// invalidate makes every cached response of the credential authIndex stale
+// after a write for it succeeded at now: the next request for each key goes
+// upstream whatever the TTL and the refresh floor, and the stale body stays as
+// the fallback should that call fail. Call times and the Claude 429 backoff
+// are kept, so the provider's rate limiter stays protected. A call already in
+// flight is not joined (begin), and its body is kept only as a fallback
+// (complete).
+func (c *usageCache) invalidate(authIndex string, now time.Time) {
+	if authIndex == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, entry := range c.entries {
+		if entry.authIndex == authIndex {
+			entry.cachedAt = time.Time{}
+			entry.invalidatedAt = now
+		}
+	}
+}
+
+// startedBeforeInvalidation reports whether a write for the call's credential
+// completed after the call started.
+func (c *usageCache) startedBeforeInvalidation(call *usageCacheCall) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry := c.entries[call.req.key]
+	return entry != nil && call.started.Before(entry.invalidatedAt)
 }
 
 // recordReadings feeds the windows of a successful usage body to the readings
@@ -555,12 +638,14 @@ func (h *Handler) devyreRoutingConfig() config.RoutingConfig {
 	return h.cfg.Routing
 }
 
-// beginUsageCall routes an api-call through the usage cache when it is a GET
-// of an allowlisted URL, or of a query variant of the Claude usage URL, for a
-// registered credential, and returns nil for every other call. A request
-// header X-CPA-Usage-Cache: refresh asks for a bypass.
+// beginUsageCall routes an api-call for a registered credential through the
+// usage cache. A GET of an allowlisted URL, or of a query variant of the
+// Claude usage URL, is cached; a request header X-CPA-Usage-Cache: refresh
+// asks for a bypass. A write (POST, PUT, PATCH or DELETE) passes through and
+// makes the credential's cached responses stale once it succeeds. Every other
+// call gets nil.
 func (h *Handler) beginUsageCall(c *gin.Context, method, rawURL string, auth *coreauth.Auth) *usageCacheCall {
-	if h == nil || c == nil || c.Request == nil || method != http.MethodGet || auth == nil {
+	if h == nil || c == nil || c.Request == nil || auth == nil {
 		return nil
 	}
 	authIndex := strings.TrimSpace(auth.Index)
@@ -568,6 +653,9 @@ func (h *Handler) beginUsageCall(c *gin.Context, method, rawURL string, auth *co
 		return nil
 	}
 	cache := h.devyreUsageCache()
+	if method != http.MethodGet {
+		return cache.beginWrite(method, authIndex)
+	}
 	req, ok := cache.usageRequestFor(authIndex, rawURL)
 	if !ok {
 		return nil
