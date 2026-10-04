@@ -86,7 +86,8 @@ type usageTestResponse struct {
 }
 
 // usageTestUpstream stands in for the provider usage endpoints. It counts
-// calls and records request headers per path.
+// calls and records request headers per request URI: the path, plus the query
+// when there is one. A URI without its own response gets its path's.
 type usageTestUpstream struct {
 	*httptest.Server
 
@@ -113,10 +114,14 @@ func newUsageTestUpstream(t *testing.T) *usageTestUpstream {
 }
 
 func (u *usageTestUpstream) serve(w http.ResponseWriter, r *http.Request) {
+	uri := r.URL.RequestURI()
 	u.mu.Lock()
-	u.calls[r.URL.Path]++
-	u.headers[r.URL.Path] = append(u.headers[r.URL.Path], r.Header.Clone())
-	resp, ok := u.responses[r.URL.Path]
+	u.calls[uri]++
+	u.headers[uri] = append(u.headers[uri], r.Header.Clone())
+	resp, ok := u.responses[uri]
+	if !ok {
+		resp, ok = u.responses[r.URL.Path]
+	}
 	gate, arrived := u.gate, u.arrived
 	u.mu.Unlock()
 	if arrived != nil {
@@ -636,6 +641,10 @@ func TestUsageCacheNeverCachesPostsOrOtherURLs(t *testing.T) {
 	hs.upstream.respondJSON(usageTestCodexCreditsPath, http.StatusOK, `{"available_count":1}`)
 	hs.upstream.respondJSON(usageTestCodexCreditsPath+"/consume", http.StatusOK, `{"ok":true}`)
 
+	hs.upstream.respondJSON(usageTestCodexUsagePath, http.StatusOK, `{"n":1}`)
+	hs.upstream.respondJSON(usageTestClaudeProfilePath, http.StatusOK, `{"n":1}`)
+
+	// Only the Claude usage URL has cached query variants (TestUsageCacheClaudeUsageQueryVariants).
 	calls := []struct {
 		name string
 		path string
@@ -644,7 +653,8 @@ func TestUsageCacheNeverCachesPostsOrOtherURLs(t *testing.T) {
 		{name: "POST usage URL", path: usageTestClaudeUsagePath, call: usageTestCall{authIndex: hs.claude.Index, method: http.MethodPost, url: hs.url(usageTestClaudeUsagePath)}},
 		{name: "GET credits URL", path: usageTestCodexCreditsPath, call: usageTestCall{authIndex: hs.codex.Index, method: http.MethodGet, url: hs.url(usageTestCodexCreditsPath)}},
 		{name: "POST credits consume", path: usageTestCodexCreditsPath + "/consume", call: usageTestCall{authIndex: hs.codex.Index, method: http.MethodPost, url: hs.url(usageTestCodexCreditsPath + "/consume")}},
-		{name: "GET usage URL with query", path: usageTestClaudeUsagePath, call: usageTestCall{authIndex: hs.claude.Index, method: http.MethodGet, url: hs.url(usageTestClaudeUsagePath) + "?cedar_ember=1"}},
+		{name: "GET codex usage URL with query", path: usageTestCodexUsagePath + "?x=1", call: usageTestCall{authIndex: hs.codex.Index, method: http.MethodGet, url: hs.url(usageTestCodexUsagePath) + "?x=1"}},
+		{name: "GET claude profile URL with query", path: usageTestClaudeProfilePath + "?x=1", call: usageTestCall{authIndex: hs.claude.Index, method: http.MethodGet, url: hs.url(usageTestClaudeProfilePath) + "?x=1"}},
 		{name: "GET usage URL without auth index", path: usageTestClaudeUsagePath, call: usageTestCall{method: http.MethodGet, url: hs.url(usageTestClaudeUsagePath)}},
 	}
 	for _, tc := range calls {
@@ -1009,4 +1019,135 @@ func TestUsageCacheUsageBodyReplacesWindowsItNoLongerReports(t *testing.T) {
 	hs.upstream.respondJSON(path, http.StatusOK, `{"detail":"try again"}`)
 	hs.get(t, hs.codex, path)
 	assertUsageReadings(t, hs.readings, hs.codex.ID, quotareading.SourceUsage, hs.clock.Now().Add(-time.Minute), map[string]float64{"primary": 95})
+}
+
+// usageTestResetGrantQuery is the query the panel adds to the Claude usage URL
+// to read the account's reset grants (cedar_ember).
+const usageTestResetGrantQuery = "?cedar_ember=1&skip_spend=1"
+
+// usedByWindow returns the stored used percent per window ID of authID.
+func usedByWindow(store *quotareading.Store, authID string) map[string]float64 {
+	used := make(map[string]float64)
+	for _, window := range store.Get(authID).Windows {
+		used[window.ID] = window.UsedPercent
+	}
+	return used
+}
+
+// The panel reads Claude reset grants with a query on the usage URL. Anthropic
+// rate limits that endpoint per account whatever the query, so the variant is
+// cached under its full URL with the Claude usage TTL and counts as a Claude
+// usage call for the poller's min-gap.
+func TestUsageCacheClaudeUsageQueryVariants(t *testing.T) {
+	t.Parallel()
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	plain, variant := usageTestClaudeUsagePath, usageTestClaudeUsagePath+usageTestResetGrantQuery
+	hs.upstream.respondJSON(plain, http.StatusOK, `{"n":"plain"}`)
+	hs.upstream.respondJSON(variant, http.StatusOK, `{"n":"variant-1"}`)
+	expectUpstream(t, "plain", hs, plain, hs.get(t, hs.claude, plain), http.StatusOK, `{"n":"plain"}`, usageCacheMiss, 1)
+
+	hs.clock.Advance(time.Minute)
+	expectUpstream(t, "variant", hs, variant, hs.get(t, hs.claude, variant), http.StatusOK, `{"n":"variant-1"}`, usageCacheMiss, 1)
+	if got := hs.cache.lastClaudeUsageCall(); !got.Equal(usageTestStart.Add(time.Minute)) {
+		t.Fatalf("last Claude usage call = %s, want the variant call at %s", got, usageTestStart.Add(time.Minute))
+	}
+	expectUpstream(t, "plain keeps its own entry", hs, plain, hs.get(t, hs.claude, plain), http.StatusOK, `{"n":"plain"}`, usageCacheHit, 1)
+
+	hs.upstream.respondJSON(variant, http.StatusOK, `{"n":"variant-2"}`)
+	hs.clock.Advance(5*time.Minute - time.Second)
+	expectUpstream(t, "variant inside the Claude TTL", hs, variant, hs.get(t, hs.claude, variant), http.StatusOK, `{"n":"variant-1"}`, usageCacheHit, 1)
+	hs.clock.Advance(time.Second)
+	expectUpstream(t, "variant at the Claude TTL", hs, variant, hs.get(t, hs.claude, variant), http.StatusOK, `{"n":"variant-2"}`, usageCacheMiss, 2)
+
+	other := variant + "&x=1"
+	hs.upstream.respondJSON(other, http.StatusOK, `{"n":"other"}`)
+	expectUpstream(t, "another query is another entry", hs, other, hs.get(t, hs.claude, other), http.StatusOK, `{"n":"other"}`, usageCacheMiss, 1)
+}
+
+// A plain usage body is the credential's complete set of windows; a query
+// variant's body only refreshes the windows it carries, and only when it has
+// the usage shape at all.
+func TestUsageCacheRecordsUsageSnapshots(t *testing.T) {
+	t.Parallel()
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	plain, variant := usageTestClaudeUsagePath, usageTestClaudeUsagePath+usageTestResetGrantQuery
+	withSonnet := `{"five_hour":{"utilization":12.5,"resets_at":"2026-10-03T23:00:00Z"},` +
+		`"seven_day":{"utilization":40,"resets_at":"2026-10-08T21:00:00Z"},` +
+		`"seven_day_sonnet":{"utilization":99,"resets_at":"2026-10-06T21:00:00Z"}}`
+	hs.upstream.respondJSON(plain, http.StatusOK, withSonnet)
+	hs.get(t, hs.claude, plain)
+	if got := fmt.Sprint(usedByWindow(hs.readings, hs.claude.ID)); got != "map[5h:12.5 7d:40 7d:sonnet:99]" {
+		t.Fatalf("readings after the first body = %s", got)
+	}
+
+	// A reset-grant status without the usage shape is never recorded.
+	hs.clock.Advance(time.Minute)
+	hs.upstream.respondJSON(variant, http.StatusOK, `{"cedar_ember":{"eligible":true,"grants":[]}}`)
+	hs.get(t, hs.claude, variant)
+	if got := fmt.Sprint(usedByWindow(hs.readings, hs.claude.ID)); got != "map[5h:12.5 7d:40 7d:sonnet:99]" {
+		t.Fatalf("readings after a reset-grant status = %s, want them unchanged", got)
+	}
+
+	// A variant in the usage shape is merged: it never drops the Sonnet window.
+	hs.clock.Advance(5 * time.Minute)
+	hs.upstream.respondJSON(variant, http.StatusOK, `{"five_hour":{"utilization":99,"resets_at":"2026-10-03T23:00:00Z"},"seven_day":null,"cedar_ember":{"eligible":true}}`)
+	hs.get(t, hs.claude, variant)
+	if got := fmt.Sprint(usedByWindow(hs.readings, hs.claude.ID)); got != "map[5h:99 7d:40 7d:sonnet:99]" {
+		t.Fatalf("readings after a usage-shaped variant = %s", got)
+	}
+
+	// The next plain body no longer reports the Sonnet window, so it is gone:
+	// a stale 99% would otherwise gate Sonnet requests until its old reset.
+	hs.upstream.respondJSON(plain, http.StatusOK, usageTestClaudeBody)
+	hs.get(t, hs.claude, plain)
+	assertUsageReadings(t, hs.readings, hs.claude.ID, quotareading.SourceUsage, hs.clock.Now(), map[string]float64{"5h": 12.5, "7d": 40})
+	if eval := hs.evaluate(hs.claude, "claude-sonnet-5"); !eval.Usable {
+		t.Fatalf("Sonnet evaluation = %+v, want usable once the window is no longer reported", eval)
+	}
+}
+
+// Every usage GET of a Claude credential shares one 429 backoff, with or
+// without a query, and the poller sees a backoff a variant started.
+func TestUsageCacheClaudeUsageVariantsShareTheBackoff(t *testing.T) {
+	t.Parallel()
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	other := hs.register(t, usageTestClaudeAuth("claude-b.json", "claude-b-token"))
+	plain, variant := usageTestClaudeUsagePath, usageTestClaudeUsagePath+usageTestResetGrantQuery
+	plainKey := usageCacheKey(hs.claude.Index, hs.url(plain))
+	rejected := `{"error":"rate_limited"}`
+	hs.upstream.respondJSON(plain, http.StatusOK, usageTestClaudeBody)
+	expectUpstream(t, "plain", hs, plain, hs.get(t, hs.claude, plain), http.StatusOK, usageTestClaudeBody, usageCacheMiss, 1)
+
+	// The panel's reset-grant check is rate limited: the credential backs off for 5m.
+	hs.clock.Advance(time.Minute)
+	hs.upstream.respondJSON(variant, http.StatusTooManyRequests, rejected)
+	expectUpstream(t, "variant 429", hs, variant, hs.get(t, hs.claude, variant), http.StatusTooManyRequests, rejected, usageCacheMiss, 1)
+	if _, inBackoff := hs.cache.keyState(plainKey, hs.clock.Now()); !inBackoff {
+		t.Fatal("the poller does not see the backoff a variant 429 started")
+	}
+	expectUpstream(t, "variant in backoff", hs, variant, hs.get(t, hs.claude, variant), http.StatusTooManyRequests, rejected, usageCacheBackoff, 1)
+
+	// Once its body is stale the plain URL is held too: no upstream call, not even on refresh.
+	hs.clock.Advance(4*time.Minute + 30*time.Second)
+	expectUpstream(t, "plain in backoff", hs, plain, hs.get(t, hs.claude, plain), http.StatusOK, usageTestClaudeBody, usageCacheStale, 1)
+	expectUpstream(t, "plain refresh in backoff", hs, plain, hs.refresh(t, hs.claude, plain), http.StatusOK, usageTestClaudeBody, usageCacheStale, 1)
+	// The backoff is per credential.
+	expectUpstream(t, "other credential", hs, plain, hs.get(t, other, plain), http.StatusOK, usageTestClaudeBody, usageCacheMiss, 2)
+
+	// A plain 429 after the backoff escalates it to 10m and holds the variant.
+	hs.clock.Advance(30 * time.Second)
+	hs.upstream.respondJSON(plain, http.StatusTooManyRequests, rejected)
+	expectUpstream(t, "plain 429", hs, plain, hs.get(t, hs.claude, plain), http.StatusOK, usageTestClaudeBody, usageCacheStale, 3)
+	hs.clock.Advance(10*time.Minute - time.Second)
+	expectUpstream(t, "variant in the escalated backoff", hs, variant, hs.get(t, hs.claude, variant), http.StatusTooManyRequests, rejected, usageCacheBackoff, 1)
+
+	// A 2xx from the variant clears the shared backoff.
+	hs.clock.Advance(time.Second)
+	hs.upstream.respondJSON(variant, http.StatusOK, `{"cedar_ember":{"eligible":false}}`)
+	expectUpstream(t, "variant after the backoff", hs, variant, hs.get(t, hs.claude, variant), http.StatusOK, `{"cedar_ember":{"eligible":false}}`, usageCacheMiss, 2)
+	if _, inBackoff := hs.cache.keyState(plainKey, hs.clock.Now()); inBackoff {
+		t.Fatal("a 2xx from a variant did not clear the credential's backoff")
+	}
+	hs.upstream.respondJSON(plain, http.StatusOK, usageTestClaudeBody)
+	expectUpstream(t, "plain after the backoff", hs, plain, hs.get(t, hs.claude, plain), http.StatusOK, usageTestClaudeBody, usageCacheMiss, 4)
 }

@@ -72,7 +72,8 @@ func (t usageTarget) ttl(cfg config.UsageCacheConfig) time.Duration {
 }
 
 // defaultUsageTargets is the production allowlist. Matching is on the exact
-// URL, so query variants and the Codex rate-limit-reset-credits endpoints,
+// URL; the one exception is a query variant of the Claude usage URL, which
+// usageRequestFor matches. The Codex rate-limit-reset-credits endpoints,
 // through which resets are redeemed, are never cached.
 func defaultUsageTargets() map[string]usageTarget {
 	return map[string]usageTarget{
@@ -100,7 +101,7 @@ func claudeUsageBackoff(level int) time.Duration {
 
 // usageCache holds the cached usage responses of one management handler. Keys
 // need a registered credential, so the key space is bounded by the
-// credentials seen times the allowlisted URLs.
+// credentials seen times the allowlisted URLs and their query variants.
 type usageCache struct {
 	nowFunc func() time.Time
 	// targets is the URL allowlist. It is read-only after construction.
@@ -114,7 +115,7 @@ type usageCache struct {
 	mu      sync.Mutex
 	entries map[string]*usageCacheEntry
 	// lastClaudeUsage is the start of the newest upstream call to the Claude
-	// usage endpoint for any credential, by any caller.
+	// usage endpoint, with or without a query, for any credential, by any caller.
 	lastClaudeUsage time.Time
 }
 
@@ -126,7 +127,8 @@ type usageCacheEntry struct {
 	// lastCall is the start of the newest upstream call.
 	lastCall time.Time
 	// backoffUntil and backoffLevel track Claude usage 429s; rejected is the
-	// newest 429, served while backing off when nothing is cached.
+	// newest 429, served while backing off when nothing is cached. They live
+	// on the plain usage URL's entry and cover its query variants too.
 	backoffUntil time.Time
 	backoffLevel int
 	rejected     *apiCallResponse
@@ -188,16 +190,67 @@ func (c *usageCache) noteUpstreamCallLocked(entry *usageCacheEntry, req usageReq
 	}
 }
 
+// backoffLocked returns the stored 429 of the Claude usage backoff that covers
+// req, and whether that backoff is active at now. Callers hold c.mu.
+func (c *usageCache) backoffLocked(req usageRequest, now time.Time) (*apiCallResponse, bool) {
+	entry := c.entries[req.backoffEntryKey()]
+	// A backoff always has its 429 stored; both are set together in complete.
+	if entry == nil || entry.rejected == nil || !now.Before(entry.backoffUntil) {
+		return nil, false
+	}
+	return entry.rejected, true
+}
+
 // usageRequest is one allowlisted usage GET.
 type usageRequest struct {
 	key      string
 	target   usageTarget
 	authID   string
 	provider string
+	// backoffKey is the key whose entry holds the credential's Claude usage
+	// backoff: the plain usage URL's key for a query variant, empty (the key
+	// itself) otherwise.
+	backoffKey string
+	// variant marks a query variant of the Claude usage URL, such as the
+	// panel's reset-grant status check. Its body is merged into the readings,
+	// never taken as the credential's complete set of windows.
+	variant bool
 	// refresh asks to bypass a fresh cached response.
 	refresh bool
 	// source is recorded on the windows parsed from a successful body.
 	source quotareading.Source
+}
+
+// backoffEntryKey returns the key of the entry holding req's Claude usage backoff.
+func (r usageRequest) backoffEntryKey() string {
+	if r.backoffKey != "" {
+		return r.backoffKey
+	}
+	return r.key
+}
+
+// usageRequestFor matches rawURL against the allowlist for authIndex. An exact
+// match is the plain endpoint. The Claude usage URL with a query string added,
+// such as the panel's reset-grant status check ?cedar_ember=1&skip_spend=1, is
+// a variant: Anthropic rate limits that endpoint per account whatever the
+// query, so a variant is cached under its full URL with the Claude usage TTL,
+// counts toward the poller's Claude min-gap, and shares the plain URL's 429
+// backoff. Other variants are not matched.
+func (c *usageCache) usageRequestFor(authIndex, rawURL string) (usageRequest, bool) {
+	if target, ok := c.targets[rawURL]; ok {
+		return usageRequest{key: usageCacheKey(authIndex, rawURL), target: target}, true
+	}
+	base, _, hasQuery := strings.Cut(rawURL, "?")
+	target, ok := c.targets[base]
+	if !hasQuery || !ok || target.endpoint != usageEndpointClaudeUsage {
+		return usageRequest{}, false
+	}
+	return usageRequest{
+		key:        usageCacheKey(authIndex, rawURL),
+		target:     target,
+		backoffKey: usageCacheKey(authIndex, base),
+		variant:    true,
+	}, true
 }
 
 // usageCacheCall is one request's passage through the usage cache. A nil call
@@ -248,15 +301,14 @@ func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.Usa
 		entry := c.entryLocked(req.key)
 		forced := req.refresh && (entry.lastCall.IsZero() || now.Sub(entry.lastCall) >= floor)
 		fresh := entry.cached != nil && now.Sub(entry.cachedAt) < ttl
-		// A backoff always has its 429 stored; both are set together in complete.
-		backoff := entry.rejected != nil && now.Before(entry.backoffUntil)
+		rejected, backoff := c.backoffLocked(req, now)
 		switch {
 		case fresh && (!forced || backoff):
 			served := entry.cached.withUsageCacheLabel(usageCacheHit)
 			c.mu.Unlock()
 			return &usageCacheCall{cache: c, req: req, served: &served}
 		case backoff:
-			served := entry.rejected.withUsageCacheLabel(usageCacheBackoff)
+			served := rejected.withUsageCacheLabel(usageCacheBackoff)
 			if entry.cached != nil {
 				served = entry.cached.withUsageCacheLabel(usageCacheStale)
 			}
@@ -307,8 +359,9 @@ func (call *usageCacheCall) cachedResponse() (apiCallResponse, bool) {
 
 // complete records the upstream response and returns the response to send.
 // A 2xx is stored and its windows are recorded as readings. A Claude usage
-// 429 starts or extends the backoff. A 429 or 5xx is answered with the cached
-// 2xx marked stale when one exists; anything else passes through annotated.
+// 429 starts or extends the credential's backoff. A 429 or 5xx is answered
+// with the cached 2xx marked stale when one exists; anything else passes
+// through annotated.
 func (call *usageCacheCall) complete(resp apiCallResponse) apiCallResponse {
 	if call == nil || call.done || call.served != nil {
 		return resp
@@ -330,16 +383,19 @@ func (call *usageCacheCall) complete(resp apiCallResponse) apiCallResponse {
 	case success:
 		stored := resp.clone()
 		entry.cached, entry.cachedAt = &stored, now
-		entry.backoffUntil, entry.backoffLevel, entry.rejected = time.Time{}, 0, nil
+		if shared := c.entries[call.req.backoffEntryKey()]; shared != nil {
+			shared.backoffUntil, shared.backoffLevel, shared.rejected = time.Time{}, 0, nil
+		}
 	case resp.StatusCode == http.StatusTooManyRequests && call.req.target.endpoint == usageEndpointClaudeUsage:
 		// Only a call made after the previous backoff ended escalates it; a
 		// 429 from a call that overlapped the one starting it does not.
-		if !now.Before(entry.backoffUntil) {
-			entry.backoffLevel++
-			entry.backoffUntil = now.Add(claudeUsageBackoff(entry.backoffLevel))
+		shared := c.entryLocked(call.req.backoffEntryKey())
+		if !now.Before(shared.backoffUntil) {
+			shared.backoffLevel++
+			shared.backoffUntil = now.Add(claudeUsageBackoff(shared.backoffLevel))
 		}
 		rejected := resp.clone()
-		entry.rejected = &rejected
+		shared.rejected = &rejected
 		if entry.cached != nil {
 			out = entry.cached.withUsageCacheLabel(usageCacheStale)
 		}
@@ -408,10 +464,11 @@ func (call *usageCacheCall) finishLocked(entry *usageCacheEntry, result *apiCall
 }
 
 // recordReadings feeds the windows of a successful usage body to the readings
-// store. Only a body with the endpoint's normal usage shape is recorded. It
-// lists every window the provider reports, so it replaces the credential's
-// stored windows and a window it no longer reports is dropped. Profile bodies
-// carry no windows. Parse errors never include the body.
+// store. Only a body with the endpoint's normal usage shape is recorded. The
+// plain usage URL's body lists every window the provider reports, so it
+// replaces the credential's stored windows and a window it no longer reports
+// is dropped; a query variant's body is only merged. Profile bodies carry no
+// windows. Parse errors never include the body.
 func (c *usageCache) recordReadings(req usageRequest, body string, now time.Time) {
 	windows, ok, errParse := quotareading.UsageSnapshot(req.provider, req.target.canonicalURL, []byte(body), now)
 	if errParse != nil {
@@ -425,6 +482,10 @@ func (c *usageCache) recordReadings(req usageRequest, body string, now time.Time
 		for i := range windows {
 			windows[i].Source = req.source
 		}
+	}
+	if req.variant {
+		c.store().Put(req.authID, req.provider, windows)
+		return
 	}
 	c.store().Replace(req.authID, req.provider, windows, now)
 }
@@ -495,8 +556,9 @@ func (h *Handler) devyreRoutingConfig() config.RoutingConfig {
 }
 
 // beginUsageCall routes an api-call through the usage cache when it is a GET
-// of an allowlisted URL for a registered credential, and returns nil for every
-// other call. A request header X-CPA-Usage-Cache: refresh asks for a bypass.
+// of an allowlisted URL, or of a query variant of the Claude usage URL, for a
+// registered credential, and returns nil for every other call. A request
+// header X-CPA-Usage-Cache: refresh asks for a bypass.
 func (h *Handler) beginUsageCall(c *gin.Context, method, rawURL string, auth *coreauth.Auth) *usageCacheCall {
 	if h == nil || c == nil || c.Request == nil || method != http.MethodGet || auth == nil {
 		return nil
@@ -506,16 +568,12 @@ func (h *Handler) beginUsageCall(c *gin.Context, method, rawURL string, auth *co
 		return nil
 	}
 	cache := h.devyreUsageCache()
-	target, ok := cache.targets[rawURL]
+	req, ok := cache.usageRequestFor(authIndex, rawURL)
 	if !ok {
 		return nil
 	}
-	return cache.begin(c.Request.Context(), usageRequest{
-		key:      usageCacheKey(authIndex, rawURL),
-		target:   target,
-		authID:   auth.ID,
-		provider: auth.Provider,
-		refresh:  strings.EqualFold(strings.TrimSpace(c.GetHeader(usageCacheHeader)), usageCacheRefreshValue),
-		source:   quotareading.SourceUsage,
-	}, h.devyreRoutingConfig().QuotaObservation.UsageCache)
+	req.authID, req.provider = auth.ID, auth.Provider
+	req.refresh = strings.EqualFold(strings.TrimSpace(c.GetHeader(usageCacheHeader)), usageCacheRefreshValue)
+	req.source = quotareading.SourceUsage
+	return cache.begin(c.Request.Context(), req, h.devyreRoutingConfig().QuotaObservation.UsageCache)
 }
