@@ -48,6 +48,43 @@ func FromUsageBody(provider, rawURL string, body []byte, observedAt time.Time) (
 	return FromCodexUsage(body, observedAt)
 }
 
+// UsageSnapshot parses a usage body fetched from rawURL like FromUsageBody, and
+// reports whether the body has the endpoint's normal usage shape: a JSON
+// object with a five_hour or seven_day member for Claude, or a rate_limit
+// member for Codex, each an object or null. Only such a body describes every
+// window the provider reports for the credential, so only it may be recorded;
+// any other document yields ok false, as does a URL that is not a usage
+// endpoint of provider. An empty window list with ok true means the provider
+// reported no windows. Parse errors never include the body.
+func UsageSnapshot(provider, rawURL string, body []byte, observedAt time.Time) (windows []Window, ok bool, err error) {
+	endpoint := usageEndpointProvider(rawURL)
+	if endpoint == "" {
+		return nil, false, nil
+	}
+	if p := normalizeProvider(provider); p != "" && p != endpoint {
+		return nil, false, nil
+	}
+	root, err := parseUsageObject(body, endpoint)
+	if err != nil {
+		return nil, false, err
+	}
+	if endpoint == "claude" {
+		if !objectOrNull(root.Get("five_hour")) && !objectOrNull(root.Get("seven_day")) {
+			return nil, false, nil
+		}
+		return claudeUsageWindowsFrom(root, observedAt), true, nil
+	}
+	if !objectOrNull(root.Get("rate_limit")) && !objectOrNull(root.Get("rateLimit")) {
+		return nil, false, nil
+	}
+	return codexUsageWindowsFrom(root, observedAt), true, nil
+}
+
+// objectOrNull reports whether a JSON member is present as an object or null.
+func objectOrNull(value gjson.Result) bool {
+	return value.IsObject() || (value.Exists() && value.Type == gjson.Null)
+}
+
 // usageEndpointProvider names the provider whose usage endpoint rawURL targets.
 func usageEndpointProvider(rawURL string) string {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))

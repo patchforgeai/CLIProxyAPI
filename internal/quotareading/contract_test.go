@@ -14,9 +14,11 @@ var (
 	_ func([]byte, time.Time) ([]Window, error)                                     = FromCodexUsage
 	_ func(string, map[string]string, time.Time) []Window                           = FromSignals
 	_ func(string, string, []byte, time.Time) ([]Window, error)                     = FromUsageBody
+	_ func(string, string, []byte, time.Time) ([]Window, bool, error)               = UsageSnapshot
 	_ func() *Store                                                                 = NewStore
 	_ func() *Store                                                                 = Default
 	_ func(*Store, string, string, []Window)                                        = (*Store).Put
+	_ func(*Store, string, string, []Window, time.Time)                             = (*Store).Replace
 	_ func(*Store, string) Reading                                                  = (*Store).Get
 	_ func(*Store, string)                                                          = (*Store).Forget
 	_ func(*Store) []Reading                                                        = (*Store).Snapshot

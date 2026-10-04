@@ -4,7 +4,9 @@
 // Readings come from three sources: response headers already captured in
 // Auth.Quota.Signals, usage bodies fetched through the management api-call
 // path, and an idle-credential poller. Parsers are pure; the Store keeps the
-// newest observation per window, and Effective merges both at read time.
+// newest observation per window, a complete usage body replaces the windows
+// it no longer reports, and Effective merges the store with the header
+// windows at read time.
 //
 // The package deliberately depends only on primitives so sdk/cliproxy/auth can
 // import it without a cycle; it must never import sdk/cliproxy/auth.

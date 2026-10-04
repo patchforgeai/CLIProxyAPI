@@ -38,13 +38,51 @@ func Default() *Store {
 // Put records windows for authID. Per window ID, a window replaces the stored
 // one only when its ObservedAt is newer or equal. Windows with an empty ID or a
 // NaN usage are dropped; usage is clamped to 0..100. An empty authID is ignored.
+// Put merges a partial view: it never removes a stored window. Use Replace for
+// a body that lists every window the provider reports.
 func (s *Store) Put(authID, provider string, ws []Window) {
 	if s == nil || authID == "" || len(ws) == 0 {
 		return
 	}
-	provider = normalizeProvider(provider)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.putLocked(authID, normalizeProvider(provider), ws)
+}
+
+// Replace records ws as the complete set of windows the provider reported for
+// authID at observedAt, such as one usage body. A stored window whose ID ws
+// lacks is removed unless it was observed after observedAt, so a window the
+// provider stopped reporting (a plan change, or a Codex account whose
+// positional windows changed meaning) cannot linger and later be rolled
+// forward as a fresh full window. The windows of ws are then recorded as Put
+// records them. A credential left without windows is forgotten.
+func (s *Store) Replace(authID, provider string, ws []Window, observedAt time.Time) {
+	if s == nil || authID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if entry := s.entries[authID]; entry != nil {
+		reported := make(map[string]bool, len(ws))
+		for _, window := range ws {
+			if window.ID != "" && !math.IsNaN(window.UsedPercent) {
+				reported[window.ID] = true
+			}
+		}
+		for id, stored := range entry.windows {
+			if !reported[id] && !stored.ObservedAt.After(observedAt) {
+				delete(entry.windows, id)
+			}
+		}
+	}
+	s.putLocked(authID, normalizeProvider(provider), ws)
+	if entry := s.entries[authID]; entry != nil && len(entry.windows) == 0 {
+		delete(s.entries, authID)
+	}
+}
+
+// putLocked implements Put. Callers hold s.mu for writing.
+func (s *Store) putLocked(authID, provider string, ws []Window) {
 	entry := s.entries[authID]
 	for _, window := range ws {
 		if window.ID == "" || math.IsNaN(window.UsedPercent) {

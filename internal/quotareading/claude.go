@@ -91,6 +91,11 @@ func FromClaudeUsage(body []byte, observedAt time.Time) ([]Window, error) {
 	if err != nil {
 		return nil, err
 	}
+	return claudeUsageWindowsFrom(root, observedAt), nil
+}
+
+// claudeUsageWindowsFrom implements FromClaudeUsage on a parsed JSON object.
+func claudeUsageWindowsFrom(root gjson.Result, observedAt time.Time) []Window {
 	byID := make(map[string]Window)
 	for _, spec := range claudeUsageWindows {
 		entry := root.Get(spec.name)
@@ -116,14 +121,14 @@ func FromClaudeUsage(body []byte, observedAt time.Time) ([]Window, error) {
 		byID[window.ID] = window
 	}
 	if len(byID) == 0 {
-		return nil, nil
+		return nil
 	}
 	windows := make([]Window, 0, len(byID))
 	for _, window := range byID {
 		windows = append(windows, window)
 	}
 	sortWindows(windows)
-	return windows, nil
+	return windows
 }
 
 // claudeScopedLimits selects one weekly_scoped limit per model family. Entries

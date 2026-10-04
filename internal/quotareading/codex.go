@@ -60,9 +60,14 @@ func FromCodexUsage(body []byte, observedAt time.Time) ([]Window, error) {
 	if err != nil {
 		return nil, err
 	}
+	return codexUsageWindowsFrom(root, observedAt), nil
+}
+
+// codexUsageWindowsFrom implements FromCodexUsage on a parsed JSON object.
+func codexUsageWindowsFrom(root gjson.Result, observedAt time.Time) []Window {
 	rateLimit := jsonFirst(root, "rate_limit", "rateLimit")
 	if !rateLimit.IsObject() {
-		return nil, nil
+		return nil
 	}
 	limitReached := jsonFirst(rateLimit, "limit_reached", "limitReached").Type == gjson.True ||
 		jsonFirst(rateLimit, "allowed").Type == gjson.False
@@ -90,7 +95,7 @@ func FromCodexUsage(body []byte, observedAt time.Time) ([]Window, error) {
 		windows = append(windows, codexWindow(id, used, resetsAt, length, observedAt, SourceUsage))
 	}
 	sortWindows(windows)
-	return windows, nil
+	return windows
 }
 
 // codexWindow classifies a Codex window by length: up to 24 hours gates, longer
