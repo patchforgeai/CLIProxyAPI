@@ -42,6 +42,10 @@ const (
 	claudeProfileCacheTTL     = time.Hour
 	claudeUsageBackoffInitial = 5 * time.Minute
 	claudeUsageBackoffMax     = 60 * time.Minute
+
+	// maxClaudeUsageVariants is how many query variants of the Claude usage
+	// URL are cached per credential. Further variants pass through uncached.
+	maxClaudeUsageVariants = 4
 )
 
 // usageEndpoint names an allowlisted upstream endpoint.
@@ -102,8 +106,10 @@ func claudeUsageBackoff(level int) time.Duration {
 }
 
 // usageCache holds the cached usage responses of one management handler. Keys
-// need a registered credential, so the key space is bounded by the
-// credentials seen times the allowlisted URLs and their query variants.
+// need a registered credential, and a credential has at most
+// maxClaudeUsageVariants query variants with an entry of their own, so the key
+// space is bounded by the credentials seen times the allowlisted URLs plus
+// that many variants.
 type usageCache struct {
 	nowFunc func() time.Time
 	// targets is the URL allowlist. It is read-only after construction.
@@ -140,6 +146,10 @@ type usageCacheEntry struct {
 	backoffUntil time.Time
 	backoffLevel int
 	rejected     *apiCallResponse
+	// variants counts the query variants of the credential's Claude usage URL
+	// that have an entry of their own, at most maxClaudeUsageVariants. It also
+	// lives on the plain usage URL's entry.
+	variants int
 	// flight is the upstream call in progress that other requests wait for.
 	flight *usageFlight
 }
@@ -188,6 +198,36 @@ func (c *usageCache) entryLocked(key, authIndex string) *usageCacheEntry {
 		c.entries[key] = entry
 	}
 	return entry
+}
+
+// requestEntryLocked returns the entry of req's key, creating it when needed.
+// A query variant gets an entry of its own only while its credential has
+// fewer than maxClaudeUsageVariants of them, so varying the query cannot grow
+// the cache without bound. A later variant is uncached: it gets a detached
+// entry (detachedEntryLocked) and uncached is true. Callers hold c.mu.
+func (c *usageCache) requestEntryLocked(req usageRequest) (entry *usageCacheEntry, uncached bool) {
+	if existing := c.entries[req.key]; existing != nil {
+		return existing, false
+	}
+	if req.variant {
+		// The plain usage URL's entry counts the credential's variants.
+		shared := c.entryLocked(req.backoffEntryKey(), req.authIndex)
+		if shared.variants >= maxClaudeUsageVariants {
+			return c.detachedEntryLocked(req), true
+		}
+		shared.variants++
+	}
+	return c.entryLocked(req.key, req.authIndex), false
+}
+
+// detachedEntryLocked returns an entry for an uncached query variant of req's
+// credential. It is not part of the cache: what is stored in it is dropped,
+// and no request can wait for its upstream call. It carries the newest write
+// for the credential, which the plain usage URL's entry records, so a call
+// that straddles a write is still recognized (complete). Callers hold c.mu.
+func (c *usageCache) detachedEntryLocked(req usageRequest) *usageCacheEntry {
+	shared := c.entryLocked(req.backoffEntryKey(), req.authIndex)
+	return &usageCacheEntry{authIndex: req.authIndex, invalidatedAt: shared.invalidatedAt}
 }
 
 // noteUpstreamCallLocked records that an upstream call for req starts at now.
@@ -247,7 +287,10 @@ func (r usageRequest) backoffEntryKey() string {
 // a variant: Anthropic rate limits that endpoint per account whatever the
 // query, so a variant is cached under its full URL with the Claude usage TTL,
 // counts toward the poller's Claude min-gap, and shares the plain URL's 429
-// backoff. Other variants are not matched.
+// backoff. Only a credential's first maxClaudeUsageVariants variants are
+// cached; later ones pass through uncached (requestEntryLocked) but still
+// count toward the min-gap and share the backoff. Other variants are not
+// matched.
 func (c *usageCache) usageRequestFor(authIndex, rawURL string) (usageRequest, bool) {
 	if target, ok := c.targets[rawURL]; ok {
 		return usageRequest{key: usageCacheKey(authIndex, rawURL), authIndex: authIndex, target: target}, true
@@ -280,6 +323,11 @@ type usageCacheCall struct {
 	// credential req.authIndex: the call passes through, and a 2xx answer makes
 	// the credential's cached responses stale.
 	invalidates bool
+	// uncached marks a Claude usage query variant beyond the credential's
+	// cached variants (requestEntryLocked): nothing is stored for its URL and
+	// no request waits for its upstream call, yet it counts as a Claude usage
+	// call, shares the credential's backoff and records readings.
+	uncached bool
 	// label annotates the response of the upstream call: miss or bypass.
 	label string
 	// started is when the upstream call began.
@@ -305,6 +353,10 @@ type usageCacheCall struct {
 //   - bypass: req.refresh forces an upstream call once the newest upstream
 //     call for the key is at least the refresh floor old; inside the floor the
 //     request is answered as if no refresh was asked.
+//
+// An uncached variant (requestEntryLocked) has nothing cached and no upstream
+// call to wait for: it goes upstream on its own unless the credential's
+// backoff answers it.
 func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.UsageCacheConfig) *usageCacheCall {
 	if ctx == nil {
 		ctx = context.Background()
@@ -312,9 +364,10 @@ func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.Usa
 	if !cfg.IsEnabled() {
 		c.mu.Lock()
 		now := c.now()
-		c.noteUpstreamCallLocked(c.entryLocked(req.key, req.authIndex), req, now)
+		entry, uncached := c.requestEntryLocked(req)
+		c.noteUpstreamCallLocked(entry, req, now)
 		c.mu.Unlock()
-		return &usageCacheCall{cache: c, req: req, observeOnly: true, started: now}
+		return &usageCacheCall{cache: c, req: req, observeOnly: true, uncached: uncached, started: now}
 	}
 	ttl, floor := req.target.ttl(cfg), cfg.RefreshFloorDuration()
 	waited := false
@@ -323,7 +376,7 @@ func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.Usa
 		// Read under the lock, so a request that sees a write's invalidation
 		// never starts before that write: the call it leads stays joinable.
 		now := c.now()
-		entry := c.entryLocked(req.key, req.authIndex)
+		entry, uncached := c.requestEntryLocked(req)
 		forced := req.refresh && (entry.lastCall.IsZero() || now.Sub(entry.lastCall) >= floor)
 		fresh := entry.cached != nil && !entry.cachedAt.IsZero() && now.Sub(entry.cachedAt) < ttl
 		rejected, backoff := c.backoffLocked(req, now)
@@ -364,7 +417,7 @@ func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.Usa
 			waited = true
 			continue
 		}
-		call := &usageCacheCall{cache: c, req: req, label: usageCacheMiss, started: now}
+		call := &usageCacheCall{cache: c, req: req, uncached: uncached, label: usageCacheMiss, started: now}
 		if forced {
 			call.label = usageCacheBypass
 		}
@@ -372,8 +425,8 @@ func (c *usageCache) begin(ctx context.Context, req usageRequest, cfg config.Usa
 		// before a write, so the requests after the write wait for this call;
 		// the older call still answers its own followers (finishLocked). A
 		// request that already waited once goes upstream on its own beside a
-		// joinable call.
-		if !joinable {
+		// joinable call, and an uncached variant always does.
+		if !joinable && !uncached {
 			call.flight = &usageFlight{done: make(chan struct{}), started: now}
 			entry.flight = call.flight
 		}
@@ -414,7 +467,9 @@ func (call *usageCacheCall) cachedResponse() (apiCallResponse, bool) {
 // A 2xx is stored and its windows are recorded as readings. A Claude usage
 // 429 starts or extends the credential's backoff. A 429 or 5xx is answered
 // with the cached 2xx marked stale when one exists; anything else passes
-// through annotated. A write's 2xx makes the credential's cache stale.
+// through annotated. An uncached variant is completed the same way, except
+// that nothing is stored for it. A write's 2xx makes the credential's cache
+// stale.
 func (call *usageCacheCall) complete(resp apiCallResponse) apiCallResponse {
 	if call == nil || call.done || call.served != nil {
 		return resp
@@ -433,7 +488,7 @@ func (call *usageCacheCall) complete(resp apiCallResponse) apiCallResponse {
 		return resp
 	}
 	c.mu.Lock()
-	entry := c.entryLocked(call.req.key, call.req.authIndex)
+	entry := call.entryLocked()
 	// straddled: a write for the credential completed while this call was in
 	// flight, so its body may predate the write.
 	straddled := call.started.Before(entry.invalidatedAt)
@@ -486,7 +541,7 @@ func (call *usageCacheCall) fail() *apiCallResponse {
 	}
 	c := call.cache
 	c.mu.Lock()
-	entry := c.entryLocked(call.req.key, call.req.authIndex)
+	entry := call.entryLocked()
 	var out *apiCallResponse
 	if entry.cached != nil {
 		stale := entry.cached.withUsageCacheLabel(usageCacheStale)
@@ -506,8 +561,18 @@ func (call *usageCacheCall) release() {
 	}
 	c := call.cache
 	c.mu.Lock()
-	call.finishLocked(c.entryLocked(call.req.key, call.req.authIndex), nil)
+	call.finishLocked(call.entryLocked(), nil)
 	c.mu.Unlock()
+}
+
+// entryLocked returns the entry the call reads and writes: the entry of its
+// key, or a detached one for an uncached variant (detachedEntryLocked).
+// Callers hold the cache mutex.
+func (call *usageCacheCall) entryLocked() *usageCacheEntry {
+	if call.uncached {
+		return call.cache.detachedEntryLocked(call.req)
+	}
+	return call.cache.entryLocked(call.req.key, call.req.authIndex)
 }
 
 // finishLocked marks the call done and hands result to the requests waiting
@@ -559,8 +624,7 @@ func (c *usageCache) invalidate(authIndex string, now time.Time) {
 func (c *usageCache) startedBeforeInvalidation(call *usageCacheCall) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	entry := c.entries[call.req.key]
-	return entry != nil && call.started.Before(entry.invalidatedAt)
+	return call.started.Before(call.entryLocked().invalidatedAt)
 }
 
 // recordReadings feeds the windows of a successful usage body to the readings
@@ -657,7 +721,8 @@ func (h *Handler) devyreRoutingConfig() config.RoutingConfig {
 
 // beginUsageCall routes an api-call for a registered credential through the
 // usage cache. A GET of an allowlisted URL, or of a query variant of the
-// Claude usage URL, is cached; a request header X-CPA-Usage-Cache: refresh
+// Claude usage URL (up to maxClaudeUsageVariants per credential, see
+// requestEntryLocked), is cached; a request header X-CPA-Usage-Cache: refresh
 // asks for a bypass. A write (POST, PUT, PATCH or DELETE) passes through and
 // makes the credential's cached responses stale once it succeeds. Every other
 // call gets nil.

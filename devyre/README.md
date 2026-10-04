@@ -108,7 +108,7 @@ With `routing.strategy: expiring-first` (the deploy template's setting), CPA pic
 | `backoff` | The stored Claude 429, served during a backoff when no body is cached. |
 
 - Send the request header `X-CPA-Usage-Cache: refresh` to skip a fresh cached body. It is honored once the last upstream call for that URL is at least 30 seconds old; inside that floor the cache answers.
-- The Claude usage URL with a query string, such as the panel's reset-grant check `?cedar_ember=1&skip_spend=1`, is cached under its full URL for 5 minutes. It counts toward the poller's 10-minute Claude gap and shares the credential's 429 backoff, because Anthropic limits the endpoint per account whatever the query.
+- The Claude usage URL with a query string, such as the panel's reset-grant check `?cedar_ember=1&skip_spend=1`, is cached under its full URL for 5 minutes, for up to 4 distinct query strings per credential. Further query strings are not cached: each request for one goes upstream (`miss`). Either way the call counts toward the poller's 10-minute Claude gap and shares the credential's 429 backoff, because Anthropic limits the endpoint per account whatever the query.
 - A successful `POST`, `PUT`, `PATCH` or `DELETE` through `api-call` for a credential, such as a redeemed reset, makes that credential's cached responses stale, so the next read shows the new state. A Claude backoff still holds.
 
 ## How to run

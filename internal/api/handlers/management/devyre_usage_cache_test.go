@@ -1153,6 +1153,101 @@ func TestUsageCacheClaudeUsageVariantsShareTheBackoff(t *testing.T) {
 	expectUpstream(t, "plain after the backoff", hs, plain, hs.get(t, hs.claude, plain), http.StatusOK, usageTestClaudeBody, usageCacheMiss, 4)
 }
 
+// usageTestVariantEntries counts the cache entries of authIndex for query
+// variants of plainURL.
+func usageTestVariantEntries(cache *usageCache, authIndex, plainURL string) int {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	prefix := usageCacheKey(authIndex, plainURL+"?")
+	count := 0
+	for key := range cache.entries {
+		if strings.HasPrefix(key, prefix) {
+			count++
+		}
+	}
+	return count
+}
+
+// A credential caches at most maxClaudeUsageVariants query variants of the
+// Claude usage URL, so varying the query cannot grow the cache without bound.
+// Further variants go upstream uncached on every request, yet they still count
+// as Claude usage calls for the poller's min-gap and share the credential's
+// 429 backoff.
+func TestUsageCacheBoundsClaudeUsageQueryVariants(t *testing.T) {
+	t.Parallel()
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	plain := usageTestClaudeUsagePath
+	plainKey := usageCacheKey(hs.claude.Index, hs.url(plain))
+	variant := func(i int) string { return fmt.Sprintf("%s?v=%d", plain, i) }
+	rejected := `{"error":"rate_limited"}`
+	for i := 1; i <= maxClaudeUsageVariants; i++ {
+		path, body := variant(i), fmt.Sprintf(`{"n":%d}`, i)
+		hs.upstream.respondJSON(path, http.StatusOK, body)
+		expectUpstream(t, path, hs, path, hs.get(t, hs.claude, path), http.StatusOK, body, usageCacheMiss, 1)
+		expectUpstream(t, path+" again", hs, path, hs.get(t, hs.claude, path), http.StatusOK, body, usageCacheHit, 1)
+	}
+
+	// One variant more goes upstream on every request, and each call counts
+	// toward the poller's Claude min-gap. Its usage windows are still merged
+	// into the readings.
+	extra := variant(maxClaudeUsageVariants + 1)
+	hs.upstream.respondJSON(extra, http.StatusOK, usageTestClaudeBody)
+	for calls := 1; calls <= 2; calls++ {
+		hs.clock.Advance(time.Minute)
+		expectUpstream(t, fmt.Sprintf("uncached variant #%d", calls), hs, extra, hs.get(t, hs.claude, extra), http.StatusOK, usageTestClaudeBody, usageCacheMiss, calls)
+		if got := hs.cache.lastClaudeUsageCall(); !got.Equal(hs.clock.Now()) {
+			t.Fatalf("last Claude usage call = %s, want the uncached variant's call at %s", got, hs.clock.Now())
+		}
+	}
+	assertUsageReadings(t, hs.readings, hs.claude.ID, quotareading.SourceUsage, hs.clock.Now(), map[string]float64{"5h": 12.5, "7d": 40})
+	if got := usageTestVariantEntries(hs.cache, hs.claude.Index, hs.url(plain)); got != maxClaudeUsageVariants {
+		t.Fatalf("variant entries = %d, want %d", got, maxClaudeUsageVariants)
+	}
+
+	// A 429 from an uncached variant backs the credential off: until the
+	// backoff ends no usage URL of the credential is called upstream, not even
+	// another uncached variant.
+	hs.clock.Advance(time.Minute)
+	hs.upstream.respondJSON(extra, http.StatusTooManyRequests, rejected)
+	expectUpstream(t, "uncached variant 429", hs, extra, hs.get(t, hs.claude, extra), http.StatusTooManyRequests, rejected, usageCacheMiss, 3)
+	if _, inBackoff := hs.cache.keyState(plainKey, hs.clock.Now()); !inBackoff {
+		t.Fatal("the poller does not see the backoff an uncached variant started")
+	}
+	hs.clock.Advance(5*time.Minute - time.Second)
+	expectUpstream(t, "uncached variant in backoff", hs, extra, hs.get(t, hs.claude, extra), http.StatusTooManyRequests, rejected, usageCacheBackoff, 3)
+	another := variant(maxClaudeUsageVariants + 2)
+	expectUpstream(t, "another uncached variant in backoff", hs, another, hs.get(t, hs.claude, another), http.StatusTooManyRequests, rejected, usageCacheBackoff, 0)
+	expectUpstream(t, "plain in backoff", hs, plain, hs.get(t, hs.claude, plain), http.StatusTooManyRequests, rejected, usageCacheBackoff, 0)
+	expectUpstream(t, "cached variant in backoff", hs, variant(1), hs.get(t, hs.claude, variant(1)), http.StatusOK, `{"n":1}`, usageCacheStale, 1)
+
+	// A 2xx from an uncached variant clears the backoff.
+	hs.clock.Advance(time.Second)
+	hs.upstream.respondJSON(extra, http.StatusOK, `{"n":"extra"}`)
+	expectUpstream(t, "uncached variant after the backoff", hs, extra, hs.get(t, hs.claude, extra), http.StatusOK, `{"n":"extra"}`, usageCacheMiss, 4)
+	if _, inBackoff := hs.cache.keyState(plainKey, hs.clock.Now()); inBackoff {
+		t.Fatal("a 2xx from an uncached variant did not clear the credential's backoff")
+	}
+
+	// The bound is per credential: another one caches the same variant.
+	other := hs.register(t, usageTestClaudeAuth("claude-b.json", "claude-b-token"))
+	expectUpstream(t, "other credential", hs, extra, hs.get(t, other, extra), http.StatusOK, `{"n":"extra"}`, usageCacheMiss, 5)
+	expectUpstream(t, "other credential again", hs, extra, hs.get(t, other, extra), http.StatusOK, `{"n":"extra"}`, usageCacheHit, 5)
+
+	// The bound holds while the cache is disabled too, which still tracks call
+	// times per key.
+	disabled := &usageCache{nowFunc: hs.clock.Now, targets: defaultUsageTargets(), readings: quotareading.NewStore()}
+	for i := range maxClaudeUsageVariants + 2 {
+		req, ok := disabled.usageRequestFor("idx", fmt.Sprintf("%s?v=%d", quotareading.ClaudeUsageURL, i))
+		if !ok {
+			t.Fatalf("variant %d is not a usage request", i)
+		}
+		disabled.begin(context.Background(), req, config.UsageCacheConfig{Enabled: new(false)}).complete(apiCallResponse{StatusCode: http.StatusOK, Body: `{}`})
+	}
+	if got := usageTestVariantEntries(disabled, "idx", quotareading.ClaudeUsageURL); got != maxClaudeUsageVariants {
+		t.Fatalf("variant entries with the cache disabled = %d, want %d", got, maxClaudeUsageVariants)
+	}
+}
+
 // usageTestCodexBodyWith is a Codex usage body with a five-hour primary window
 // at primaryUsed percent and the weekly secondary window at 60 percent.
 func usageTestCodexBodyWith(primaryUsed int) string {
@@ -1362,6 +1457,41 @@ func TestUsageCacheWriteDuringAnUpstreamCall(t *testing.T) {
 		}
 		cache.begin(context.Background(), req, disabled).complete(after)
 		if got := fmt.Sprint(usedByWindow(store, req.authID)); got != "map[5h:0 7d:40]" {
+			t.Fatalf("readings = %s, want the windows read after the write", got)
+		}
+	})
+
+	// An uncached variant has no entry of its own: the credential's plain usage
+	// entry carries the write.
+	t.Run("uncached variant", func(t *testing.T) {
+		t.Parallel()
+		clock := newUsageTestClock()
+		store := quotareading.NewStore()
+		cache := &usageCache{nowFunc: clock.Now, targets: defaultUsageTargets(), readings: store}
+		cfg := config.UsageCacheConfig{}
+		variant := func(i int) usageRequest {
+			req, ok := cache.usageRequestFor("idx", fmt.Sprintf("%s?v=%d", quotareading.ClaudeUsageURL, i))
+			if !ok {
+				t.Fatalf("variant %d is not a usage request", i)
+			}
+			req.authID, req.provider, req.source = "claude-a.json", "claude", quotareading.SourceUsage
+			return req
+		}
+		for i := range maxClaudeUsageVariants {
+			cache.begin(context.Background(), variant(i), cfg).complete(apiCallResponse{StatusCode: http.StatusOK, Body: `{}`})
+		}
+		inFlight := cache.begin(context.Background(), variant(maxClaudeUsageVariants), cfg)
+		if inFlight == nil || !inFlight.uncached {
+			t.Fatalf("call = %+v, want an uncached variant", inFlight)
+		}
+		clock.Advance(time.Second)
+		cache.invalidate("idx", clock.Now())
+		inFlight.complete(before)
+		if windows := store.Get("claude-a.json").Windows; len(windows) != 0 {
+			t.Fatalf("readings = %+v, want none from an uncached variant that straddled a write", windows)
+		}
+		cache.begin(context.Background(), variant(maxClaudeUsageVariants), cfg).complete(after)
+		if got := fmt.Sprint(usedByWindow(store, "claude-a.json")); got != "map[5h:0 7d:40]" {
 			t.Fatalf("readings = %s, want the windows read after the write", got)
 		}
 	})
