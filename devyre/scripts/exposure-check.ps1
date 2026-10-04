@@ -16,7 +16,9 @@
     - <this PC's tailnet URL>/healthz and http://127.0.0.1:8317/healthz answer 200
   Passwordless (management.tailnet-auth, read from the live config with the management key):
     - the cpa container's Docker gateway is inside server.trusted-proxies
-    - allowed-hosts holds this PC's current MagicDNS name with tailscale serve's port (:8318)
+    - allowed-hosts holds this PC's current MagicDNS name with tailscale serve's port (:8318);
+      SKIP when the block is on but allowed-hosts and allowed-devices are empty (the template's
+      fail-closed block), because that is no rename
     - over the tailnet, GET /v8/management/auth/session with X-CPA-Keyless: 1 and no key is 200
       (SKIP when none of this PC's Tailscale IPs is in allowed-devices)
     - the same request without Origin and without a keyless signal is 401
@@ -367,14 +369,20 @@ if ($configOk) {
     Report 'SKIP' 'passwordless' 'management.tailnet-auth is not configured, so every request needs a key. Set it up with devyre\scripts\tailnet-trust.ps1.'
   } elseif (-not $enabled) {
     Report 'SKIP' 'passwordless' 'management.tailnet-auth.enabled is false, so every request needs a key (tailnet-trust.ps1 -Enable turns it on).'
+  } elseif (Test-CpaTailnetAuthEmpty $allowedHosts $allowedDevices) {
+    # The template's block: on, but empty and fail-closed. Not a rename, so not "stale".
+    Report 'SKIP' 'passwordless' ('management.tailnet-auth is on, but allowed-hosts and allowed-devices are empty, so every request ' +
+      'still needs a key. That is the template block of a freshly rendered config.yaml (or new-secrets.ps1 -Rotate -ResetTailnetAuth). ' +
+      'Allow your devices with devyre\scripts\tailnet-trust.ps1 -Include <names>.')
   } elseif ($null -ne $self) {
     # (b) allowed-hosts goes stale on a tailnet rename while the short name keeps working, and a
     # tailnet name counts only together with tailscale serve's port.
     $serveHost = "$($self.Fqdn):$($script:CpaServePort)"
-    $hostsOk = Test-CpaHostListed $allowedHosts $self.Fqdn $script:CpaServePort -RequirePort
+    $hostsState = Get-CpaServeHostState $allowedHosts $self.Fqdn
+    $hostsOk = ($hostsState -eq 'ok')
     if ($hostsOk) {
       Report 'PASS' 'allowed-hosts' "allowed-hosts holds $serveHost"
-    } elseif (@($allowedHosts | Where-Object { $_.Name -eq $self.Fqdn }).Count -gt 0) {
+    } elseif ($hostsState -eq 'bare') {
       Report 'FAIL' 'allowed-hosts' ("allowed-hosts lists $($self.Fqdn) without tailscale serve's port $($script:CpaServePort), as an older " +
         'tailnet-trust.ps1 wrote it. The server trusts a tailnet name only together with that port, so no device is keyless over ' +
         'the tailnet; re-run devyre\scripts\tailnet-trust.ps1.')

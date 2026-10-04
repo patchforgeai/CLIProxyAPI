@@ -15,9 +15,16 @@
 
 .PARAMETER Rotate
   Regenerate every secret and re-render config.yaml. The previous config.yaml is backed up
-  next to it first. When the cpa container is running it is restarted right away: the running
-  server does not see host-side edits to config.yaml (Docker Desktop delivers no file events
-  for them), so until it restarts the old keys keep working.
+  next to it first, and its management.tailnet-auth block (the passwordless devices, which
+  devyre\scripts\tailnet-trust.ps1 writes into the live config only) is carried over unchanged.
+  When the cpa container is running it is restarted right away: the running server does not
+  see host-side edits to config.yaml (Docker Desktop delivers no file events for them), so until
+  it restarts the old keys keep working.
+
+.PARAMETER ResetTailnetAuth
+  With -Rotate, take management.tailnet-auth from the template as well: its lists start empty,
+  so nothing is keyless until tailnet-trust.ps1 -Include <names> fills them again. Use it after
+  a device you had allowed may have been compromised.
 
 .PARAMETER PublicUrl
   The tailnet URL, e.g. https://<machine>.<tailnet>.ts.net:8318 (no path). Saved to
@@ -32,15 +39,19 @@
 .EXAMPLE
   .\new-secrets.ps1
   .\new-secrets.ps1 -PublicUrl https://<machine>.<tailnet>.ts.net:8318
+  .\new-secrets.ps1 -Rotate                     # new secrets, same passwordless devices
+  .\new-secrets.ps1 -Rotate -ResetTailnetAuth   # new secrets, nothing keyless until tailnet-trust.ps1 runs
 #>
 [CmdletBinding()]
 param(
   [switch]$Rotate,
+  [switch]$ResetTailnetAuth,
   [string]$PublicUrl,
   [switch]$ShowManagementKey
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
+if ($ResetTailnetAuth -and -not $Rotate) { throw '-ResetTailnetAuth only applies together with -Rotate.' }
 
 $cpaHome    = Join-Path $env:USERPROFILE '.cli-proxy-api'
 $secrets    = Join-Path $cpaHome 'secrets'
@@ -114,6 +125,63 @@ function Restart-CpaContainer {
   Write-Host 'Restarted the cpa container: the new secrets are live and the old keys no longer work.'
 }
 
+# Where the management.tailnet-auth block sits in config text split into lines: Start and Count
+# cover the "tailnet-auth:" key directly under the top-level management key and every deeper line
+# after it (trailing blank and comment lines excluded), Indent is the key's indentation. $null
+# when there is no such block.
+function Find-TailnetAuthBlock([string[]]$Lines) {
+  $inManagement = $false
+  $childIndent = -1
+  for ($i = 0; $i -lt $Lines.Count; $i++) {
+    $line = $Lines[$i]
+    if ($line -match '^\s*(#.*)?$') { continue }
+    $indent = $line.Length - $line.TrimStart(' ').Length
+    if ($indent -eq 0) {
+      $inManagement = ($line -match '^(remote-)?management:\s*(#.*)?$')
+      $childIndent = -1
+      continue
+    }
+    if (-not $inManagement) { continue }
+    if ($childIndent -lt 0) { $childIndent = $indent }
+    if ($indent -ne $childIndent -or $line -notmatch '^\s+tailnet-auth:(\s|$)') { continue }
+    $last = $i
+    for ($j = $i + 1; $j -lt $Lines.Count; $j++) {
+      $next = $Lines[$j]
+      if ($next -match '^\s*(#.*)?$') { continue }
+      if (($next.Length - $next.TrimStart(' ').Length) -le $childIndent) { break }
+      $last = $j
+    }
+    return [pscustomobject]@{ Start = $i; Count = $last - $i + 1; Indent = $childIndent }
+  }
+  return $null
+}
+
+# $Text with its management.tailnet-auth block replaced by the one in $Previous, moved to the same
+# depth. $null when either text has no block, or the previous block is empty. The block is copied
+# as text, so its values and comments stay exactly as the server wrote them.
+function Copy-TailnetAuthBlock([string]$Text, [string]$Previous) {
+  $newline = "`n"
+  if ($Text.Contains("`r`n")) { $newline = "`r`n" }
+  $target = [string[]]($Text -split "\r?\n")
+  $source = [string[]]($Previous -split "\r?\n")
+  $to = Find-TailnetAuthBlock $target
+  $from = Find-TailnetAuthBlock $source
+  if ($null -eq $to -or $null -eq $from) { return $null }
+  if ($from.Count -lt 2 -and $source[$from.Start] -match '^\s+tailnet-auth:\s*(#.*)?$') { return $null }
+  $result = New-Object 'System.Collections.Generic.List[string]'
+  for ($k = 0; $k -lt $to.Start; $k++) { $result.Add($target[$k]) }
+  for ($k = $from.Start; $k -lt $from.Start + $from.Count; $k++) {
+    $line = $source[$k]
+    if ($line.Trim().Length -eq 0) { $result.Add(''); continue }
+    $indent = $line.Length - $line.TrimStart(' ').Length
+    $depth = $to.Indent
+    if ($indent -ge $from.Indent) { $depth = $to.Indent + $indent - $from.Indent }
+    $result.Add((' ' * $depth) + $line.TrimStart(' '))
+  }
+  for ($k = $to.Start + $to.Count; $k -lt $target.Count; $k++) { $result.Add($target[$k]) }
+  return ($result.ToArray() -join $newline)
+}
+
 function Get-CpaSecret([string]$Name, [string]$Prefix) {
   $path = Join-Path $secrets "$Name.txt"
   if ($Rotate -or -not (Test-Path -LiteralPath $path)) {
@@ -141,10 +209,13 @@ if ((Test-Path -LiteralPath $configPath) -and -not $Rotate) {
   }
   Write-Host 'config.yaml exists; left unchanged (use -Rotate to regenerate secrets and re-render).'
 } else {
+  $previousText = $null
+  $backup = ''
   if (Test-Path -LiteralPath $configPath) {
     $backup = "$configPath.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     Copy-Item -LiteralPath $configPath -Destination $backup
     Write-Host "Backed up the previous config.yaml to $backup"
+    $previousText = [IO.File]::ReadAllText($configPath)
   }
   $text = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $template).ProviderPath)
   # Check the template (not the rendered text: a random token may contain "__x__").
@@ -152,8 +223,28 @@ if ((Test-Path -LiteralPath $configPath) -and -not $Rotate) {
       Where-Object { -not $values.Contains($_) } | Sort-Object -Unique)
   if ($unknown.Count -gt 0) { throw "Template placeholders without a generated value: $($unknown -join ', ')" }
   foreach ($key in $values.Keys) { $text = $text.Replace($key, $values[$key]) }
+  # The passwordless policy lives only in the runtime config; a rotation keeps it (after the
+  # placeholders are filled, so nothing in the copied block is ever replaced).
+  $tailnetNote = ''
+  if ($null -ne $previousText) {
+    $restoreHint = 'Allow your devices again with devyre\scripts\tailnet-trust.ps1 -Include <names> once the container runs; ' +
+      "the previous lists are in $backup."
+    if ($ResetTailnetAuth) {
+      $tailnetNote = "management.tailnet-auth was reset to the template (-ResetTailnetAuth): nothing is keyless now. $restoreHint"
+    } else {
+      $carried = Copy-TailnetAuthBlock $text $previousText
+      if ($null -ne $carried) {
+        $text = $carried
+        $tailnetNote = 'Kept management.tailnet-auth (the passwordless devices) from the previous config.yaml.'
+      } else {
+        $tailnetNote = ('The previous config.yaml had no management.tailnet-auth block to keep, so it comes from the template ' +
+          "with empty lists and nothing is keyless. $restoreHint")
+      }
+    }
+  }
   [IO.File]::WriteAllText($configPath, $text, $utf8NoBom)
   Write-Host "Rendered $configPath"
+  if ($tailnetNote) { Write-Host $tailnetNote }
   if ($Rotate) { Restart-CpaContainer }
 }
 

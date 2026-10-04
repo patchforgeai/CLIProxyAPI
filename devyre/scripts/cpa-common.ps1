@@ -188,6 +188,22 @@ function Test-CpaHostListed([object[]]$Entries, [string]$Name, [int]$Port, [swit
   return $false
 }
 
+# True when a tailnet-auth block has no allowed-hosts and no allowed-devices: the template's
+# fail-closed block (a freshly rendered config.yaml), which trusts nothing.
+function Test-CpaTailnetAuthEmpty([object[]]$HostEntries, [string[]]$Devices) {
+  return (@($HostEntries | Where-Object { $null -ne $_ }).Count -eq 0 -and @($Devices | Where-Object { $_ }).Count -eq 0)
+}
+
+# How allowed-hosts covers this PC's MagicDNS name: 'ok' when it is listed with tailscale serve's
+# port, 'bare' when it is listed only without that port (as an older tailnet-trust.ps1 wrote it,
+# which grants no tailnet trust), 'stale' when it is missing (a tailnet rename).
+function Get-CpaServeHostState([object[]]$HostEntries, [string]$Fqdn) {
+  if (Test-CpaHostListed $HostEntries $Fqdn $script:CpaServePort -RequirePort) { return 'ok' }
+  $wanted = ([string]$Fqdn).TrimEnd('.').ToLowerInvariant()
+  if (@($HostEntries | Where-Object { $null -ne $_ -and $_.Name -eq $wanted }).Count -gt 0) { return 'bare' }
+  return 'stale'
+}
+
 # ---------------------------------------------------------------------------------------------
 # Tailscale
 

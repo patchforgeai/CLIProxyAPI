@@ -22,6 +22,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 const (
@@ -492,5 +496,216 @@ func TestDevyreTailnetTrust_AutomationGuard(t *testing.T) {
 	block = g.written(g.run("-Include", devyreTailnetShort+",ci-runner", "-AllowAutomationName", "ci-runner", "-Force"))
 	if got, want := devyreDevicesOf(block), devyreWantDevices("10", "13"); !reflect.DeepEqual(got, want) {
 		t.Fatalf("-AllowAutomationName ci-runner = %v, want %v", got, want)
+	}
+}
+
+// devyreRenderTemplate renders devyre/deploy/config.template.yaml with fake
+// secrets whose names start with prefix.
+func devyreRenderTemplate(t *testing.T, prefix string) string {
+	t.Helper()
+	raw, errRead := os.ReadFile(filepath.Join("..", "devyre", "deploy", "config.template.yaml"))
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	text := string(raw)
+	for _, placeholder := range []string{"__MANAGEMENT_KEY__", "__KEY_T3_CODE__", "__KEY_CLAUDE_CODE_CLI__", "__KEY_CODEX_CLI__", "__KEY_OTHER_DEVICES__"} {
+		text = strings.ReplaceAll(text, placeholder, prefix+strings.ToLower(strings.Trim(placeholder, "_")))
+	}
+	return text
+}
+
+// devyreServerWritesTailnetAuth lets the real /v8 config write handler store
+// block in configPath, exactly as it does when tailnet-trust.ps1 writes it.
+func devyreServerWritesTailnetAuth(t *testing.T, configPath, block string) {
+	t.Helper()
+	cfg, errLoad := config.LoadConfig(configPath)
+	if errLoad != nil {
+		t.Fatalf("load config: %v", errLoad)
+	}
+	gin.SetMode(gin.TestMode)
+	handler := management.NewHandler(cfg, configPath, nil)
+	router := gin.New()
+	router.PUT("/v8/management/config/*path", func(c *gin.Context) {
+		c.Set(management.ConfigV8ContextKey, true)
+		handler.ConfigV8(c)
+	})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/v8/management/config/management/tailnet-auth", strings.NewReader(block)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT tailnet-auth: status = %d; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func devyreLoadTailnetAuth(t *testing.T, path string) config.TailnetAuthConfig {
+	t.Helper()
+	cfg, errLoad := config.LoadConfig(path)
+	if errLoad != nil {
+		t.Fatalf("load %s: %v", path, errLoad)
+	}
+	return cfg.RemoteManagement.TailnetAuth
+}
+
+// new-secrets.ps1 -Rotate re-renders config.yaml from the template. The
+// passwordless policy exists only in the runtime config, so the rotation used to
+// reset it to the template's empty lists: every device lost keyless access, and
+// a tailnet-trust.ps1 re-run without -Include could not restore it. The block is
+// now carried over unchanged; -ResetTailnetAuth asks for the template block.
+func TestDevyreNewSecrets_RotateKeepsTheTailnetAuthBlock(t *testing.T) {
+	devyrePowerShell(t)
+	dir := t.TempDir()
+	cpaHome := filepath.Join(dir, ".cli-proxy-api")
+	binDir := filepath.Join(dir, "bin")
+	for _, path := range []string{cpaHome, binDir} {
+		if errMkdir := os.MkdirAll(path, 0o700); errMkdir != nil {
+			t.Fatal(errMkdir)
+		}
+	}
+	// A docker that records its arguments and fails, so the rotation finds no
+	// running container and can never restart a real one.
+	calls := filepath.Join(binDir, "docker-calls.txt")
+	fakeDocker := "@echo off\r\necho %*>>\"%~dp0docker-calls.txt\"\r\nexit /b 1\r\n"
+	if errWrite := os.WriteFile(filepath.Join(binDir, "docker.cmd"), []byte(fakeDocker), 0o700); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	env := devyreScriptEnv(t, dir, binDir)
+
+	configPath := filepath.Join(cpaHome, "config.yaml")
+	if errWrite := os.WriteFile(configPath, []byte(devyreRenderTemplate(t, "old-fake-")), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	devyreServerWritesTailnetAuth(t, configPath, `{"enabled":true,"allowed-logins":["owner@example.com"],`+
+		`"allowed-devices":["100.64.0.10","fd7a:115c:a1e0::10","100.64.0.11"],`+
+		`"allowed-hosts":["devbox.example-tailnet.ts.net:8318","devbox:8318","localhost","127.0.0.1"],"allow-local":true,"proxy-api":false}`)
+	want := devyreLoadTailnetAuth(t, configPath)
+	if !want.Enabled || len(want.AllowedDevices) != 3 || want.ProxyAPI {
+		t.Fatalf("the server did not store the block: %+v", want)
+	}
+
+	run := runDevyreScript(t, env, "new-secrets.ps1", "-Rotate")
+	if run.exitCode != 0 || !strings.Contains(run.output, "Kept management.tailnet-auth") {
+		t.Fatalf("-Rotate: exit %d; output:\n%s", run.exitCode, run.output)
+	}
+	rendered, errRead := os.ReadFile(configPath)
+	if errRead != nil {
+		t.Fatal(errRead)
+	}
+	newKey, errKey := os.ReadFile(filepath.Join(cpaHome, "secrets", "management-key.txt"))
+	if errKey != nil {
+		t.Fatal(errKey)
+	}
+	if strings.Contains(string(rendered), "old-fake-") || !strings.Contains(string(rendered), strings.TrimSpace(string(newKey))) {
+		t.Fatalf("config.yaml was not re-rendered with the new secrets:\n%s", rendered)
+	}
+	if got := devyreLoadTailnetAuth(t, configPath); !reflect.DeepEqual(got, want) {
+		t.Fatalf("tailnet-auth after -Rotate = %+v, want it kept as %+v", got, want)
+	}
+	backups, _ := filepath.Glob(configPath + ".bak-*")
+	if len(backups) != 1 {
+		t.Fatalf("backups = %v, want one", backups)
+	}
+	if got := devyreLoadTailnetAuth(t, backups[0]); !reflect.DeepEqual(got, want) {
+		t.Fatalf("backup tailnet-auth = %+v, want %+v", got, want)
+	}
+
+	// -ResetTailnetAuth starts the policy from the template: on, nothing keyless.
+	// The backup name has a one-second resolution, so move the first one away.
+	if errRename := os.Rename(backups[0], filepath.Join(dir, "first-backup.yaml")); errRename != nil {
+		t.Fatal(errRename)
+	}
+	reset := runDevyreScript(t, env, "new-secrets.ps1", "-Rotate", "-ResetTailnetAuth")
+	if reset.exitCode != 0 || !strings.Contains(reset.output, "reset to the template") {
+		t.Fatalf("-Rotate -ResetTailnetAuth: exit %d; output:\n%s", reset.exitCode, reset.output)
+	}
+	if got := devyreLoadTailnetAuth(t, configPath); !got.Enabled || !got.AllowLocal || !got.ProxyAPI ||
+		len(got.AllowedLogins)+len(got.AllowedDevices)+len(got.AllowedHosts) != 0 {
+		t.Fatalf("tailnet-auth after -ResetTailnetAuth = %+v, want the template block", got)
+	}
+	if refused := runDevyreScript(t, env, "new-secrets.ps1", "-ResetTailnetAuth"); refused.exitCode == 0 {
+		t.Fatalf("-ResetTailnetAuth without -Rotate was accepted; output:\n%s", refused.output)
+	}
+
+	recorded, _ := os.ReadFile(calls)
+	if !strings.Contains(string(recorded), "inspect") || strings.Contains(string(recorded), "restart") {
+		t.Fatalf("docker calls = %q, want inspections only", recorded)
+	}
+}
+
+// devyreHelperProbe exercises the cpa-common.ps1 helpers that exposure-check.ps1
+// uses to read allowed-hosts. It prints one key=value line per case.
+const devyreHelperProbe = `$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 2.0
+. (Join-Path $args[0] 'cpa-common.ps1')
+function Entries([string[]]$Values) { return ,@($Values | ForEach-Object { ConvertTo-CpaHostEntry $_ } | Where-Object { $null -ne $_ }) }
+function Out([string]$Key, $Value) { Write-Output ($Key + '=' + $Value) }
+foreach ($text in 'machine.example.ts.net:8318', 'MACHINE.Example.ts.net.:8318', 'localhost', '[::1]:8317', '::1', 'x:', 'x:0', 'x:65536', '[::1', '[::1]x') {
+  $parsed = ConvertTo-CpaHostEntry $text
+  if ($null -eq $parsed) { Out "parse $text" 'invalid' } else { Out "parse $text" "$($parsed.Name) $($parsed.Port)" }
+}
+$fqdn = 'devbox.example-tailnet.ts.net'
+Out 'state ported' (Get-CpaServeHostState (Entries @("${fqdn}:8318", 'localhost')) $fqdn)
+Out 'state upper case' (Get-CpaServeHostState (Entries @('DEVBOX.Example-Tailnet.ts.net.:8318')) $fqdn)
+Out 'state bare' (Get-CpaServeHostState (Entries @($fqdn, 'devbox', 'localhost')) $fqdn)
+Out 'state other port' (Get-CpaServeHostState (Entries @("${fqdn}:8317")) $fqdn)
+Out 'state renamed' (Get-CpaServeHostState (Entries @('devbox.old-tailnet.ts.net:8318', 'devbox:8318')) $fqdn)
+Out 'empty both' (Test-CpaTailnetAuthEmpty (Entries @()) @())
+Out 'empty devices listed' (Test-CpaTailnetAuthEmpty (Entries @()) @('100.64.0.10'))
+Out 'empty hosts listed' (Test-CpaTailnetAuthEmpty (Entries @('localhost')) @())
+Out 'listed loopback any port' (Test-CpaHostListed (Entries @('127.0.0.1')) '127.0.0.1' 8317)
+Out 'listed loopback other port' (Test-CpaHostListed (Entries @('127.0.0.1:9000')) '127.0.0.1' 8317)
+Out 'listed bare tailnet name' (Test-CpaHostListed (Entries @($fqdn)) $fqdn 8318 -RequirePort)
+`
+
+// exposure-check.ps1 reads allowed-hosts with these helpers. A tailnet name
+// listed without serve's port grants nothing, and is reported as written by an
+// older tailnet-trust.ps1 ('bare'); a block whose lists are both empty is the
+// template's, not a stale name after a rename, as a rotation used to leave it.
+func TestDevyreCommon_AllowedHostsHelpers(t *testing.T) {
+	devyrePowerShell(t)
+	dir := t.TempDir()
+	probe := filepath.Join(dir, "probe.ps1")
+	if errWrite := os.WriteFile(probe, []byte(devyreHelperProbe), 0o600); errWrite != nil {
+		t.Fatal(errWrite)
+	}
+	scripts, errAbs := filepath.Abs(devyreScriptsDir)
+	if errAbs != nil {
+		t.Fatal(errAbs)
+	}
+	cmd := exec.Command(devyrePowerShell(t), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", probe, scripts)
+	cmd.Env = devyreScriptEnv(t, dir, dir)
+	output, errRun := cmd.CombinedOutput()
+	if errRun != nil {
+		t.Fatalf("probe failed: %v\n%s", errRun, output)
+	}
+	got := map[string]string{}
+	for _, line := range strings.Split(strings.ReplaceAll(string(output), "\r\n", "\n"), "\n") {
+		if key, value, found := strings.Cut(line, "="); found {
+			got[key] = value
+		}
+	}
+	want := map[string]string{
+		"parse machine.example.ts.net:8318":  "machine.example.ts.net 8318",
+		"parse MACHINE.Example.ts.net.:8318": "machine.example.ts.net 8318",
+		"parse localhost":                    "localhost 0",
+		"parse [::1]:8317":                   "::1 8317",
+		"parse ::1":                          "::1 0",
+		"parse x:":                           "invalid",
+		"parse x:0":                          "invalid",
+		"parse x:65536":                      "invalid",
+		"parse [::1":                         "invalid",
+		"parse [::1]x":                       "invalid",
+		"state ported":                       "ok",
+		"state upper case":                   "ok",
+		"state bare":                         "bare",
+		"state other port":                   "bare",
+		"state renamed":                      "stale",
+		"empty both":                         "True",
+		"empty devices listed":               "False",
+		"empty hosts listed":                 "False",
+		"listed loopback any port":           "True",
+		"listed loopback other port":         "False",
+		"listed bare tailnet name":           "False",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("helper results = %v\nwant %v\noutput:\n%s", got, want, output)
 	}
 }
