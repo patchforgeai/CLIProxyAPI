@@ -95,7 +95,7 @@ Pause and ask at each of these:
 | D2 | Panel = upstream `main` merged with `chhoumann/dev@24633a8` as a real merge, so authorship is kept. Credit it in README | MIT, already calibrated against Theo's frame, 1500+ tests. Don't rebuild it |
 | D3 | **Claude ledger, per the user:** <br>• Headline = `seven-day` ("7-day limit"). <br>• Secondary pooled line = `five-hour`. <br>• Row columns = 7-day, 5-hour, then any other reported model windows. <br>• `seven-day-fable` is **hidden in Ledger**, still visible in Cards, and shown only if it is an account's only window | "Opus 5.5 is great, we don't really use Fable right now" |
 | D4 | Default theme `dark`. Everything else in the shell stays upstream | That *is* Theo's look (F1) |
-| D5 | New built-in strategy `expiring-first`, a core selector wrapped by `SessionAffinitySelector`. <br>• Urgency = remaining % of the credential's longest window ÷ hours until that window resets. <br>• Short windows (≤ 24 h) and model-scoped windows only gate. <br>• Unknowns rank last, round-robin among themselves. <br>• Priority tiers keep their meaning. <br>• **Bound threads never migrate for urgency.** They move only when the credential becomes unavailable or the affinity TTL (1 h) lapses | Matches Theo (F10) and bandoyer's analysis (#8, #10). A migration rewrites the whole cached prefix (about $0.50-0.80 per 100k tokens at API rates), which outweighs the ordering gain |
+| D5 | New built-in strategy `expiring-first`, a core selector wrapped by `SessionAffinitySelector`. <br>• Urgency = remaining % of the credential's longest window ÷ hours until that window resets. <br>• Short windows (≤ 24 h) and model-scoped windows only gate. Long windows rank, and also gate once exhausted. <br>• Unknowns rank last, round-robin among themselves. <br>• Priority tiers keep their meaning. <br>• **Bound threads never migrate for urgency.** They move only when the credential becomes unavailable or the affinity TTL (1 h) lapses | Matches Theo (F10) and bandoyer's analysis (#8, #10). A migration rewrites the whole cached prefix (about $0.50-0.80 per 100k tokens at API rates), which outweighs the ordering gain |
 | D6 | One in-memory **quota-readings** store fed from three sources: <br>• Response headers, already in `Auth.Quota.Signals`. <br>• Every usage body that passes through `api-call` (panel and T3 hub). <br>• An idle-credential poller. <br>The newest reading per window wins | Covers idle credentials without extra traffic |
 | D7 | **Usage cache** inside `APICall`, for allowlisted GET usage and profile URLs only: <br>• TTL: Claude 5 min, Codex 60 s, profile 1 h. <br>• Single-flight per key. <br>• Serves stale data on error. <br>• Claude 429 backoff: 5 min doubling to 1 h. <br>• Explicit bypass header with a 30 s floor | Three consumers (T3 hub, panel, poller) must not trip Claude's limiter (F11) |
 | D8 | Keep the T3 hub's `/v0` endpoints and pin them with contract tests. If upstream deletes them, add a `devyre_v0_shim.go` | F6 and F7 |
@@ -468,7 +468,7 @@ Cover:
 ```go
 package quotareading
 
-type Kind int // KindShort: ≤24h window, gates only. KindLong: >24h, ranks. KindScoped: model-specific, gates matching models.
+type Kind int // KindShort: ≤24h window, gates only. KindLong: >24h, ranks, and gates once exhausted. KindScoped: model-specific, gates matching models.
 type Source string // "header" | "usage" | "poll"
 
 type Window struct {
@@ -497,6 +497,7 @@ Parsers. Each one is pure and has table tests.
 
 - `type Store struct{…}`, concurrency-safe, with methods:
   - `Put(authID, provider string, ws []Window)`: per window ID, replace only if the new reading is newer.
+  - `Replace(authID, provider string, ws []Window, observedAt time.Time)`: `ws` is the complete set of windows of one usage body. Stored windows it lacks are dropped unless observed later, then it records like `Put`. Without this, a window the provider stopped reporting (a plan change, or positional Codex windows that changed meaning) would roll forward as a fresh full window forever.
   - `Get(authID) Reading`
   - `Forget(authID)`
   - `Snapshot() []Reading`
@@ -508,15 +509,17 @@ Parsers. Each one is pure and has table tests.
 ### RT-3 Usage cache in `APICall` (`internal/api/handlers/management/devyre_usage_cache.go`)
 
 - **Allowlist:** method `GET`, a non-empty auth index, and an exact URL of `https://api.anthropic.com/api/oauth/usage`, `https://api.anthropic.com/api/oauth/profile` or `https://chatgpt.com/backend-api/wham/usage`. Never cache POSTs or the Codex credits URLs, because T3 redeems resets through them.
+  - **Claude usage query variants**, such as the panel's reset-grant check `?cedar_ember=1&skip_spend=1`, are cached too, under their full URL with the Claude usage TTL. Anthropic rate limits the endpoint per account whatever the query, so they count toward the poller's Claude min-gap and share the credential's 429 backoff.
+  - **Writes:** a 2xx `POST`, `PUT`, `PATCH` or `DELETE` through `api-call` for a credential, such as a redeemed reset, makes all of that credential's cached responses stale. The next read goes upstream; the stale body stays as the fallback, and the Claude backoff is kept.
 - **Key:** `authIndex + "|" + url`. **TTL:** Claude usage 5 min, Claude profile 1 h, Codex usage 60 s, all configurable.
 - **Behavior:**
   - **hit:** return the cached `apiCallResponse` without touching tokens or upstream.
   - **miss:** single-flight. The leader calls upstream; followers wait on the leader's result, honoring the request ctx.
-  - **2xx:** store it, then feed `quotareading.Default().Put(auth.ID, provider, FromClaudeUsage|FromCodexUsage(...))` with `Source: usage`.
+  - **2xx:** store it, then feed `quotareading.Default().Replace(auth.ID, provider, UsageSnapshot(...))` with `Source: usage`. Only a body with the endpoint's usage shape is recorded, and a query variant's body is merged with `Put` instead.
   - **429 / 5xx / transport error:** if a cached 2xx exists, return it with `X-CPA-Usage-Cache: stale` in `apiCallResponse.Header`; otherwise pass the error through unchanged.
   - **Claude 429:** start a per-auth backoff of 5 min, doubling up to 60 min, cleared on the next 2xx. During backoff, don't call upstream; serve stale data or the last 429.
   - **Bypass:** if the management request header `X-CPA-Usage-Cache: refresh` is present **and** the last upstream call for the key is ≥ 30 s old, act as a miss. Otherwise serve the cache.
-  - Always annotate `X-CPA-Usage-Cache: hit|miss|stale|bypass` in the returned `header` map.
+  - Always annotate `X-CPA-Usage-Cache: hit|miss|stale|bypass` in the returned `header` map, or `backoff` when the stored Claude 429 is served.
 - **Hook** into `api_tools.go` with three small hunks: lookup after `authIndex` and `urlStr` are parsed (before token resolution), complete or fail after the upstream response or transport error, and record on success. Keep the APICall flow otherwise unchanged; v0 and v8 share it.
 - **Tests** in `devyre_usage_cache_test.go` (httptest upstream counting calls; fake clock):
   - TTL expiry.
@@ -536,6 +539,7 @@ Parsers. Each one is pure and has table tests.
   - For Claude, also require that the **provider-wide** gap since the last Claude usage call is ≥ `claude-min-gap` (10 min). With 3 accounts, the startup sweep finishes in about 20 min while header readings fill in from traffic.
 - **The request** goes through the same cache path as `APICall`: Claude uses `Authorization: Bearer <token>` and `anthropic-beta: oauth-2025-04-20`. Codex uses the header set T3 sends, which is in F6 and `apps/server/src/usage/cliproxyApi.ts`. Resolve the token and transport with the existing `h.authByIndex`, `h.resolveTokenForAuth` and `h.apiCallTransport`. A poll result therefore also warms the cache for the panel and T3.
 - Never poll disabled auths, xAI paid, or Meta (bandoyer #13, #14). xAI free and Kimi are out of scope until the user adds those credentials.
+- Each tick, poller on or off, also forgets the stored readings of credentials the manager no longer lists.
 - Logging is at debug level and never includes tokens or bodies.
 - **Tests:** a fake clock drives the scheduling decisions (who is due, the min-gap, skips) through a pure `nextPolls(now, auths, readings, lastCall) []authID` function.
 
@@ -560,7 +564,7 @@ Algorithm. It is deterministic given readings and `now`.
 
 1. `available, err := getSelectorAvailableAuths(ctx, auths, provider, model, now)`. This already drops disabled and cooling credentials and keeps the **highest priority tier**. Then `available = preferCodexWebsocketAuths(ctx, provider, available)`.
 2. For each auth, compute `r := quotareading.Effective(quotareading.Default(), a.ID, a.Provider, a.Quota.Signals, a.Quota.ObservedAt, now)`.
-3. **Gate:** the auth is gated if any Short window, or any Scoped window whose `Model` family matches the requested `model`, has remaining ≤ `GateRemainingPercent` and `ResetsAt` after now. Family match: the model name contains "fable", "opus" or "sonnet", lowercased.
+3. **Gate:** the auth is gated if any Short or Long window, or any Scoped window whose `Model` family matches the requested `model`, has remaining ≤ `GateRemainingPercent` and `ResetsAt` after now. An exhausted Long window gates too: the credential would only answer 429 until it resets. Family match: the model name contains "fable", "opus" or "sonnet", lowercased.
 4. **Urgency:** take the Long window with the largest `Length`. If there is none, take the longest window of any kind. Then `urgency = remaining% / max(hoursUntil(ResetsAt), 0.25)`. If there is no window or no reset time, the urgency is unknown.
 5. **Order:**
    - Known urgencies descending, with ties broken by round-robin on ID.
@@ -587,7 +591,7 @@ Algorithm. It is deterministic given readings and `now`.
 **Tests** in `selector_expiring_first_test.go`, table-driven with a fake clock:
 - A (40% left, resets in 3 h) beats B (90%, 4 d).
 - D (80%, 2 h) beats C (1%, 10 min).
-- A credential with an exhausted 5-hour window is gated.
+- A credential with an exhausted 5-hour window is gated, and so is one with an exhausted weekly window.
 - A Fable-scoped window gates only Fable models.
 - A passed reset counts as a full window with low urgency.
 - Unknowns rank after the knowns, round-robin among themselves.

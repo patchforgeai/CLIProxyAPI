@@ -57,18 +57,15 @@ func (h *Handler) runQuotaObserver(ctx context.Context) {
 	}
 }
 
-// observeQuotaOnce runs one poller tick: it picks the due credentials with
-// nextPolls and polls them one after another.
+// observeQuotaOnce runs one poller tick: it forgets the readings of removed
+// credentials, then, when the poller is enabled, picks the due credentials
+// with nextPolls and polls them one after another.
 func (h *Handler) observeQuotaOnce(ctx context.Context) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			log.WithField("panic", recovered).Error("quota observer: tick panicked")
 		}
 	}()
-	routing := h.devyreRoutingConfig()
-	if !routing.QuotaPollerEnabled() {
-		return
-	}
 	h.mu.Lock()
 	manager := h.authManager
 	h.mu.Unlock()
@@ -76,13 +73,43 @@ func (h *Handler) observeQuotaOnce(ctx context.Context) {
 		return
 	}
 	cache := h.devyreUsageCache()
+	// Take the readings before the credential list, so a credential registered
+	// in between is never mistaken for a removed one.
+	stored := cache.store().Snapshot()
+	auths := manager.List()
+	forgetRemovedCredentials(cache.store(), stored, auths)
+
+	routing := h.devyreRoutingConfig()
+	if !routing.QuotaPollerEnabled() {
+		return
+	}
 	now := cache.now()
-	candidates, polls := cache.quotaPollCandidates(manager.List(), now)
+	candidates, polls := cache.quotaPollCandidates(auths, now)
 	for _, authID := range nextPolls(now, candidates, cache.lastClaudeUsageCall(), routing.QuotaObservation.Poller) {
 		if ctx.Err() != nil {
 			return
 		}
 		h.pollUsage(ctx, cache, polls[authID], routing.QuotaObservation.UsageCache)
+	}
+}
+
+// forgetRemovedCredentials drops the stored readings of credentials that auths
+// no longer lists, so a removed credential's windows neither stay in memory
+// nor carry over to a credential registered later under the same ID.
+func forgetRemovedCredentials(store *quotareading.Store, stored []quotareading.Reading, auths []*coreauth.Auth) {
+	if len(stored) == 0 {
+		return
+	}
+	registered := make(map[string]bool, len(auths))
+	for _, auth := range auths {
+		if auth != nil {
+			registered[auth.ID] = true
+		}
+	}
+	for _, reading := range stored {
+		if !registered[reading.AuthID] {
+			store.Forget(reading.AuthID)
+		}
 	}
 }
 
@@ -247,11 +274,12 @@ func (h *Handler) pollUsage(ctx context.Context, cache *usageCache, poll quotaPo
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	logEntry := log.WithFields(log.Fields{"provider": provider, "auth_index": auth.Index})
 	call := cache.begin(ctx, usageRequest{
-		key:      usageCacheKey(auth.Index, poll.url),
-		target:   poll.target,
-		authID:   auth.ID,
-		provider: provider,
-		source:   quotareading.SourcePoll,
+		key:       usageCacheKey(auth.Index, poll.url),
+		authIndex: auth.Index,
+		target:    poll.target,
+		authID:    auth.ID,
+		provider:  provider,
+		source:    quotareading.SourcePoll,
 	}, cfg)
 	if call == nil {
 		return

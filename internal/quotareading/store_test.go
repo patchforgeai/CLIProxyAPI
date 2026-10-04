@@ -129,6 +129,133 @@ func TestQuotaReadingStoreForgetAndSnapshotCopies(t *testing.T) {
 	}
 }
 
+// A Codex account moves from {primary 5h, secondary weekly} to the current
+// {primary weekly, secondary null} layout without a new login, so its auth ID
+// stays the same. Replace must drop the old "secondary" window: kept, it would
+// roll forward as a full weekly window resetting before the real one and rank
+// the credential as if it had 100% left.
+func TestQuotaReadingStoreReplaceDropsWindowsALaterSnapshotOmits(t *testing.T) {
+	t0 := testNow.Add(-9 * 24 * time.Hour)
+	oldLayout := fmt.Sprintf(`{"rate_limit":{`+
+		`"primary_window":{"used_percent":40,"limit_window_seconds":18000,"reset_at":%d},`+
+		`"secondary_window":{"used_percent":30,"limit_window_seconds":604800,"reset_at":%d}}}`,
+		t0.Add(2*time.Hour).Unix(), t0.Add(2*time.Hour).Unix())
+	newLayout := fmt.Sprintf(`{"rate_limit":{`+
+		`"primary_window":{"used_percent":95,"limit_window_seconds":604800,"reset_at":%d},`+
+		`"secondary_window":null}}`, testNow.Add(6*24*time.Hour).Unix())
+	snapshot := func(body string, at time.Time) []Window {
+		t.Helper()
+		windows, ok, err := UsageSnapshot("codex", CodexUsageURL, []byte(body), at)
+		if err != nil || !ok {
+			t.Fatalf("UsageSnapshot = %v, %v, %v", formatWindows(windows), ok, err)
+		}
+		return windows
+	}
+	evaluate := func(store *Store) Evaluation {
+		return Evaluate(Effective(store, "codex-a", "codex", nil, time.Time{}, testNow), "gpt-5.5", testNow, defaultGate)
+	}
+
+	// Put merges, so the stale secondary survives and outranks the real window.
+	merged := NewStore()
+	merged.Put("codex-a", "codex", snapshot(oldLayout, t0))
+	merged.Put("codex-a", "codex", snapshot(newLayout, testNow))
+	if got := evaluate(merged); got.RankWindowID != "secondary" || !approxEqual(got.Urgency, 100.0/122) {
+		t.Fatalf("merged evaluation = %+v, want the phantom secondary at 100%%/122h", got)
+	}
+
+	store := NewStore()
+	store.Replace("codex-a", "codex", snapshot(oldLayout, t0), t0)
+	store.Replace("codex-a", "codex", snapshot(newLayout, testNow), testNow)
+	got := store.Get("codex-a")
+	if len(got.Windows) != 1 || got.Windows[0].ID != "primary" || got.Windows[0].Kind != KindLong || got.Windows[0].UsedPercent != 95 {
+		t.Fatalf("windows after the layout change = %v, want only the weekly primary", formatWindows(got.Windows))
+	}
+	if eval := evaluate(store); eval.RankWindowID != "primary" || !approxEqual(eval.Urgency, 5.0/144) {
+		t.Fatalf("evaluation = %+v, want the weekly primary at 5%%/144h", eval)
+	}
+}
+
+func TestQuotaReadingStoreReplace(t *testing.T) {
+	t0, t1, t2 := testNow.Add(-2*time.Hour), testNow.Add(-time.Hour), testNow
+	week := Window{ID: "7d", Kind: KindLong, UsedPercent: 40, Length: 7 * 24 * time.Hour, Source: SourceUsage}
+	short := Window{ID: "5h", Kind: KindShort, UsedPercent: 10, Length: 5 * time.Hour, Source: SourceUsage}
+	opus := Window{ID: "7d:opus", Kind: KindScoped, Model: "opus", UsedPercent: 99, Length: 7 * 24 * time.Hour, Source: SourceUsage}
+	type put struct {
+		replace bool
+		at      time.Time
+		windows []Window
+	}
+	tests := []struct {
+		name string
+		puts []put
+		want map[string]float64 // used percent per window ID; nil when the credential is forgotten
+	}{
+		{
+			name: "a scoped window the newer snapshot omits is removed",
+			puts: []put{{true, t0, []Window{week, short, opus}}, {true, t1, []Window{withUsage(week, 50, t1), withUsage(short, 20, t1)}}},
+			want: map[string]float64{"7d": 50, "5h": 20},
+		},
+		{
+			name: "a window observed after the snapshot is kept",
+			puts: []put{{false, t2, []Window{withUsage(opus, 80, t2)}}, {true, t1, []Window{withUsage(week, 50, t1)}}},
+			want: map[string]float64{"7d": 50, "7d:opus": 80},
+		},
+		{
+			name: "an older snapshot neither removes nor overrides newer windows",
+			puts: []put{{true, t2, []Window{withUsage(week, 60, t2), withUsage(short, 30, t2)}}, {true, t0, []Window{withUsage(week, 5, t0)}}},
+			want: map[string]float64{"7d": 60, "5h": 30},
+		},
+		{
+			name: "an empty snapshot forgets the credential",
+			puts: []put{{true, t0, []Window{withUsage(week, 40, t0)}}, {true, t1, nil}},
+		},
+		{
+			name: "invalid windows count as not reported",
+			puts: []put{{true, t0, []Window{withUsage(week, 40, t0), withUsage(short, 10, t0)}}, {true, t1, []Window{withUsage(week, 50, t1), withUsage(withID(short, ""), 1, t1)}}},
+			want: map[string]float64{"7d": 50},
+		},
+		{
+			name: "a first snapshot records like Put",
+			puts: []put{{true, t1, []Window{withUsage(week, 40, t1), withUsage(short, 10, t1)}}},
+			want: map[string]float64{"7d": 40, "5h": 10},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			store := NewStore()
+			for _, p := range tc.puts {
+				if p.replace {
+					store.Replace("auth-a", "claude", p.windows, p.at)
+				} else {
+					store.Put("auth-a", "claude", p.windows)
+				}
+			}
+			got := store.Get("auth-a")
+			if tc.want == nil {
+				if len(got.Windows) != 0 || got.Provider != "" || len(store.Snapshot()) != 0 {
+					t.Fatalf("reading = %+v, want the credential forgotten", got)
+				}
+				return
+			}
+			used := map[string]float64{}
+			for _, w := range got.Windows {
+				used[w.ID] = w.UsedPercent
+			}
+			if got.Provider != "claude" || fmt.Sprint(used) != fmt.Sprint(tc.want) {
+				t.Fatalf("reading %q used = %v, want %v", got.Provider, used, tc.want)
+			}
+		})
+	}
+
+	var nilStore *Store
+	nilStore.Replace("auth-a", "claude", []Window{withUsage(week, 1, t0)}, t0)
+	store := NewStore()
+	store.Replace("", "claude", []Window{withUsage(week, 1, t0)}, t0)
+	if len(store.Snapshot()) != 0 {
+		t.Fatal("Replace recorded a reading without an auth ID")
+	}
+}
+
 func TestQuotaReadingStoreNilAndDefault(t *testing.T) {
 	var nilStore *Store
 	nilStore.Put("auth-a", "claude", []Window{{ID: "7d", ObservedAt: testNow}})

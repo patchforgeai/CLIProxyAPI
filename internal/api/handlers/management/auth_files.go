@@ -930,6 +930,7 @@ func extractCodexIDTokenClaims(auth *coreauth.Auth) gin.H {
 	}
 	if v := strings.TrimSpace(claims.CodexAuthInfo.ChatgptPlanType); v != "" {
 		result["plan_type"] = v
+		result["chatgpt_plan_type"] = v // devyre: the key T3 Code's hub reads (devyre_t3_hub_contract_test.go)
 	}
 	if v := claims.CodexAuthInfo.ChatgptSubscriptionActiveStart; v != nil {
 		result["chatgpt_subscription_active_start"] = v

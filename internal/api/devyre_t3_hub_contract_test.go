@@ -431,16 +431,14 @@ func TestT3Hub_AuthFilesMatchHubSchema(t *testing.T) {
 	if got := codex.IDToken["chatgpt_account_id"]; got != t3HubCodexAccount {
 		t.Fatalf("Codex id_token.chatgpt_account_id = %#v, want %q (T3 sends it as Chatgpt-Account-Id)", got, t3HubCodexAccount)
 	}
-	// T3 reads id_token.chatgpt_plan_type only as a fallback plan label when
-	// /wham/usage omits plan_type. The server currently reports the plan as
-	// id_token.plan_type, which T3 ignores; accept either spelling so this pins that
-	// the plan reaches the listing without failing if upstream adopts T3's key.
-	planType, _ := codex.IDToken["chatgpt_plan_type"].(string)
-	if planType == "" {
-		planType, _ = codex.IDToken["plan_type"].(string)
-	}
-	if planType != "pro" {
-		t.Fatalf("Codex id_token plan type = %q, want %q; id_token = %#v", planType, "pro", codex.IDToken)
+	// T3 reads id_token.chatgpt_plan_type as the plan label when /wham/usage omits
+	// plan_type. Upstream reports the plan as id_token.plan_type, which T3 ignores,
+	// so the fork adds T3's key next to it (extractCodexIDTokenClaims) and keeps
+	// plan_type for the panel.
+	for _, key := range []string{"chatgpt_plan_type", "plan_type"} {
+		if got := codex.IDToken[key]; got != "pro" {
+			t.Fatalf("Codex id_token.%s = %#v, want %q; id_token = %#v", key, got, "pro", codex.IDToken)
+		}
 	}
 
 	for _, account := range accounts {

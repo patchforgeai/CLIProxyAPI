@@ -120,12 +120,13 @@ func TestDevyreDeployTemplate_LoadsIntoExpectedConfig(t *testing.T) {
 	}
 
 	routing := cfg.Routing
-	if routing.Strategy != "expiring-first" {
+	if routing.Strategy != "expiring-first" || !IsExpiringFirstStrategy(routing.Strategy) {
 		t.Errorf("routing.strategy = %q, want expiring-first", routing.Strategy)
 	}
 	if !routing.SessionAffinity || routing.SessionAffinityTTL != "1h" || routing.SessionAffinitySubagents == nil || !*routing.SessionAffinitySubagents {
 		t.Errorf("session affinity = %v ttl %q subagents %v, want true, 1h, true", routing.SessionAffinity, routing.SessionAffinityTTL, routing.SessionAffinitySubagents)
 	}
+	assertDevyreTemplateRouting(t, routing)
 	if cfg.RequestRetry != 3 || cfg.MaxRetryCredentials != 0 || cfg.MaxRetryInterval != 30 {
 		t.Errorf("routing.retry = %d/%d/%d, want 3/0/30", cfg.RequestRetry, cfg.MaxRetryCredentials, cfg.MaxRetryInterval)
 	}
@@ -142,6 +143,48 @@ func TestDevyreDeployTemplate_LoadsIntoExpectedConfig(t *testing.T) {
 	// The loader cleans the plugin dir for the host OS; inside the container it stays /data/plugins.
 	if wantDir := filepath.Clean("/data/plugins"); !cfg.Plugins.Enabled || cfg.Plugins.Dir != wantDir {
 		t.Errorf("plugins enabled=%v dir=%q, want true and %q", cfg.Plugins.Enabled, cfg.Plugins.Dir, wantDir)
+	}
+}
+
+// assertDevyreTemplateRouting checks the expiring-first and quota-observation blocks as the
+// server reads them. Every value is set explicitly in the template, so each field is checked
+// both as loaded and through the accessor the server uses, which applies the defaults.
+func assertDevyreTemplateRouting(t *testing.T, routing RoutingConfig) {
+	t.Helper()
+	ef := routing.ExpiringFirst
+	if ef.GateRemainingPercent == nil || *ef.GateRemainingPercent != 2 || ef.GatePercent() != 2 {
+		t.Errorf("expiring-first gate = %v (GatePercent %v), want an explicit 2", ef.GateRemainingPercent, ef.GatePercent())
+	}
+	if !ef.LogPicks {
+		t.Error("expiring-first.log-picks = false, want true")
+	}
+
+	cache := routing.QuotaObservation.UsageCache
+	if cache.Enabled == nil || !*cache.Enabled || !cache.IsEnabled() {
+		t.Errorf("usage-cache.enabled = %v, want an explicit true", cache.Enabled)
+	}
+	for _, setting := range []struct {
+		name      string
+		raw       string
+		parsed    time.Duration
+		wantRaw   string
+		wantValue time.Duration
+	}{
+		{"usage-cache.claude-usage-ttl", cache.ClaudeUsageTTL, cache.ClaudeUsageTTLDuration(), "5m", 5 * time.Minute},
+		{"usage-cache.codex-usage-ttl", cache.CodexUsageTTL, cache.CodexUsageTTLDuration(), "60s", 60 * time.Second},
+		{"usage-cache.refresh-floor", cache.RefreshFloor, cache.RefreshFloorDuration(), "30s", 30 * time.Second},
+		{"poller.claude-interval", routing.QuotaObservation.Poller.ClaudeInterval, routing.QuotaObservation.Poller.ClaudeIntervalDuration(), "30m", 30 * time.Minute},
+		{"poller.claude-min-gap", routing.QuotaObservation.Poller.ClaudeMinGap, routing.QuotaObservation.Poller.ClaudeMinGapDuration(), "10m", 10 * time.Minute},
+		{"poller.codex-interval", routing.QuotaObservation.Poller.CodexInterval, routing.QuotaObservation.Poller.CodexIntervalDuration(), "5m", 5 * time.Minute},
+	} {
+		if setting.raw != setting.wantRaw || setting.parsed != setting.wantValue {
+			t.Errorf("quota-observation.%s = %q (%s), want %q (%s)", setting.name, setting.raw, setting.parsed, setting.wantRaw, setting.wantValue)
+		}
+	}
+
+	poller := routing.QuotaObservation.Poller
+	if poller.Enabled == nil || !*poller.Enabled || !routing.QuotaPollerEnabled() {
+		t.Errorf("poller.enabled = %v (QuotaPollerEnabled %v), want an explicit true", poller.Enabled, routing.QuotaPollerEnabled())
 	}
 }
 

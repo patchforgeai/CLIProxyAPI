@@ -46,8 +46,9 @@ func readingsHeaderAuth(id, index string, observedAgo time.Duration, windows map
 }
 
 // readingsGoldenFixture is a pool with every ranking case: header and stored
-// readings, a gate, a model-scoped window, a passed reset, missing data, a
-// lower priority tier, a cooling credential, a disabled one and an API key.
+// readings, a gate, an exhausted weekly window, a model-scoped window, a passed
+// reset, missing data, a lower priority tier, a cooling credential, a disabled
+// one and an API key.
 func readingsGoldenFixture() ([]*coreauth.Auth, *quotareading.Store) {
 	now := readingsTestNow
 	store := quotareading.NewStore()
@@ -82,6 +83,13 @@ func readingsGoldenFixture() ([]*coreauth.Auth, *quotareading.Store) {
 		window("7d", quotareading.KindLong, "", 100, -time.Hour, week, 3*time.Hour, quotareading.SourceUsage),
 	})
 
+	// The weekly window is spent: india is gated until it resets, whatever its 5h window says.
+	india := readingsFileAuth("claude-india.json", "claude", "idx-india")
+	store.Put(india.ID, "claude", []quotareading.Window{
+		window("5h", quotareading.KindShort, "", 10, 3*time.Hour, 5*time.Hour, 10*time.Minute, quotareading.SourcePoll),
+		window("7d", quotareading.KindLong, "", 100, 30*time.Hour, week, 10*time.Minute, quotareading.SourcePoll),
+	})
+
 	codexOne := readingsFileAuth("codex-one.json", "codex", "idx-codex-one")
 	codexOne.Quota = coreauth.QuotaState{ObservedAt: now.Add(-2 * time.Minute), Signals: map[string]string{
 		"X-Codex-Primary-Used-Percent":     "30",
@@ -99,7 +107,7 @@ func readingsGoldenFixture() ([]*coreauth.Auth, *quotareading.Store) {
 
 	apiKey := &coreauth.Auth{ID: "gemini:apikey:0123abcd", Provider: "gemini", Index: "idx-gemini", Attributes: map[string]string{"api_key": "AIza-secret-key"}}
 
-	auths := []*coreauth.Auth{golf, codexTwo, apiKey, hotel, foxtrot, echo, delta, charlie, bravo, codexOne, alpha, nil}
+	auths := []*coreauth.Auth{golf, codexTwo, apiKey, india, hotel, foxtrot, echo, delta, charlie, bravo, codexOne, alpha, nil}
 	return auths, store
 }
 
@@ -390,6 +398,35 @@ const routingQuotaReadingsGolden = `{
           "resets_at": "2026-10-03T23:00:00Z",
           "observed_at": "2026-10-03T20:55:00Z",
           "source": "header"
+        }
+      ]
+    },
+    {
+      "auth_id": "claude-india.json",
+      "auth_index": "idx-india",
+      "provider": "claude",
+      "label": "claude-india.json",
+      "priority": 0,
+      "usable": false,
+      "gate_reason": "7d exhausted",
+      "urgency_per_hour": 0,
+      "rank": 0,
+      "windows": [
+        {
+          "id": "5h",
+          "kind": "short",
+          "remaining_percent": 90,
+          "resets_at": "2026-10-04T00:00:00Z",
+          "observed_at": "2026-10-03T20:50:00Z",
+          "source": "poll"
+        },
+        {
+          "id": "7d",
+          "kind": "long",
+          "remaining_percent": 0,
+          "resets_at": "2026-10-05T03:00:00Z",
+          "observed_at": "2026-10-03T20:50:00Z",
+          "source": "poll"
         }
       ]
     },

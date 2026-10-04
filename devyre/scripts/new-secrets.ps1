@@ -15,12 +15,16 @@
 
 .PARAMETER Rotate
   Regenerate every secret and re-render config.yaml. The previous config.yaml is backed up
-  next to it first. Restart the container afterwards (up.ps1 -NoBuild).
+  next to it first. When the cpa container is running it is restarted right away: the running
+  server does not see host-side edits to config.yaml (Docker Desktop delivers no file events
+  for them), so until it restarts the old keys keep working.
 
 .PARAMETER PublicUrl
   The tailnet URL, e.g. https://<machine>.<tailnet>.ts.net:8318 (no path). Saved to
-  %USERPROFILE%\.cli-proxy-api\public-url.txt, which the PowerShell profile snippet uses as
-  ANTHROPIC_BASE_URL. Without it the snippet uses http://127.0.0.1:8317.
+  %USERPROFILE%\.cli-proxy-api-client\public-url.txt, which the PowerShell profile snippet uses
+  as ANTHROPIC_BASE_URL. Without it the snippet uses http://127.0.0.1:8317. The file stays out
+  of %USERPROFILE%\.cli-proxy-api, which the container mounts, so nothing running in the
+  container can redirect the clients on this PC.
 
 .PARAMETER ShowManagementKey
   Print the existing management key again.
@@ -38,9 +42,11 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2.0
 
-$cpaHome  = Join-Path $env:USERPROFILE '.cli-proxy-api'
-$secrets  = Join-Path $cpaHome 'secrets'
-$template = Join-Path $PSScriptRoot '..\deploy\config.template.yaml'
+$cpaHome    = Join-Path $env:USERPROFILE '.cli-proxy-api'
+$secrets    = Join-Path $cpaHome 'secrets'
+# Client-side settings live outside the CPA home, which the container mounts read-write.
+$clientHome = Join-Path $env:USERPROFILE '.cli-proxy-api-client'
+$template   = Join-Path $PSScriptRoot '..\deploy\config.template.yaml'
 if (-not (Test-Path -LiteralPath $template)) { throw "Missing template: $template" }
 
 # Validate -PublicUrl before touching anything.
@@ -77,6 +83,35 @@ function New-CpaToken([string]$Prefix) {
   $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
   try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
   return $Prefix + '-' + [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+# CPA reloads config.yaml only on file events, and Docker Desktop delivers none for host-side
+# writes to a bind mount. A running server would keep accepting the old keys, and a management
+# save from memory could write them back over the rotated file. So rotation restarts it now.
+function Restart-CpaContainer {
+  if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Warning 'docker is not on PATH. Restart the cpa container (docker restart cpa) before relying on the rotation: until then the old keys still work.'
+    return
+  }
+  $running = $null
+  $found = $false
+  $previous = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'   # docker writes to stderr when the container or the engine is missing
+  try {
+    $running = & docker container inspect --format '{{.State.Running}}' cpa 2>$null
+    $found = $LASTEXITCODE -eq 0
+  } finally {
+    $ErrorActionPreference = $previous
+  }
+  if (-not $found -or "$running".Trim() -ne 'true') {
+    Write-Host 'The cpa container is not running; it starts with the new secrets (devyre\scripts\up.ps1).'
+    return
+  }
+  & docker restart cpa | Out-Null
+  if ($LASTEXITCODE -ne 0) {
+    throw 'docker restart cpa failed, so the server still accepts the old keys. Run devyre\scripts\up.ps1 -NoBuild now.'
+  }
+  Write-Host 'Restarted the cpa container: the new secrets are live and the old keys no longer work.'
 }
 
 function Get-CpaSecret([string]$Name, [string]$Prefix) {
@@ -119,12 +154,14 @@ if ((Test-Path -LiteralPath $configPath) -and -not $Rotate) {
   foreach ($key in $values.Keys) { $text = $text.Replace($key, $values[$key]) }
   [IO.File]::WriteAllText($configPath, $text, $utf8NoBom)
   Write-Host "Rendered $configPath"
-  if ($Rotate) { Write-Host 'Restart the container to apply the new secrets: devyre\scripts\up.ps1 -NoBuild' }
+  if ($Rotate) { Restart-CpaContainer }
 }
 
 if ($null -ne $normalizedUrl) {
-  [IO.File]::WriteAllText((Join-Path $cpaHome 'public-url.txt'), $normalizedUrl, $utf8NoBom)
-  Write-Host "Saved $normalizedUrl to public-url.txt (base URL for the PowerShell profile snippet)."
+  if (-not (Test-Path -LiteralPath $clientHome)) { New-Item -ItemType Directory -Path $clientHome -Force | Out-Null }
+  $urlFile = Join-Path $clientHome 'public-url.txt'
+  [IO.File]::WriteAllText($urlFile, $normalizedUrl, $utf8NoBom)
+  Write-Host "Saved $normalizedUrl to $urlFile (base URL for the PowerShell profile snippet)."
 }
 
 if ($generated.ContainsKey('management-key') -or $ShowManagementKey) {

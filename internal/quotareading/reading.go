@@ -4,7 +4,9 @@
 // Readings come from three sources: response headers already captured in
 // Auth.Quota.Signals, usage bodies fetched through the management api-call
 // path, and an idle-credential poller. Parsers are pure; the Store keeps the
-// newest observation per window, and Effective merges both at read time.
+// newest observation per window, a complete usage body replaces the windows
+// it no longer reports, and Effective merges the store with the header
+// windows at read time.
 //
 // The package deliberately depends only on primitives so sdk/cliproxy/auth can
 // import it without a cycle; it must never import sdk/cliproxy/auth.
@@ -27,9 +29,11 @@ const (
 type Kind int
 
 const (
-	// KindShort is a window of at most 24 hours. It only gates.
+	// KindShort is a window of at most 24 hours. It gates and never ranks
+	// while a long window is known.
 	KindShort Kind = iota
-	// KindLong is a window longer than 24 hours. It ranks credentials.
+	// KindLong is a window longer than 24 hours. It ranks credentials, and
+	// gates them once exhausted.
 	KindLong
 	// KindScoped is model specific. It gates requests for the matching model family.
 	KindScoped

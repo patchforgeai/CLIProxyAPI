@@ -1,29 +1,42 @@
 # --- CLIProxyAPI pool (devyre) ----------------------------------------------------------------
 # Append this file to $PROFILE. `claude` goes through the CPA pool only after Enable-CpaPool has
-# created %USERPROFILE%\.cli-proxy-api\pool-enabled, so installing the snippet before any Claude
-# account is logged in to CPA cannot break Claude Code.
+# created %USERPROFILE%\.cli-proxy-api-client\pool-enabled, so installing the snippet before any
+# Claude account is logged in to CPA cannot break Claude Code.
 #   Enable-CpaPool    route claude through the pool in this shell and every new one
 #   Disable-CpaPool   back to your own claude.ai login in this shell and every new one
 #   claude-direct     one run with your own login while the pool is enabled
 #   claudex           optional: Claude Code harness on GPT through the pool (needs Codex in CPA)
-# Base URL: %USERPROFILE%\.cli-proxy-api\public-url.txt (devyre\scripts\new-secrets.ps1 -PublicUrl),
-# else http://127.0.0.1:8317. Token: the claude-code-cli key in secrets\client-claude-code-cli.txt.
+# Base URL: %USERPROFILE%\.cli-proxy-api-client\public-url.txt (devyre\scripts\new-secrets.ps1
+# -PublicUrl), else http://127.0.0.1:8317. Token: the claude-code-cli key in
+# %USERPROFILE%\.cli-proxy-api\secrets\client-claude-code-cli.txt.
+# Where requests go is decided only by files in .cli-proxy-api-client: the container mounts
+# .cli-proxy-api read-write, so nothing there may redirect this PC's clients.
 # Never put these values in ~/.claude/settings.json: they would also override T3 Code's
 # per-instance environment.
 
 function Get-CpaHome { Join-Path $env:USERPROFILE '.cli-proxy-api' }
+function Get-CpaClientHome { Join-Path $env:USERPROFILE '.cli-proxy-api-client' }
+
+# A bare http(s) origin, the only form new-secrets.ps1 -PublicUrl saves; $null for anything else.
+function ConvertTo-CpaBaseUrl([string]$Raw) {
+  $uri = $null
+  if (-not [Uri]::TryCreate($Raw.Trim(), [UriKind]::Absolute, [ref]$uri)) { return $null }
+  if (($uri.Scheme -ne 'https' -and $uri.Scheme -ne 'http') -or $uri.AbsolutePath -ne '/' -or
+      $uri.Query -or $uri.Fragment -or $uri.UserInfo) { return $null }
+  return $uri.GetLeftPart([UriPartial]::Authority)
+}
 
 function Get-CpaPoolSettings {
-  $cpaHome = Get-CpaHome
-  $keyFile = Join-Path $cpaHome 'secrets\client-claude-code-cli.txt'
+  $keyFile = Join-Path (Get-CpaHome) 'secrets\client-claude-code-cli.txt'
   if (-not (Test-Path -LiteralPath $keyFile)) { return $null }
   $token = ([IO.File]::ReadAllText($keyFile)).Trim()
   if (-not $token) { return $null }
   $baseUrl = 'http://127.0.0.1:8317'
-  $urlFile = Join-Path $cpaHome 'public-url.txt'
+  $urlFile = Join-Path (Get-CpaClientHome) 'public-url.txt'
   if (Test-Path -LiteralPath $urlFile) {
-    $savedUrl = ([IO.File]::ReadAllText($urlFile)).Trim().TrimEnd('/')
+    $savedUrl = ConvertTo-CpaBaseUrl ([IO.File]::ReadAllText($urlFile))
     if ($savedUrl) { $baseUrl = $savedUrl }
+    else { Write-Warning "Ignoring $urlFile`: it is not a bare http(s) URL. Using $baseUrl; rerun new-secrets.ps1 -PublicUrl to fix it." }
   }
   return @{ BaseUrl = $baseUrl; Token = $token }
 }
@@ -45,10 +58,12 @@ function Clear-CpaPoolEnv {
 function Enable-CpaPool {
   [CmdletBinding()]
   param()
-  $marker = Join-Path (Get-CpaHome) 'pool-enabled'
+  $clientHome = Get-CpaClientHome
+  $marker = Join-Path $clientHome 'pool-enabled'
   if (-not (Set-CpaPoolEnv)) {
     throw "Missing $(Get-CpaHome)\secrets\client-claude-code-cli.txt. Run devyre\scripts\new-secrets.ps1 first."
   }
+  if (-not (Test-Path -LiteralPath $clientHome)) { New-Item -ItemType Directory -Path $clientHome -Force | Out-Null }
   if (-not (Test-Path -LiteralPath $marker)) { New-Item -ItemType File -Path $marker | Out-Null }
   Write-Host "CPA pool enabled: claude now uses $env:ANTHROPIC_BASE_URL in this and new shells (claude-direct bypasses it)."
   try {
@@ -63,7 +78,7 @@ function Enable-CpaPool {
 function Disable-CpaPool {
   [CmdletBinding()]
   param()
-  Remove-Item -LiteralPath (Join-Path (Get-CpaHome) 'pool-enabled') -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath (Join-Path (Get-CpaClientHome) 'pool-enabled') -ErrorAction SilentlyContinue
   Clear-CpaPoolEnv
   Write-Host 'CPA pool disabled: claude uses your own login in this and new shells.'
 }
@@ -111,7 +126,7 @@ function claudex {
   }
 }
 
-if (Test-Path -LiteralPath (Join-Path (Get-CpaHome) 'pool-enabled')) {
+if (Test-Path -LiteralPath (Join-Path (Get-CpaClientHome) 'pool-enabled')) {
   if (-not (Set-CpaPoolEnv)) {
     Write-Warning 'CPA pool is enabled but the claude-code-cli key is missing, so claude uses your own login. Run devyre\scripts\new-secrets.ps1 or Disable-CpaPool.'
   }
