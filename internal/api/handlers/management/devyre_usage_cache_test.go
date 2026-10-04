@@ -1153,6 +1153,101 @@ func TestUsageCacheClaudeUsageVariantsShareTheBackoff(t *testing.T) {
 	expectUpstream(t, "plain after the backoff", hs, plain, hs.get(t, hs.claude, plain), http.StatusOK, usageTestClaudeBody, usageCacheMiss, 4)
 }
 
+// usageTestVariantEntries counts the cache entries of authIndex for query
+// variants of plainURL.
+func usageTestVariantEntries(cache *usageCache, authIndex, plainURL string) int {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	prefix := usageCacheKey(authIndex, plainURL+"?")
+	count := 0
+	for key := range cache.entries {
+		if strings.HasPrefix(key, prefix) {
+			count++
+		}
+	}
+	return count
+}
+
+// A credential caches at most maxClaudeUsageVariants query variants of the
+// Claude usage URL, so varying the query cannot grow the cache without bound.
+// Further variants go upstream uncached on every request, yet they still count
+// as Claude usage calls for the poller's min-gap and share the credential's
+// 429 backoff.
+func TestUsageCacheBoundsClaudeUsageQueryVariants(t *testing.T) {
+	t.Parallel()
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	plain := usageTestClaudeUsagePath
+	plainKey := usageCacheKey(hs.claude.Index, hs.url(plain))
+	variant := func(i int) string { return fmt.Sprintf("%s?v=%d", plain, i) }
+	rejected := `{"error":"rate_limited"}`
+	for i := 1; i <= maxClaudeUsageVariants; i++ {
+		path, body := variant(i), fmt.Sprintf(`{"n":%d}`, i)
+		hs.upstream.respondJSON(path, http.StatusOK, body)
+		expectUpstream(t, path, hs, path, hs.get(t, hs.claude, path), http.StatusOK, body, usageCacheMiss, 1)
+		expectUpstream(t, path+" again", hs, path, hs.get(t, hs.claude, path), http.StatusOK, body, usageCacheHit, 1)
+	}
+
+	// One variant more goes upstream on every request, and each call counts
+	// toward the poller's Claude min-gap. Its usage windows are still merged
+	// into the readings.
+	extra := variant(maxClaudeUsageVariants + 1)
+	hs.upstream.respondJSON(extra, http.StatusOK, usageTestClaudeBody)
+	for calls := 1; calls <= 2; calls++ {
+		hs.clock.Advance(time.Minute)
+		expectUpstream(t, fmt.Sprintf("uncached variant #%d", calls), hs, extra, hs.get(t, hs.claude, extra), http.StatusOK, usageTestClaudeBody, usageCacheMiss, calls)
+		if got := hs.cache.lastClaudeUsageCall(); !got.Equal(hs.clock.Now()) {
+			t.Fatalf("last Claude usage call = %s, want the uncached variant's call at %s", got, hs.clock.Now())
+		}
+	}
+	assertUsageReadings(t, hs.readings, hs.claude.ID, quotareading.SourceUsage, hs.clock.Now(), map[string]float64{"5h": 12.5, "7d": 40})
+	if got := usageTestVariantEntries(hs.cache, hs.claude.Index, hs.url(plain)); got != maxClaudeUsageVariants {
+		t.Fatalf("variant entries = %d, want %d", got, maxClaudeUsageVariants)
+	}
+
+	// A 429 from an uncached variant backs the credential off: until the
+	// backoff ends no usage URL of the credential is called upstream, not even
+	// another uncached variant.
+	hs.clock.Advance(time.Minute)
+	hs.upstream.respondJSON(extra, http.StatusTooManyRequests, rejected)
+	expectUpstream(t, "uncached variant 429", hs, extra, hs.get(t, hs.claude, extra), http.StatusTooManyRequests, rejected, usageCacheMiss, 3)
+	if _, inBackoff := hs.cache.keyState(plainKey, hs.clock.Now()); !inBackoff {
+		t.Fatal("the poller does not see the backoff an uncached variant started")
+	}
+	hs.clock.Advance(5*time.Minute - time.Second)
+	expectUpstream(t, "uncached variant in backoff", hs, extra, hs.get(t, hs.claude, extra), http.StatusTooManyRequests, rejected, usageCacheBackoff, 3)
+	another := variant(maxClaudeUsageVariants + 2)
+	expectUpstream(t, "another uncached variant in backoff", hs, another, hs.get(t, hs.claude, another), http.StatusTooManyRequests, rejected, usageCacheBackoff, 0)
+	expectUpstream(t, "plain in backoff", hs, plain, hs.get(t, hs.claude, plain), http.StatusTooManyRequests, rejected, usageCacheBackoff, 0)
+	expectUpstream(t, "cached variant in backoff", hs, variant(1), hs.get(t, hs.claude, variant(1)), http.StatusOK, `{"n":1}`, usageCacheStale, 1)
+
+	// A 2xx from an uncached variant clears the backoff.
+	hs.clock.Advance(time.Second)
+	hs.upstream.respondJSON(extra, http.StatusOK, `{"n":"extra"}`)
+	expectUpstream(t, "uncached variant after the backoff", hs, extra, hs.get(t, hs.claude, extra), http.StatusOK, `{"n":"extra"}`, usageCacheMiss, 4)
+	if _, inBackoff := hs.cache.keyState(plainKey, hs.clock.Now()); inBackoff {
+		t.Fatal("a 2xx from an uncached variant did not clear the credential's backoff")
+	}
+
+	// The bound is per credential: another one caches the same variant.
+	other := hs.register(t, usageTestClaudeAuth("claude-b.json", "claude-b-token"))
+	expectUpstream(t, "other credential", hs, extra, hs.get(t, other, extra), http.StatusOK, `{"n":"extra"}`, usageCacheMiss, 5)
+	expectUpstream(t, "other credential again", hs, extra, hs.get(t, other, extra), http.StatusOK, `{"n":"extra"}`, usageCacheHit, 5)
+
+	// The bound holds while the cache is disabled too, which still tracks call
+	// times per key.
+	disabled := &usageCache{nowFunc: hs.clock.Now, targets: defaultUsageTargets(), readings: quotareading.NewStore()}
+	for i := range maxClaudeUsageVariants + 2 {
+		req, ok := disabled.usageRequestFor("idx", fmt.Sprintf("%s?v=%d", quotareading.ClaudeUsageURL, i))
+		if !ok {
+			t.Fatalf("variant %d is not a usage request", i)
+		}
+		disabled.begin(context.Background(), req, config.UsageCacheConfig{Enabled: new(false)}).complete(apiCallResponse{StatusCode: http.StatusOK, Body: `{}`})
+	}
+	if got := usageTestVariantEntries(disabled, "idx", quotareading.ClaudeUsageURL); got != maxClaudeUsageVariants {
+		t.Fatalf("variant entries with the cache disabled = %d, want %d", got, maxClaudeUsageVariants)
+	}
+}
+
 // usageTestCodexBodyWith is a Codex usage body with a five-hour primary window
 // at primaryUsed percent and the weekly secondary window at 60 percent.
 func usageTestCodexBodyWith(primaryUsed int) string {
@@ -1270,8 +1365,10 @@ func TestUsageCacheWriteInvalidationRules(t *testing.T) {
 
 // A write can complete while a read of the credential is in flight. That read
 // may have been answered before the write took effect, so later requests do
-// not wait for it, its body never displaces one read after the write, and its
-// windows are not recorded.
+// not wait for it: the first of them leads a new upstream call, which the
+// next ones wait for. The older read's body never displaces one read after
+// the write, its windows are not recorded, and finishing it leaves the new
+// call in flight.
 func TestUsageCacheWriteDuringAnUpstreamCall(t *testing.T) {
 	t.Parallel()
 	before := apiCallResponse{StatusCode: http.StatusOK, Body: usageTestClaudeBody}
@@ -1282,6 +1379,16 @@ func TestUsageCacheWriteDuringAnUpstreamCall(t *testing.T) {
 			clock := newUsageTestClock()
 			store := quotareading.NewStore()
 			cache := &usageCache{nowFunc: clock.Now, readings: store}
+			req, cfg := usageTestRequest(), config.UsageCacheConfig{}
+			keyFlight := func() *usageFlight {
+				cache.mu.Lock()
+				defer cache.mu.Unlock()
+				return cache.entries[req.key].flight
+			}
+			inFlight := cache.begin(context.Background(), req, cfg)
+			clock.Advance(time.Second)
+			cache.invalidate(req.authIndex, clock.Now())
+
 			// Waiting would block this goroutine for good, since it also has to
 			// finish the call waited on: cancel instead, so begin returns nil.
 			ctx, cancel := context.WithCancel(context.Background())
@@ -1290,20 +1397,19 @@ func TestUsageCacheWriteDuringAnUpstreamCall(t *testing.T) {
 				t.Error("a request waited for a call that started before the write")
 				cancel()
 			}
-			req, cfg := usageTestRequest(), config.UsageCacheConfig{}
-			inFlight := cache.begin(context.Background(), req, cfg)
-			clock.Advance(time.Second)
-			cache.invalidate(req.authIndex, clock.Now())
-			fresh := cache.begin(ctx, req, cfg)
-			if fresh == nil || fresh.served != nil || fresh.flight != nil || fresh.label != usageCacheMiss {
-				t.Fatalf("request after the write = %+v, want its own upstream call", fresh)
+			leader := cache.begin(ctx, req, cfg)
+			if leader == nil || leader.served != nil || leader.flight == nil || leader.label != usageCacheMiss || keyFlight() != leader.flight {
+				t.Fatalf("request after the write = %+v, want the new leader of the key", leader)
 			}
+			// The next request waits for the new leader, not for the older call.
+			follower := startFollower(t, cache, context.Background())
+
 			finish := func(call *usageCacheCall, resp apiCallResponse) {
 				call.complete(resp)
 				call.release()
 			}
 			if inFlightLast {
-				finish(fresh, after)
+				finish(leader, after)
 				finish(inFlight, before)
 			} else {
 				finish(inFlight, before)
@@ -1314,7 +1420,17 @@ func TestUsageCacheWriteDuringAnUpstreamCall(t *testing.T) {
 				if !fallbackOnly {
 					t.Fatal("the in-flight body must be kept as a fallback only")
 				}
-				finish(fresh, after)
+				if keyFlight() != leader.flight {
+					t.Fatal("finishing the call from before the write ended the new leader's flight")
+				}
+				finish(leader, after)
+			}
+			got, served := usageTestReceive(t, follower, "the follower to stop waiting").cachedResponse()
+			if !served || got.Body != after.Body || usageCacheLabel(got) != usageCacheMiss {
+				t.Fatalf("follower served=%v %+v, want the new leader's body", served, got)
+			}
+			if keyFlight() != nil {
+				t.Fatal("a finished key must not keep a flight")
 			}
 			hit := cache.begin(context.Background(), req, cfg)
 			if got, ok := hit.cachedResponse(); !ok || got.Body != after.Body || usageCacheLabel(got) != usageCacheHit {
@@ -1344,4 +1460,128 @@ func TestUsageCacheWriteDuringAnUpstreamCall(t *testing.T) {
 			t.Fatalf("readings = %s, want the windows read after the write", got)
 		}
 	})
+
+	// An uncached variant has no entry of its own: the credential's plain usage
+	// entry carries the write.
+	t.Run("uncached variant", func(t *testing.T) {
+		t.Parallel()
+		clock := newUsageTestClock()
+		store := quotareading.NewStore()
+		cache := &usageCache{nowFunc: clock.Now, targets: defaultUsageTargets(), readings: store}
+		cfg := config.UsageCacheConfig{}
+		variant := func(i int) usageRequest {
+			req, ok := cache.usageRequestFor("idx", fmt.Sprintf("%s?v=%d", quotareading.ClaudeUsageURL, i))
+			if !ok {
+				t.Fatalf("variant %d is not a usage request", i)
+			}
+			req.authID, req.provider, req.source = "claude-a.json", "claude", quotareading.SourceUsage
+			return req
+		}
+		for i := range maxClaudeUsageVariants {
+			cache.begin(context.Background(), variant(i), cfg).complete(apiCallResponse{StatusCode: http.StatusOK, Body: `{}`})
+		}
+		inFlight := cache.begin(context.Background(), variant(maxClaudeUsageVariants), cfg)
+		if inFlight == nil || !inFlight.uncached {
+			t.Fatalf("call = %+v, want an uncached variant", inFlight)
+		}
+		clock.Advance(time.Second)
+		cache.invalidate("idx", clock.Now())
+		inFlight.complete(before)
+		if windows := store.Get("claude-a.json").Windows; len(windows) != 0 {
+			t.Fatalf("readings = %+v, want none from an uncached variant that straddled a write", windows)
+		}
+		cache.begin(context.Background(), variant(maxClaudeUsageVariants), cfg).complete(after)
+		if got := fmt.Sprint(usedByWindow(store, "claude-a.json")); got != "map[5h:0 7d:40]" {
+			t.Fatalf("readings = %s, want the windows read after the write", got)
+		}
+	})
+}
+
+// Requests that arrive after a write, while a read from before the write is
+// still in flight, share one new upstream call instead of each calling
+// upstream until that older read ends.
+func TestUsageCacheRequestsAfterAWriteShareOneUpstreamCall(t *testing.T) {
+	t.Parallel()
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	usage, claim := usageTestClaudeUsagePath, "/api/organizations/org-1/reset_rate_limits"
+	after := `{"five_hour":{"utilization":0},"seven_day":{"utilization":40}}`
+	read := usageTestCall{authIndex: hs.claude.Index, method: http.MethodGet, url: hs.url(usage)}
+
+	// A read from before the write reaches upstream and is held there.
+	hs.upstream.respondJSON(usage, http.StatusOK, usageTestClaudeBody)
+	beforeGate, beforeArrived := make(chan struct{}), make(chan struct{}, 1)
+	hs.upstream.hold(beforeGate, beforeArrived)
+	// Registered after the harness, so it runs before the upstream closes,
+	// which waits for held requests.
+	openBefore := sync.OnceFunc(func() { close(beforeGate) })
+	t.Cleanup(openBefore)
+	type outcome struct {
+		result usageTestResult
+		err    error
+	}
+	older := make(chan outcome, 1)
+	go func() {
+		result, errDo := hs.do(read)
+		older <- outcome{result: result, err: errDo}
+	}()
+	usageTestReceive(t, beforeArrived, "the read before the write to reach upstream")
+
+	// The write is not held: a held request keeps the gate it arrived with.
+	hs.upstream.hold(nil, nil)
+	hs.clock.Advance(time.Second)
+	hs.upstream.respondJSON(claim, http.StatusOK, `{"result":"reset"}`)
+	if result := hs.mustDo(t, usageTestCall{authIndex: hs.claude.Index, method: http.MethodPost, url: hs.url(claim)}); result.resp.StatusCode != http.StatusOK {
+		t.Fatalf("write: upstream status = %d, want 200", result.resp.StatusCode)
+	}
+
+	// Three reads after the write: one leads an upstream call, held until the
+	// other two wait for it.
+	hs.upstream.respondJSON(usage, http.StatusOK, after)
+	afterGate, afterArrived := make(chan struct{}), make(chan struct{}, 3)
+	hs.upstream.hold(afterGate, afterArrived)
+	openAfter := sync.OnceFunc(func() { close(afterGate) })
+	t.Cleanup(openAfter)
+	var waiting sync.WaitGroup
+	waiting.Add(2)
+	hs.cache.testHookFollowerWaiting = waiting.Done
+	results := make([]usageTestResult, 3)
+	errs := make([]error, 3)
+	var finished sync.WaitGroup
+	for i := range results {
+		finished.Add(1)
+		go func() {
+			defer finished.Done()
+			results[i], errs[i] = hs.do(read)
+		}()
+	}
+	usageTestReceive(t, afterArrived, "the first read after the write to reach upstream")
+	usageTestWaitGroup(t, &waiting, "two reads after the write to wait for it")
+	openAfter()
+	usageTestWaitGroup(t, &finished, "the reads after the write to finish")
+	for i, result := range results {
+		if errs[i] != nil {
+			t.Fatal(errs[i])
+		}
+		if result.code != http.StatusOK || result.resp.StatusCode != http.StatusOK || result.resp.Body != after || result.label() != usageCacheMiss {
+			t.Fatalf("read %d after the write: status=%d upstream=%d body=%q label=%q", i, result.code, result.resp.StatusCode, result.resp.Body, result.label())
+		}
+	}
+	if got := hs.upstream.callCount(usage); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2: the read before the write, and one for the three after it", got)
+	}
+
+	// The read from before the write ends last. Its caller gets its own body,
+	// which displaces neither the cached body nor the readings.
+	openBefore()
+	straddling := usageTestReceive(t, older, "the read before the write to finish")
+	if straddling.err != nil {
+		t.Fatal(straddling.err)
+	}
+	if straddling.result.resp.Body != usageTestClaudeBody || straddling.result.label() != usageCacheMiss {
+		t.Fatalf("read before the write: body=%q label=%q, want its own body labeled miss", straddling.result.resp.Body, straddling.result.label())
+	}
+	expectUpstream(t, "after both", hs, usage, hs.get(t, hs.claude, usage), http.StatusOK, after, usageCacheHit, 2)
+	if got := fmt.Sprint(usedByWindow(hs.readings, hs.claude.ID)); got != "map[5h:0 7d:40]" {
+		t.Fatalf("readings = %s, want only the windows read after the write", got)
+	}
 }
