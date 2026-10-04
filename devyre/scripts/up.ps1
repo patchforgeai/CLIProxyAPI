@@ -13,6 +13,11 @@
   the running server does not see host-side edits to config.yaml or auths\ (Docker Desktop
   delivers no file events for bind mounts), so a restart is how such edits take effect.
 
+  Every published port must be bound to 127.0.0.1: tailscale serve is the only way in from the
+  tailnet, and passwordless access (management.tailnet-auth) trusts whatever reaches the
+  container through the host's loopback. The script refuses to start when the compose file
+  publishes a port anywhere else, and stops the container when the running container does.
+
 .PARAMETER NoBuild
   Restart with the existing cpa-devyre:current image (after a rollback, or to apply host-side
   edits to config.yaml).
@@ -29,6 +34,16 @@ if (-not (Test-Path -LiteralPath $envFile)) {
   throw "Missing $envFile. Copy devyre\deploy\.env.example to .env and edit it."
 }
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'docker is not on PATH. Start Docker Desktop.' }
+. (Join-Path $PSScriptRoot 'cpa-common.ps1')
+$docker = Get-CpaDockerExe
+
+# Refuse to start anything that publishes CPA beyond this PC's loopback.
+$composeProblems = @(Get-CpaComposePublishProblems -Docker $docker -Compose $compose -EnvFile $envFile)
+if ($composeProblems.Count -gt 0) {
+  throw ("Refusing to start: $compose publishes ports beyond 127.0.0.1:`n  " + ($composeProblems -join "`n  ") +
+    "`nBind every port to 127.0.0.1 (for example ""127.0.0.1:8317:8317""). tailscale serve is the only way in from the tailnet, " +
+    'and passwordless access trusts whatever reaches the container through loopback.')
+}
 
 $imageTag = 'current'
 if (-not $NoBuild) {
@@ -54,6 +69,16 @@ if (-not $NoBuild) {
 # changed, and the server would keep the config it loaded at start.
 & docker compose -f $compose --env-file $envFile up -d --force-recreate
 if ($LASTEXITCODE -ne 0) { throw 'docker compose up failed.' }
+
+# The running container is what counts: stop it when any published port is not on 127.0.0.1.
+$info = Get-CpaContainerInfo -Docker $docker -Name 'cpa'
+if ($null -eq $info) { throw 'docker compose up reported success, but there is no container named cpa.' }
+$publish = Get-CpaPublishReport $info
+if (@($publish.Problems).Count -gt 0) {
+  & docker stop cpa | Out-Null
+  throw ("Stopped cpa: it publishes beyond 127.0.0.1: " + (@($publish.Problems) -join '; ') +
+    '. Bind every port to 127.0.0.1 in devyre\deploy\docker-compose.yml, then run up.ps1 again.')
+}
 
 function Test-CpaUrl([string]$Url) {
   try {
