@@ -9,7 +9,7 @@ Have these ready:
   - `https://<machine>.<tailnet>.ts.net:8318` after you enable it with the one-time link the script prints.
 
   Wherever this checklist shows the ts.net URL, use the base URL for your device.
-- **Management key:** from your password manager. `new-secrets.ps1` printed it once; `new-secrets.ps1 -ShowManagementKey` prints it again.
+- **Management key:** from your password manager. `new-secrets.ps1` printed it once; `new-secrets.ps1 -ShowManagementKey` prints it again. With passwordless access on (devyre/README.md, "Tailnet-only and passwordless"), any **non-empty** key works from a trusted source: this PC through `http://127.0.0.1:8317` while `allow-local` is on, or a device listed in `allowed-devices` through the tailnet URL. An empty key does not: T3 then sends no non-browser signal and gets 401. Keep the real key in T3 anyway, so the hub keeps working from untrusted devices and when passwordless access is off.
 - **`t3-code` client key:** copy it without displaying it:
 
   ```powershell
@@ -25,8 +25,8 @@ Have these ready:
    | Field | Value |
    |---|---|
    | Environment | this PC |
-   | URL | `https://<machine>.<tailnet>.ts.net:8318` (no path, no `/v1`) |
-   | Management key | the plaintext management key |
+   | URL | `http://127.0.0.1:8317` when T3 runs on the CPA PC, otherwise the tailnet URL `http(s)://<machine>.<tailnet>.ts.net:8318` (no path, no `/v1`) |
+   | Management key | the plaintext management key (from a trusted source any non-empty value works; see above) |
    | Label | `CPA` |
 
 4. Save.
@@ -43,7 +43,7 @@ The hub only displays quota. It calls `/v0/management/auth-files`, `/v0/manageme
    | Variable | Value | Notes |
    |---|---|---|
    | `ANTHROPIC_BASE_URL` | `https://<machine>.<tailnet>.ts.net:8318` | No `/v1`. |
-   | `ANTHROPIC_AUTH_TOKEN` | the `t3-code` client key | Mark it **Sensitive**. |
+   | `ANTHROPIC_AUTH_TOKEN` | the `t3-code` client key | Mark it **Sensitive**. With `proxy-api: true` any non-empty token works from a trusted source, but the client key keeps T3's own usage rows and session isolation. |
    | `ANTHROPIC_API_KEY` | *(empty)* | Set it explicitly empty so no API key is used. |
    | `ENABLE_PROMPT_CACHING_1H` | `1` | Recommended: keeps the 1-hour prompt cache with token auth. Verify. |
    | `ENABLE_TOOL_SEARCH` | `true` | Recommended: keeps tool search on with token auth. Verify. |
@@ -83,7 +83,7 @@ Only after Codex (ChatGPT) accounts are logged in to CPA:
 
 | Symptom | Fix |
 |---|---|
-| Hub says "could not list accounts" | The URL has no path; the key is the plaintext management key (not the hash in `config.yaml`); `management.allow-remote` is `true`; T3's machine can open the ts.net URL. |
-| `IP banned ...` | Five wrong management keys from one client IP ban it for 30 minutes. Fix the key, then wait or restart the container (`docker restart cpa`). |
+| Hub says "could not list accounts" | The URL has no path; the key is the plaintext management key (not the hash in `config.yaml`) and not empty; `management.allow-remote` is `true`; T3's machine can open the URL. From a device outside `allowed-devices` only the real key works; `devyre\scripts\exposure-check.ps1` shows whether passwordless access works from this PC. |
+| `IP banned ...` | Five wrong management keys from one untrusted client IP ban it for 30 minutes; a missing key and requests from trusted sources never count. Fix the key, then wait or restart the container (`docker restart cpa`). |
 | Claude threads fail while the PC sleeps or Docker is down | Use the **Claude Direct** instance until CPA is back. |
 | Remote Control, connectors or `/usage` missing | Expected through the pool; use **Claude Direct**. |

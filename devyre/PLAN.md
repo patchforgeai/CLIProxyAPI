@@ -765,6 +765,95 @@ Run `devyre\scripts\backup.ps1`. It writes `config.yaml`, `auths\` and `secrets\
 
 ---
 
+## 16. Addendum: Tailnet passwordless (2026-10-04)
+
+**Request:** "Make it so that my shit is cut off from the internet aside from tailnet and that it doesnt require a password." The tailnet was renamed to a new `<tailnet>.ts.net` name on the same day. User-facing documentation: `devyre/README.md`, "Tailnet-only and passwordless".
+
+### Verified facts (do not re-research)
+
+| # | Fact |
+|---|---|
+| T1 | `tailscale serve` 1.102.4 (`ipn/ipnlocal/serve.go`) proxies to `http://127.0.0.1:8317`. It **sets** `X-Forwarded-For` to the single tailnet source IP, overwriting client values, sets `X-Forwarded-Host` to the incoming Host and keeps Host. It **deletes** client-supplied `Tailscale-User-Login`, `Tailscale-User-Name`, `Tailscale-User-Profile-Pic`, `Tailscale-Funnel-Request` and `Tailscale-Headers-Info`, then sets `Tailscale-User-Login`/`-Name` (RFC 2047 Q-encoded when non-ASCII) for untagged user-owned source nodes, this PC included. Tagged nodes get no identity headers; Funnel requests get `Tailscale-Funnel-Request: ?1` and no identity. `Origin` and `Sec-Fetch-*` pass through. Serve routes by Host: only the machine's short name and FQDN on 8318 reach CPA, anything else gets 404 from tailscaled. |
+| T2 | Inside the container every request comes from the Docker bridge gateway (172.16.0.0/12). Publishing is 127.0.0.1-only, so only processes on this PC reach the container. Serve's hop, local browsers and programs, and other containers reaching the host through `host.docker.internal` all look the same to CPA. |
+| T3 | The tailnet: this PC, two iOS devices, two other Windows PCs, a CI runner and a bot VM. All are untagged and owned by the single owner login, so serve stamps the automation hosts with the owner login too. Real names, IPs and logins live only in the runtime config. |
+| T4 | Browsers send no `Sec-Fetch-*` headers to URLs that are not potentially trustworthy (the plain-HTTP tailnet URL is one), and no `Origin` on GET/HEAD no-cors requests (img, script, iframe, navigation, redirects). Every CPA response carries `Access-Control-Allow-Origin: *`. |
+| T5 | Plain-HTTP serve keys its entries by the stored login profile's MagicDNS name, which refreshes only on a real prefs edit, so after a tailnet rename the new FQDN gets 404 from tailscaled. `tailscale debug prefs` omits `ProfileName` when no nickname is set (absent means no nickname) and also prints `Config.PrivateNodeKey`. |
+| T6 | The v8 config writer replaces lists whole; `GET /v8/management/config/management/tailnet-auth` is 404 until the block exists; a server built before the block exists rejects it as an unknown field. |
+
+### Goals
+
+- **G1 Exposure:** CPA is reachable only from this PC (loopback) and from tailnet devices through tailscale serve. Never the LAN, never the internet (no Funnel, no 0.0.0.0 publish), with guards that catch a future misconfiguration.
+- **G2 Passwordless:** allowed tailnet devices of allowed logins, and optionally direct requests on this PC, need no management key and optionally no proxy API key. Everyone else (automation hosts, unknown devices, unlisted tagged nodes, Funnel, anything cross-site) still needs the key. The panel opens straight into the dashboard on allowed devices.
+
+### Config (`management.tailnet-auth`)
+
+Code defaults are all off or empty; the deploy template switches `enabled`, `allow-local` and `proxy-api` on and leaves the lists empty for `devyre/scripts/tailnet-trust.ps1` to fill.
+
+```yaml
+management:
+  tailnet-auth:
+    enabled: false        # master switch
+    allowed-logins: []    # Tailscale-User-Login values; empty = no tailnet trust at all (fail closed)
+    allowed-devices: []   # tailnet IPs allowed without a key; empty = no tailnet device is keyless (fail closed)
+    allowed-hosts: []     # Host names keyless requests may target; empty = no keyless trust (fail closed)
+    allow-local: false    # trust direct requests on this PC whose Host is localhost, 127.0.0.1 or ::1
+    proxy-api: false      # also accept trusted requests on the proxy API without an API key
+```
+
+### Trust decision (one pure function on the server)
+
+1. `enabled` is true, and the direct TCP peer (`c.RemoteIP()`, not `ClientIP()`) is loopback or inside `server.trusted-proxies`.
+2. No `Tailscale-Funnel-Request` header.
+3. The normalized Host is in `allowed-hosts`; an `X-Forwarded-Host` equals the Host.
+4. Browser guard: a present `Sec-Fetch-Site` is `same-origin` or `none`; a present `Origin` is a real origin whose host:port equals the Host. Without `Origin` the request must carry a non-browser signal: `X-CPA-Keyless: 1`, `Authorization: Bearer <non-empty>`, or a non-empty `X-Management-Key`, `X-Api-Key` or `X-Goog-Api-Key` (never query keys or other schemes). A cross-origin page can add a custom header only in CORS mode, which always adds `Origin`.
+5. The Host picks the path. A **loopback Host** allows only the local path, and any `X-Forwarded-For`, `X-Real-IP`, `Forwarded`, `X-Forwarded-Host` or `Tailscale-*` header there is forged, so untrusted; trusted only with `allow-local`. A **tailnet Host** allows only the tailnet path: `X-Forwarded-For` is exactly one IP in 100.64.0.0/10 or fd7a:115c:a1e0::/48 that is **listed in `allowed-devices`** (always; there is no "any device of the login" mode). With any `Tailscale-User-*` header, the decoded `Tailscale-User-Login` must be in `allowed-logins`; without one (a tagged node) the listed IP suffices, but an empty `allowed-logins` still disables all tailnet trust.
+6. Any of the headers the decision reads present twice is untrusted.
+7. Anything else falls back to the key check, unchanged. Trusted requests never touch the failure counter, and a wrong key on a trusted request is ignored. A request with **no** credential never counts as a failed attempt, trusted or not.
+
+### Application points
+
+- **Management:** one `// devyre:` hunk at the top of `Handler.Middleware()` covers every `/v0/management` and `/v8/management` route, the plugin management routes and the new `GET /v8/management/auth/session` (200 with `method` `key`, `tailnet` or `local`; 401 without a key, not counted). Trusted management responses drop the `Access-Control-*` headers and send `Cache-Control: no-store`. OAuth callbacks, `/v0/resource/plugins/*`, `/healthz`, `/` and `/management.html` stay as they were; RESP on 8317 and `/keep-alive` stay key or password only.
+- **Proxy API:** inside `accessAuthMiddleware`, after `manager.Authenticate` fails with a 401-class error, `proxy-api` plus a trusted decision sets `userApiKey` to `tailnet:<login>@<device IP>` or `local` and `accessProvider` to `tailnet-auth`. A valid API key always wins. `/v1/ws` (AI Studio relay) uses a key-only variant.
+- **Anti-framing:** the panel and the safe-mode page send `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`.
+- **Panel:** probes `/v8/management/auth/session` without `Authorization` (and never when framed); on 200 it connects without a key, sends `X-CPA-Keyless: 1` to its own origin and never an `Authorization` header; logout is remembered for the browser session with a "Continue with Tailscale" button; the identity shows as "Signed in via Tailscale - <login>" or "Signed in from this PC".
+
+### Ops (built in `devyre/`)
+
+| Item | What it does |
+|---|---|
+| `scripts/tailnet-trust.ps1` | Candidates: this PC and untagged peers of the owner login. `-Include` wildcards (host name or first MagicDNS label) select; without `-Include` a re-run keeps the devices already allowed. `-Exclude` removes; names with the token `ci`, `runner`, `bot`, `build` or `agent` are dropped unless `-AllowAutomationName` names them. A selected device contributes all its Tailscale IPs. An empty selection writes nothing and exits 1. Writes only `PUT /v8/management/config/management/tailnet-auth` with the complete block; flags keep their live values (template values when the block is new); then re-reads `management` and exits 1 unless only `tailnet-auth` changed. The snapshot holds the secret-key hash and is compared in memory only. `-ShowOnly`/`-WhatIf`, `-Disable`, `-Enable`. |
+| `scripts/exposure-check.ps1` | PASS/FAIL/WARN/SKIP, exit 1 on any FAIL: docker bindings, listeners, LAN reachability, Funnel, exactly one serve handler on 8318 (`/` -> `http://127.0.0.1:8317`, current FQDN, no raw TCP forward), both health URLs, gateway inside `trusted-proxies`, FQDN in `allowed-hosts`, the keyless session probe (SKIP when this PC is not listed), the no-signal and `Origin: http://evil.example` probes, `allow-local` and forged headers on the direct path, and a WARN-only throwaway-container probe. |
+| `scripts/tailscale-serve.ps1` | After configuring, verifies `/healthz` on the current FQDN. On a 404 it refreshes the profile (temporary nickname, then the original, in try/finally, with `--nickname=<value>` as one token and a ProfileName read-back after each step, never printing the prefs), and resets and re-adds serve when entries keyed to an old FQDN remain and every entry is on 8318; otherwise it prints the manual steps. Never enables Funnel. `-ShowOnly`/`-WhatIf`. |
+| `scripts/up.ps1` | Refuses a compose file that publishes beyond 127.0.0.1, and stops a running `cpa` that does. |
+| `scripts/cpa-common.ps1` | Shared helpers; never prints or stores the management key. |
+| `deploy/config.template.yaml` | The block on with empty lists; the `trusted-proxies` comment says the gateway range is load-bearing for keyless access and changes need a restart. Pinned by `TestDevyreDeployTemplate_TailnetAuthBlock`. |
+
+### Decisions (do not relitigate)
+
+| # | Decision | Why |
+|---|---|---|
+| D13 | `allowed-devices` is authoritative and fails closed | Every node, the CI runner and bot VM included, shares the owner login, so the login check alone would admit the automation hosts, which could pull the Claude tokens |
+| D14 | Without `Origin`, require an affirmative non-browser signal | Plain HTTP never triggers the Sec-Fetch guard, and no-cors GETs carry no `Origin` |
+| D15 | The Host splits the local and tailnet paths; proxy markers on a loopback Host are forged | The peer IP cannot tell serve's hop from local software |
+| D16 | A missing key never counts toward the ban | The session probe and keyless clients would otherwise ban the shared Docker gateway IP |
+| D17 | `tailnet-trust.ps1` writes only the `tailnet-auth` subtree and verifies the rest is untouched | A whole-config write could drop or reorder unrelated settings |
+| D18 | Out of scope: a tailscaled sidecar, capping tailnet trust by `allow-local` | Not needed for a single-user PC; documented as residual risk instead |
+
+### Residual risks (documented in the README)
+
+- The trusted set is the allowed devices plus anything that can reach this PC's loopback, containers included; `allow-local: false` does not stop local software, which can forge tailnet headers.
+- Over plain HTTP only DNS authenticates the tailnet URL; Serve HTTPS removes that and turns on the Sec-Fetch guard.
+- Anything served from the CPA origin (panel, plugin resource pages) acts with keyless admin rights.
+
+### Acceptance
+
+- [ ] On the deployed build, `exposure-check.ps1` ends with 0 FAIL.
+- [ ] An allowed phone opens `<tailnet URL>/management.html` straight into the dashboard; the CI runner and bot VM get 401 without the key.
+- [ ] T3 Code's hub keeps working with any non-empty key from this PC.
+- [ ] Server `go test ./...` and panel `bun run verify` stay green.
+
+---
+
 ## Appendix A — `devyre/deploy/config.template.yaml`
 
 ```yaml
