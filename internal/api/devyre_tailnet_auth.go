@@ -18,6 +18,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/tailnetauth"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	log "github.com/sirupsen/logrus"
@@ -77,21 +78,23 @@ func devyreKeylessProxyAccess(c *gin.Context, authErr *sdkaccess.AuthError) bool
 	if cfg == nil || !cfg.RemoteManagement.TailnetAuth.Enabled || !cfg.RemoteManagement.TailnetAuth.ProxyAPI {
 		return false
 	}
-	path := c.Request.URL.Path
 	decision := tailnetauth.Decide(tailnetauth.PolicyFromConfig(cfg), tailnetauth.FromHTTP(c.RemoteIP(), c.Request))
+	// The log formatter prints only whitelisted fields, so the request and the
+	// identity go into the message (the path quoted, as a decoded path may hold
+	// control characters). request_id ties the line to the access log line.
+	fields := log.Fields{"reason": decision.Reason}
+	if requestID := logging.GetGinRequestID(c); requestID != "" {
+		fields["request_id"] = requestID
+	}
+	method, path := c.Request.Method, c.Request.URL.Path
 	if !decision.Trusted {
-		log.WithFields(log.Fields{"reason": decision.Reason, "path": path}).Debug("tailnet-auth: proxy request needs an API key")
+		log.WithFields(fields).Debugf("tailnet-auth: proxy %s %q needs an API key", method, path)
 		return false
 	}
 	c.Set("userApiKey", decision.Principal())
 	c.Set("accessProvider", devyreKeylessAccessProvider)
 	c.Set("accessMetadata", map[string]string{"source": decision.Method})
-	log.WithFields(log.Fields{
-		"method": decision.Method,
-		"login":  decision.Login,
-		"device": decision.Device,
-		"path":   path,
-	}).Debug("tailnet-auth: proxy request trusted without an API key")
+	log.WithFields(fields).Debugf("tailnet-auth: proxy %s %q trusted without an API key, %s", method, path, decision.Summary())
 	return true
 }
 

@@ -556,6 +556,26 @@ func TestDecision_Principal(t *testing.T) {
 	}
 }
 
+// Summary is what the debug decision lines print; the log formatter drops
+// fields it does not know, so the identity must be in this text.
+func TestDecision_Summary(t *testing.T) {
+	cases := []struct {
+		decision Decision
+		want     string
+	}{
+		{Decision{Trusted: true, Method: MethodTailnet, Login: testLogin, Device: testDevice}, `via=tailnet login="` + testLogin + `" device=` + testDevice},
+		{Decision{Trusted: true, Method: MethodTailnet, Device: testDeviceV6}, `via=tailnet login="" device=` + testDeviceV6},
+		{Decision{Trusted: true, Method: MethodTailnet, Login: "evil\nline", Device: testDevice}, `via=tailnet login="evil\nline" device=` + testDevice},
+		{Decision{Trusted: true, Method: MethodLocal}, "via=local"},
+		{Decision{Reason: "x"}, "untrusted"},
+	}
+	for _, tc := range cases {
+		if got := tc.decision.Summary(); got != tc.want {
+			t.Errorf("Summary(%+v) = %q, want %q", tc.decision, got, tc.want)
+		}
+	}
+}
+
 func TestPolicyFromConfig(t *testing.T) {
 	if got := PolicyFromConfig(nil); got.Enabled {
 		t.Fatalf("PolicyFromConfig(nil) = %+v, want disabled", got)

@@ -158,6 +158,21 @@ func (d Decision) Principal() string {
 	}
 }
 
+// Summary describes how a trusted request was trusted, for debug logs:
+// `via=tailnet login="owner@example.com" device=100.64.0.10` or `via=local`.
+// The project's log formatter prints only a fixed set of fields, so callers put
+// this text in the message itself. It never contains a key.
+func (d Decision) Summary() string {
+	switch {
+	case !d.Trusted:
+		return "untrusted"
+	case d.Method == MethodLocal:
+		return "via=local"
+	default:
+		return "via=" + d.Method + " login=" + strconv.Quote(d.Login) + " device=" + d.Device
+	}
+}
+
 func deny(reason string) Decision {
 	return Decision{Reason: reason}
 }

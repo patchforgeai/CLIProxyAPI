@@ -40,7 +40,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/devyre_routing_readings_route_test.go` | The readings endpoint is on `/v8` only, behind management auth |
 | `internal/api/devyre_t3_hub_contract_test.go` | `TestT3Hub_*`, the T3 Code hub contract |
 | `internal/api/devyre_tailnet_auth.go` | Keyless proxy API for trusted requests (`proxy-api`), the key-only `/v1/ws` wrapper and the anti-framing headers of the panel pages |
-| `internal/api/devyre_tailnet_auth_test.go` | Full-stack `tailnet-auth` tests through the real server and config loader: session endpoint, token-bearing routes, CORS, proxy principal, `/v1/ws`, framing |
+| `internal/api/devyre_tailnet_auth_test.go` | Full-stack `tailnet-auth` tests through the real server and config loader: session endpoint, token-bearing routes, CORS, proxy principal, `/v1/ws`, framing, the tailnet name on the API port, the rendered proxy debug lines |
 | `internal/api/handlers/management/devyre_quota_observer.go` | Idle-credential usage poller; also forgets the readings of removed credentials |
 | `internal/api/handlers/management/devyre_quota_observer_test.go` | Poller scheduling, min-gap, backoff and pruning tests |
 | `internal/api/handlers/management/devyre_routing_config_test.go` | The routing blocks survive `/v8/management` config writes |
@@ -48,7 +48,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/handlers/management/devyre_routing_readings_test.go` | Readings endpoint golden JSON |
 | `internal/api/handlers/management/devyre_routing_strategy_test.go` | `PUT /routing/strategy` accepts `expiring-first` and its aliases |
 | `internal/api/handlers/management/devyre_tailnet_auth.go` | Keyless management access (`devyreTailnetAuthorize`, which `Middleware()` asks first) and `GET /v8/management/auth/session` |
-| `internal/api/handlers/management/devyre_tailnet_auth_test.go` | Middleware, ban, `allow-remote` and session tests, plus a `/v8` config write round trip |
+| `internal/api/handlers/management/devyre_tailnet_auth_test.go` | Middleware, ban, `allow-remote` and session tests, a `/v8` config write round trip, and the debug decision lines as the log formatter renders them |
 | `internal/api/handlers/management/devyre_usage_cache.go` | Usage cache inside `APICall` |
 | `internal/api/handlers/management/devyre_usage_cache_test.go` | Usage cache tests: TTLs, single-flight, stale, backoff, bypass, query variants, writes |
 | `internal/config/devyre_deploy_template_test.go` | Loads the deploy template through the real config loader and checks the typed routing values; pins the `tailnet-auth` block and the keys `tailnet-trust.ps1` writes |
@@ -206,6 +206,8 @@ A request skips the key only when all of these hold:
 - For the management API, trust never opens more than the key would: a management key must be configured, and `management.allow-remote` must be true unless the client is loopback. Inside the container no client is loopback, this PC and tailscale serve's hop included, so the deploy template keeps `allow-remote: true`.
 
 Trusted management responses carry no `Access-Control-*` headers and send `Cache-Control: no-store`, so another origin can never read them. `/management.html` and the safe-mode page at `/` refuse framing (`Content-Security-Policy: frame-ancestors 'none'`, `X-Frame-Options: DENY`).
+
+To audit keyless access, turn on `observability.logs.debug` (in the panel's config editor). Every decision is then logged at debug level, for example `tailnet-auth: management GET "/v8/management/config" trusted without a key, via=tailnet login="<login>" device=<tailnet IP> reason="allowed tailnet device"`, or `... needs the key reason="device not in allowed-devices"` for a refusal. Proxy API lines carry the request ID of their access log line. Keys are never logged.
 
 **Keep your own automation out: tag it.** Every node on this tailnet, the CI runner and the bot VM included, is untagged and owned by the same login, so tailscale serve stamps them all with the allowed login. Only `allowed-devices` keeps them out, and an allowed CI runner or bot could read the Claude OAuth tokens through the management API. The barrier that holds is tagging those hosts in the tailnet policy (for example `tag:ci` and `tag:bot`): tagged nodes are never candidates and get no identity headers. Until they are tagged, keep in mind:
 

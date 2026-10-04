@@ -38,14 +38,17 @@ func (h *Handler) devyreTailnetAuthorize(c *gin.Context) bool {
 	if !policy.Enabled || !keyConfigured {
 		return false
 	}
-	path := c.Request.URL.Path
+	// The log formatter prints only whitelisted fields ("reason" is one), so the
+	// request and the identity go into the message. The path is quoted because a
+	// decoded path may hold control characters.
+	method, path := c.Request.Method, c.Request.URL.Path
 	decision := tailnetauth.Decide(policy, tailnetauth.FromHTTP(c.RemoteIP(), c.Request))
 	if !decision.Trusted {
-		log.WithFields(log.Fields{"reason": decision.Reason, "path": path}).Debug("tailnet-auth: management request needs the key")
+		log.WithField("reason", decision.Reason).Debugf("tailnet-auth: management %s %q needs the key", method, path)
 		return false
 	}
 	if clientIP := c.ClientIP(); !allowRemote && clientIP != "127.0.0.1" && clientIP != "::1" {
-		log.WithField("path", path).Debug("tailnet-auth: management request needs the key: management.allow-remote is off")
+		log.WithField("reason", "management.allow-remote is off").Debugf("tailnet-auth: management %s %q needs the key, %s", method, path, decision.Summary())
 		return false
 	}
 	c.Set(devyreAuthSessionContextKey, decision)
@@ -56,12 +59,7 @@ func (h *Handler) devyreTailnetAuthorize(c *gin.Context) bool {
 		}
 	}
 	header.Set("Cache-Control", "no-store")
-	log.WithFields(log.Fields{
-		"method": decision.Method,
-		"login":  decision.Login,
-		"device": decision.Device,
-		"path":   path,
-	}).Debug("tailnet-auth: management request trusted without a key")
+	log.WithField("reason", decision.Reason).Debugf("tailnet-auth: management %s %q trusted without a key, %s", method, path, decision.Summary())
 	return true
 }
 

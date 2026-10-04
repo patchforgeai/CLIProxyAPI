@@ -21,8 +21,11 @@ import (
 	"github.com/gin-gonic/gin"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v8/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v8/sdk/access"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -739,4 +742,61 @@ func TestTailnetAuthServer_V8ConfigWriteTakesEffect(t *testing.T) {
 	if got := reloaded.RemoteManagement.TailnetAuth; len(got.AllowedDevices) != 2 || !got.Enabled || !got.AllowLocal || !got.ProxyAPI {
 		t.Fatalf("written tailnet-auth = %+v", got)
 	}
+}
+
+// A5: the proxy API's keyless decision lines say what was decided and carry the
+// request ID of the matching access log line. They are checked as the project's
+// log formatter renders them, which prints only whitelisted fields.
+func TestTailnetAuthServer_ProxyDebugLogsShowTheDecision(t *testing.T) {
+	f := newTailnetSrvFixture(t, tailnetSrvBlock, nil)
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	previousOut := logger.Out
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.DebugLevel)
+	logger.SetOutput(io.Discard)
+	t.Cleanup(func() {
+		logger.ReplaceHooks(previousHooks)
+		logger.SetLevel(previousLevel)
+		logger.SetOutput(previousOut)
+	})
+
+	expect := func(shape string, status int, want ...string) {
+		t.Helper()
+		hook.Reset()
+		if rec := f.serve(tailnetSrvRequest(t, shape, http.MethodGet, "/v1/models", "")); rec.Code != status {
+			t.Fatalf("%s: status = %d, want %d; body = %s", shape, rec.Code, status, rec.Body.String())
+		}
+		var lines []string
+		for _, entry := range hook.AllEntries() {
+			if !strings.HasPrefix(entry.Message, "tailnet-auth: proxy") {
+				continue
+			}
+			if requestID, _ := entry.Data["request_id"].(string); requestID == "" {
+				t.Fatalf("%s: decision line has no request_id: %q", shape, entry.Message)
+			}
+			rendered, errFormat := (&logging.LogFormatter{}).Format(entry)
+			if errFormat != nil {
+				t.Fatalf("format log entry: %v", errFormat)
+			}
+			lines = append(lines, string(rendered))
+		}
+		if len(lines) != 1 {
+			t.Fatalf("%s: %d proxy decision lines, want 1: %q", shape, len(lines), lines)
+		}
+		if strings.Contains(lines[0], "[--------]") {
+			t.Fatalf("%s: rendered line has no request ID: %q", shape, lines[0])
+		}
+		for _, part := range want {
+			if !strings.Contains(lines[0], part) {
+				t.Fatalf("%s: log line %q lacks %q", shape, lines[0], part)
+			}
+		}
+	}
+	expect("tailnet", http.StatusOK, "[debug]",
+		`tailnet-auth: proxy GET "/v1/models" trusted without an API key, via=tailnet login="`+tailnetSrvLogin+`" device=`+tailnetSrvDevice,
+		`reason="allowed tailnet device"`)
+	expect("local", http.StatusOK, `proxy GET "/v1/models" trusted without an API key, via=local`, `reason="direct request from this PC"`)
+	expect("device", http.StatusUnauthorized, `proxy GET "/v1/models" needs an API key`, `reason="device not in allowed-devices"`)
 }

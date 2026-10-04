@@ -2,6 +2,7 @@ package management
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,7 +12,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/tailnetauth"
+	log "github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -485,4 +489,87 @@ func tailnetJSONEqual(a, b any) bool {
 	left, errLeft := json.Marshal(a)
 	right, errRight := json.Marshal(b)
 	return errLeft == nil && errRight == nil && string(left) == string(right)
+}
+
+// tailnetCaptureLogs records the standard logger's entries at debug level for
+// the rest of the test and keeps them off the console. The logger is
+// process-global, so callers must not run in parallel.
+func tailnetCaptureLogs(t *testing.T) *logtest.Hook {
+	t.Helper()
+	logger := log.StandardLogger()
+	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
+	previousLevel := logger.GetLevel()
+	previousOut := logger.Out
+	hook := logtest.NewLocal(logger)
+	logger.SetLevel(log.DebugLevel)
+	logger.SetOutput(io.Discard)
+	t.Cleanup(func() {
+		logger.ReplaceHooks(previousHooks)
+		logger.SetLevel(previousLevel)
+		logger.SetOutput(previousOut)
+	})
+	return hook
+}
+
+// tailnetRenderedLogs renders the captured tailnet-auth entries exactly as the
+// project's log formatter prints them, then clears the capture.
+func tailnetRenderedLogs(t *testing.T, hook *logtest.Hook) []string {
+	t.Helper()
+	var lines []string
+	formatter := &logging.LogFormatter{}
+	for _, entry := range hook.AllEntries() {
+		if !strings.HasPrefix(entry.Message, "tailnet-auth:") {
+			continue
+		}
+		rendered, errFormat := formatter.Format(entry)
+		if errFormat != nil {
+			t.Fatalf("format log entry: %v", errFormat)
+		}
+		lines = append(lines, strings.TrimRight(string(rendered), "\n"))
+	}
+	hook.Reset()
+	return lines
+}
+
+// A5: the debug decision lines must say what was decided. The project's log
+// formatter prints only whitelisted fields, so lines that put the path, the
+// trust path, the login and the device into fields printed none of them. The
+// lines are checked as rendered, and they never carry a key.
+func TestTailnetAuthMiddleware_DebugLogsShowTheDecision(t *testing.T) {
+	hook := tailnetCaptureLogs(t)
+	expect := func(name string, router *gin.Engine, request tailnetTestRequest, status int, want ...string) {
+		t.Helper()
+		if rec := request.serve(router); rec.Code != status {
+			t.Fatalf("%s: status = %d, want %d; body = %s", name, rec.Code, status, rec.Body.String())
+		}
+		lines := tailnetRenderedLogs(t, hook)
+		if len(lines) != 1 {
+			t.Fatalf("%s: %d tailnet-auth log lines, want 1: %q", name, len(lines), lines)
+		}
+		for _, part := range want {
+			if !strings.Contains(lines[0], part) {
+				t.Fatalf("%s: log line %q lacks %q", name, lines[0], part)
+			}
+		}
+		if strings.Contains(lines[0], tailnetTestKey) || strings.Contains(lines[0], "stale-or-wrong-key") {
+			t.Fatalf("%s: log line carries a key: %q", name, lines[0])
+		}
+	}
+
+	h := newTailnetTestHandler(t, nil)
+	router := newTailnetTestRouter(t, h)
+	router.Group("/v8/management", h.Middleware()).GET("/files/*name", func(c *gin.Context) { c.Status(http.StatusOK) })
+	expect("tailnet", router, tailnetTrusted("/v8/management/config").with("Authorization", "Bearer stale-or-wrong-key"), http.StatusOK,
+		"[debug]", `tailnet-auth: management GET "/v8/management/config" trusted without a key`,
+		`via=tailnet login="`+tailnetTestLogin+`" device=`+tailnetTestDevice, `reason="allowed tailnet device"`)
+	expect("local", router, tailnetLocal("/v0/management/auth-files"), http.StatusOK,
+		`management GET "/v0/management/auth-files" trusted without a key, via=local`, `reason="direct request from this PC"`)
+	expect("unlisted device", router, tailnetTrusted("/v8/management/config").with("X-Forwarded-For", tailnetTestUnlisted), http.StatusUnauthorized,
+		`management GET "/v8/management/config" needs the key`, `reason="device not in allowed-devices"`)
+	expect("control characters in the path", router, tailnetTrusted("/v8/management/files/a%0Aforged"), http.StatusOK,
+		`management GET "/v8/management/files/a\nforged" trusted without a key`)
+
+	remoteOff := newTailnetTestRouter(t, newTailnetTestHandler(t, func(cfg *config.Config) { cfg.RemoteManagement.AllowRemote = false }))
+	expect("allow-remote off", remoteOff, tailnetTrusted("/v8/management/auth/session"), http.StatusForbidden,
+		`management GET "/v8/management/auth/session" needs the key, via=tailnet login="`+tailnetTestLogin+`"`, `reason="management.allow-remote is off"`)
 }
