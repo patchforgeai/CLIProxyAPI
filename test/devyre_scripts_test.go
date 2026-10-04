@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -289,6 +290,18 @@ func (f *devyreTrustFixture) written(run devyreScriptRun) map[string]any {
 	return writes[0]
 }
 
+// current returns the block the fake API holds after a successful run, whether
+// the run wrote it or found it already in place.
+func (f *devyreTrustFixture) current(run devyreScriptRun) map[string]any {
+	f.t.Helper()
+	if run.exitCode != 0 {
+		f.t.Fatalf("exit code %d, want 0; output:\n%s", run.exitCode, run.output)
+	}
+	f.api.mu.Lock()
+	defer f.api.mu.Unlock()
+	return f.api.block
+}
+
 func devyreStrings(value any) []string {
 	items, _ := value.([]any)
 	out := make([]string, 0, len(items))
@@ -330,5 +343,154 @@ func TestDevyreTailnetTrust_WritesTailnetHostsWithTheServePort(t *testing.T) {
 	}
 	if got := devyreStrings(rerun["allowed-devices"]); !reflect.DeepEqual(got, []string{"100.64.0.10", "fd7a:115c:a1e0::10"}) {
 		t.Fatalf("re-run allowed-devices = %v", got)
+	}
+}
+
+// devyreLiveBlock is a tailnet-auth block that allows the devices with these
+// last IP octets (IPv4 and IPv6).
+func devyreLiveBlock(lastOctets ...string) map[string]any {
+	devices := []any{}
+	for _, last := range lastOctets {
+		devices = append(devices, "100.64.0."+last, "fd7a:115c:a1e0::"+last)
+	}
+	return map[string]any{
+		"enabled":         true,
+		"allowed-logins":  []any{devyreOwnerLogin},
+		"allowed-devices": devices,
+		"allowed-hosts":   []any{devyreTailnetFQDN + ":8318", devyreTailnetShort + ":8318", "localhost", "127.0.0.1"},
+		"allow-local":     true,
+		"proxy-api":       true,
+	}
+}
+
+// devyreDevicesOf returns the sorted allowed-devices of a written block.
+func devyreDevicesOf(block map[string]any) []string {
+	devices := devyreStrings(block["allowed-devices"])
+	sort.Strings(devices)
+	return devices
+}
+
+func devyreWantDevices(lastOctets ...string) []string {
+	var want []string
+	for _, last := range lastOctets {
+		want = append(want, "100.64.0."+last, "fd7a:115c:a1e0::"+last)
+	}
+	sort.Strings(want)
+	return want
+}
+
+// devyreRename makes a peer report a new host name. Its MagicDNS name follows,
+// deduplicated with a suffix when another node holds that name, as the control
+// plane does unless the machine name is pinned in the admin console.
+func devyreRename(status *devyreStatus, peer, hostName, label string) {
+	node := status.Peer[peer]
+	node.HostName = hostName
+	node.DNSName = label + ".example-tailnet.ts.net."
+	status.Peer[peer] = node
+}
+
+// A compromised automation host that renames itself to fit the owner's wildcard
+// or exact names must not be selected. Before the fix, -Include matched the
+// self-reported host name and wildcards added new devices, so both renamed
+// automation hosts below were written into allowed-devices.
+func TestDevyreTailnetTrust_RenamedAutomationHostsAreNotSelected(t *testing.T) {
+	status := devyreTailnet()
+	devyreRename(&status, "nodekey:ci", "iphone-17", "iphone-17") // fits iphone*
+	devyreRename(&status, "nodekey:bot", "LAPTOP", "laptop-1")    // the laptop's host name, deduplicated label
+	f := newDevyreTrustFixture(t, status, devyreLiveBlock("10", "11"))
+
+	run := f.run("-Include", devyreTailnetShort+",iphone*,laptop", "-Force")
+	block := f.written(run)
+	if got, want := devyreDevicesOf(block), devyreWantDevices("10", "11", "12"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("allowed-devices = %v, want this PC, the allowed iPhone and the laptop named exactly (%v); output:\n%s", got, want, run.output)
+	}
+	if !strings.Contains(run.output, "new device matched only by the wildcard iphone*") {
+		t.Fatalf("output does not explain why iphone-17 was left out:\n%s", run.output)
+	}
+
+	// An exact name matches the unique MagicDNS name only, never a host name
+	// another node copied.
+	status = devyreTailnet()
+	devyreRename(&status, "nodekey:bot", "DEVBOX", "devbox-1")
+	g := newDevyreTrustFixture(t, status, nil)
+	block = g.written(g.run("-Include", devyreTailnetShort))
+	if got, want := devyreDevicesOf(block), devyreWantDevices("10"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("-Include %s selected %v, want only this PC %v", devyreTailnetShort, got, want)
+	}
+}
+
+// Wildcards keep devices that are already allowed (and this PC) but never add
+// a new one; -Include * on a first run therefore selects only this PC.
+func TestDevyreTailnetTrust_WildcardsNeverAddNewDevices(t *testing.T) {
+	f := newDevyreTrustFixture(t, devyreTailnet(), devyreLiveBlock("10", "11"))
+	run := f.run("-Include", "*")
+	if got, want := devyreDevicesOf(f.current(run)), devyreWantDevices("10", "11"); !reflect.DeepEqual(got, want) || len(f.api.writes()) != 0 {
+		t.Fatalf("-Include * selected %v with %d writes, want the already allowed devices %v unchanged; output:\n%s", got, len(f.api.writes()), want, run.output)
+	}
+	if !strings.Contains(run.output, "new device matched only by the wildcard *") {
+		t.Fatalf("output does not say why the new devices were left out:\n%s", run.output)
+	}
+
+	g := newDevyreTrustFixture(t, devyreTailnet(), nil)
+	block := g.written(g.run("-Include", "*"))
+	if got, want := devyreDevicesOf(block), devyreWantDevices("10"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("-Include * on a first run selected %v, want only this PC %v", got, want)
+	}
+
+	h := newDevyreTrustFixture(t, devyreTailnet(), devyreLiveBlock("10", "11"))
+	block = h.written(h.run("-Include", "*", "-Exclude", "iphone*"))
+	if got, want := devyreDevicesOf(block), devyreWantDevices("10"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("-Exclude iphone* left %v, want %v", got, want)
+	}
+}
+
+// A write that adds a new device needs confirmation. A session that cannot ask
+// writes nothing; -ShowOnly lists the new device with its node ID, OS and
+// registration date.
+func TestDevyreTailnetTrust_NewDevicesNeedConfirmation(t *testing.T) {
+	f := newDevyreTrustFixture(t, devyreTailnet(), devyreLiveBlock("10"))
+	preview := f.run("-Include", devyreTailnetShort+",laptop", "-ShowOnly")
+	if preview.exitCode != 0 || len(f.api.writes()) != 0 {
+		t.Fatalf("-ShowOnly: exit %d with %d writes, want 0 and none; output:\n%s", preview.exitCode, len(f.api.writes()), preview.output)
+	}
+	for _, want := range []string{"laptop: node nLAPTOP00CNTRL, OS windows, host name LAPTOP, registered 2024-01-02", "allowed (NEW)"} {
+		if !strings.Contains(preview.output, want) {
+			t.Fatalf("-ShowOnly output lacks %q:\n%s", want, preview.output)
+		}
+	}
+
+	refused := f.run("-Include", devyreTailnetShort+",laptop")
+	if refused.exitCode != 1 || len(f.api.writes()) != 0 || !strings.Contains(refused.output, "-Force") {
+		t.Fatalf("unconfirmed new device: exit %d with %d writes, want 1 and none plus a -Force hint; output:\n%s", refused.exitCode, len(f.api.writes()), refused.output)
+	}
+
+	block := f.written(f.run("-Include", devyreTailnetShort+",laptop", "-Force"))
+	if got, want := devyreDevicesOf(block), devyreWantDevices("10", "12"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("confirmed write = %v, want %v", got, want)
+	}
+
+	// Keeping only already allowed devices asks nothing.
+	g := newDevyreTrustFixture(t, devyreTailnet(), devyreLiveBlock("10", "11", "12"))
+	block = g.written(g.run("-Include", devyreTailnetShort+",laptop"))
+	if got, want := devyreDevicesOf(block), devyreWantDevices("10", "12"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("re-selection of allowed devices = %v, want %v", got, want)
+	}
+}
+
+// The automation guard reads the MagicDNS name and the host name, and only an
+// exact MagicDNS name in -AllowAutomationName lifts it.
+func TestDevyreTailnetTrust_AutomationGuard(t *testing.T) {
+	status := devyreTailnet()
+	devyreRename(&status, "nodekey:laptop", "ci-runner-7", "laptop") // pinned clean machine name, automation host name
+	f := newDevyreTrustFixture(t, status, devyreLiveBlock("10"))
+	block := f.current(f.run("-Include", devyreTailnetShort+",laptop,ci-runner", "-AllowAutomationName", "ci-runner-7", "-Force"))
+	if got, want := devyreDevicesOf(block), devyreWantDevices("10"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("guarded devices were selected: %v, want %v", got, want)
+	}
+
+	g := newDevyreTrustFixture(t, devyreTailnet(), devyreLiveBlock("10"))
+	block = g.written(g.run("-Include", devyreTailnetShort+",ci-runner", "-AllowAutomationName", "ci-runner", "-Force"))
+	if got, want := devyreDevicesOf(block), devyreWantDevices("10", "13"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("-AllowAutomationName ci-runner = %v, want %v", got, want)
 	}
 }

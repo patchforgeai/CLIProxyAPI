@@ -11,16 +11,28 @@
                      (machine.<tailnet>.ts.net:8318), plus localhost and 127.0.0.1
     allowed-devices  every Tailscale IP, IPv4 and IPv6, of the selected devices
 
-  Candidates are this PC and the untagged peers owned by the same login. -Include selects them
-  by name: wildcards, case-insensitive, matched against the host name and the first label of the
-  MagicDNS name (iPhones report the host name "localhost", so use the MagicDNS label for them).
-  Without -Include, a re-run keeps the candidates already in the live allowed-devices, so it
-  refreshes the names after a tailnet rename without changing the selection. -Exclude removes
-  matches. A device whose name holds the token ci, runner, bot, build or agent is dropped with a
-  warning, even when -Include matches it, unless -AllowAutomationName names it exactly. Every node
-  on this tailnet is owned by the same login, the CI runner and the bot VM included, so tailscale
-  serve stamps them all with the allowed login: allowed-devices is the only thing that keeps
-  them out. Tagged nodes are never listed.
+  Candidates are this PC and the untagged peers owned by the same login. Names are MagicDNS
+  names: the first label of each device's MagicDNS name (the machine name in the admin console),
+  case-insensitive, or the full MagicDNS name. The tailnet keeps them unique. Host names are
+  never matched: a node reports its own host name, and many nodes can share one.
+
+  -Include selects devices. A device that is not in the live allowed-devices yet (a new device)
+  is selected only by its exact name. Wildcards such as iphone* only keep devices that are
+  already allowed, plus this PC. A machine can rename itself, and its MagicDNS name follows its
+  host name unless the name is pinned in the admin console, so a wildcard must never pull in a
+  machine that renamed itself to fit it. New devices are listed with their node ID, OS and
+  registration date. A write that adds one asks for confirmation; -Force skips the question once
+  you have checked the -ShowOnly table. Without -Include, a re-run keeps the candidates already
+  in the live allowed-devices, so it refreshes the names after a tailnet rename without changing
+  the selection. -Exclude removes matches.
+
+  A device whose MagicDNS name or host name holds the token ci, runner, bot, build or agent is
+  dropped with a warning, even when -Include names it, unless -AllowAutomationName gives its
+  exact MagicDNS name. That guard only catches mistakes; a compromised machine can pick any name.
+  Every node on this tailnet is owned by the same login, the CI runner and the bot VM included,
+  so tailscale serve stamps them all with the allowed login, and allowed-devices is what keeps
+  them out. Tag the automation hosts in the tailnet policy: tagged nodes are never candidates
+  and get no identity headers.
 
   Only management.tailnet-auth is written, with one
   PUT /v8/management/config/management/tailnet-auth to the CPA on this PC, using the management
@@ -33,15 +45,19 @@
   nothing.
 
 .PARAMETER Include
-  Names of the devices to allow, as wildcards: for example machine, iphone*, *pc. -Include *
-  selects every candidate (the automation guard still applies). The selection replaces the live
-  list, so name every device you want to keep.
+  MagicDNS names of the devices to allow, for example machine,iphone-15,laptop. A new device
+  needs its exact name; a wildcard (iphone*, *) only keeps devices that are already allowed,
+  plus this PC. The selection replaces the live list, so name every device you want to keep.
 
 .PARAMETER Exclude
-  Names of devices to leave out (wildcards), applied after -Include.
+  MagicDNS names of devices to leave out (wildcards allowed), applied after -Include.
 
 .PARAMETER AllowAutomationName
-  Exact names of devices that may be allowed although their names look like automation hosts.
+  Exact MagicDNS names of devices that may be allowed although their names look like
+  automation hosts.
+
+.PARAMETER Force
+  Add new devices without asking. Check them in the -ShowOnly table first.
 
 .PARAMETER ShowOnly
   Print the device table and the resulting policy, and write nothing. -WhatIf does the same.
@@ -63,8 +79,8 @@
   Read a saved `tailscale status --json` instead of asking tailscale.
 
 .EXAMPLE
-  .\tailnet-trust.ps1 -Include machine,iphone*,laptop -ShowOnly
-  .\tailnet-trust.ps1 -Include machine,iphone*,laptop
+  .\tailnet-trust.ps1 -Include machine,iphone-15,laptop -ShowOnly
+  .\tailnet-trust.ps1 -Include machine,iphone-15,laptop     # asks before adding new devices
   .\tailnet-trust.ps1            # after a tailnet rename: same devices, fresh names
   .\tailnet-trust.ps1 -Disable
 #>
@@ -73,6 +89,7 @@ param(
   [string[]]$Include,
   [string[]]$Exclude,
   [string[]]$AllowAutomationName,
+  [switch]$Force,
   [switch]$ShowOnly,
   [switch]$Disable,
   [switch]$Enable,
@@ -160,6 +177,19 @@ function Find-AutomationToken([string[]]$Names) {
   return ''
 }
 
+function Test-WildcardName([string]$Pattern) {
+  return [System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($Pattern)
+}
+
+# True when a -Include/-Exclude pattern names the device: a wildcard against its MagicDNS label,
+# an exact name against the label or the full MagicDNS name. Never the self-reported host name.
+function Test-DeviceName($Device, [string]$Pattern) {
+  if (-not $Device.Label) { return $false }
+  if (Test-WildcardName $Pattern) { return ($Device.Label -like $Pattern) }
+  $exact = $Pattern.TrimEnd('.')
+  return ($Device.Label -eq $exact -or $Device.Fqdn -eq $exact)
+}
+
 function Show-Policy($Block, [hashtable]$Notes, [hashtable]$DeviceNames) {
   Write-Host 'Resulting management.tailnet-auth:'
   foreach ($name in $flagKeys) {
@@ -230,8 +260,9 @@ function Show-Changes($Before, $After, [bool]$BeforeExists, [hashtable]$DeviceNa
   }
 }
 
-# PUT the block, then prove that exactly tailnet-auth changed. Returns the exit code.
-function Write-TailnetAuth($Block, [string]$Key, $SectionBefore) {
+# PUT the block, then prove that exactly tailnet-auth changed. Returns the exit code. A write that
+# adds new devices asks first, unless -Force.
+function Write-TailnetAuth($Block, [string]$Key, $SectionBefore, [object[]]$NewDevices) {
   if ($ShowOnly) {
     Write-Host 'Not written (-ShowOnly).'
     return 0
@@ -242,6 +273,22 @@ function Write-TailnetAuth($Block, [string]$Key, $SectionBefore) {
   if ($serverTooOld) {
     Write-Host "Not written. $serverTooOldText"
     return 1
+  }
+  $newNames = @(@($NewDevices) | Where-Object { $null -ne $_ } | ForEach-Object { $_.Label })
+  if ($newNames.Count -gt 0 -and -not $Force) {
+    $confirmed = $false
+    try {
+      $confirmed = $PSCmdlet.ShouldContinue(('Let the new devices ' + ($newNames -join ', ') + ' use CPA without a key? ' +
+          'Check their node IDs, OS and registration dates above first.'), 'Allow new tailnet devices')
+    } catch {
+      Write-Host ('Not written: this session cannot ask for confirmation of the new devices (' + ($newNames -join ', ') + '). ' +
+        'Check them above, then run the same command with -Force.')
+      return 1
+    }
+    if (-not $confirmed) {
+      Write-Host 'Not written: the new devices were not confirmed.'
+      return 1
+    }
   }
   $body = ConvertTo-Json -InputObject $Block -Depth 20 -Compress
   $put = Invoke-CpaManagementApi -ApiBase $ApiBase -Key $Key -Method 'PUT' -Path $blockPath -Body $body
@@ -343,7 +390,7 @@ if ($Disable) {
   foreach ($name in $listKeys) { $disabled[$name] = [string[]]@(Get-BlockList $liveBlock $name) }
   $disabled['enabled'] = $false
   Show-Policy $disabled @{ 'enabled' = 'disabled: every request needs a key again' } @{}
-  exit (Write-TailnetAuth $disabled $key $section)
+  exit (Write-TailnetAuth $disabled $key $section @())
 }
 
 # --- devices --------------------------------------------------------------------------------------
@@ -367,19 +414,24 @@ $liveDevices = @(@(Get-BlockList $liveBlock 'allowed-devices') | ForEach-Object 
 $rows = New-Object 'System.Collections.Generic.List[object]'
 $selected = New-Object 'System.Collections.Generic.List[string]'
 $eligible = New-Object 'System.Collections.Generic.List[string]'
+$newDevices = New-Object 'System.Collections.Generic.List[object]'
 $deviceNames = @{}
 foreach ($device in @(Get-CpaTailnetDevices $status)) {
-  $names = @(@($device.Label, $device.HostName) | Where-Object { $_ } | Select-Object -Unique)
-  $display = $device.Label
+  $label = $device.Label
+  $display = $label
   if (-not $display) { $display = $device.HostName }
   if ($device.IsSelf) { $display += ' (this PC)' }
   foreach ($ip in $device.IPs) { $deviceNames[$ip] = $display }
   $tagged = @($device.Tags).Count -gt 0
   $owned = ($device.UserID -eq $self.UserID)
+  # A device is already allowed when one of its Tailscale IPs, which the control plane assigns,
+  # is in the live list. Anything else is new and must be named exactly.
+  $allowedNow = @($device.IPs | Where-Object { $liveDevices -contains $_ }).Count -gt 0
   $decision = 'excluded'
   $reason = ''
-  $token = Find-AutomationToken $names
-  $automationOk = @($names | Where-Object { $automationAllowed -contains $_ }).Count -gt 0
+  # The guard reads every name the node reports, so it also catches a self-reported host name.
+  $token = Find-AutomationToken @(@($label, $device.HostName) | Where-Object { $_ })
+  $automationOk = [bool]($label -and @($automationAllowed | Where-Object { $_ -eq $label }).Count -gt 0)
   if (-not $device.IsSelf -and $tagged) {
     $reason = 'tagged node: never listed'
   } elseif (-not $device.IsSelf -and -not $owned) {
@@ -387,14 +439,34 @@ foreach ($device in @(Get-CpaTailnetDevices $status)) {
   } elseif (@($device.IPs).Count -eq 0) {
     $reason = 'no Tailscale IPs'
   } else {
-    if (-not $token -or $automationOk) { $eligible.Add($names[0]) }
+    if ($label -and (-not $token -or $automationOk)) { $eligible.Add($label) }
     $match = ''
+    $isNew = $false
     if ($includePatterns.Count -gt 0) {
+      $exactBy = ''
+      $wildcardBy = ''
       foreach ($pattern in $includePatterns) {
-        if (@($names | Where-Object { $_ -like $pattern }).Count -gt 0) { $match = "matches -Include $pattern"; break }
+        if (-not (Test-DeviceName $device $pattern)) { continue }
+        if (Test-WildcardName $pattern) {
+          if (-not $wildcardBy) { $wildcardBy = $pattern }
+        } elseif (-not $exactBy) {
+          $exactBy = $pattern
+        }
       }
-      if (-not $match) { $reason = 'not matched by -Include' }
-    } elseif (@($device.IPs | Where-Object { $liveDevices -contains $_ }).Count -gt 0) {
+      if ($exactBy) {
+        $match = "named by -Include $exactBy"
+      } elseif ($wildcardBy -and ($allowedNow -or $device.IsSelf)) {
+        $match = "matches -Include $wildcardBy"
+      } elseif ($wildcardBy) {
+        $reason = "new device matched only by the wildcard $wildcardBy; name it exactly to add it (-Include $label)"
+      } elseif (-not $label) {
+        $reason = 'no MagicDNS name, so -Include cannot name it'
+      } else {
+        $reason = 'not matched by -Include'
+      }
+      if ($match -and $allowedNow) { $match = "already allowed; $match" }
+      $isNew = -not $allowedNow -and -not $device.IsSelf
+    } elseif ($allowedNow) {
       $match = 'already allowed in the live config'
     } else {
       $reason = 'not in the live allowed-devices'
@@ -402,18 +474,22 @@ foreach ($device in @(Get-CpaTailnetDevices $status)) {
     if ($match) {
       $excludedBy = ''
       foreach ($pattern in $excludePatterns) {
-        if (@($names | Where-Object { $_ -like $pattern }).Count -gt 0) { $excludedBy = $pattern; break }
+        if (Test-DeviceName $device $pattern) { $excludedBy = $pattern; break }
       }
       if ($excludedBy) {
         $reason = "matches -Exclude $excludedBy"
       } elseif ($token -and -not $automationOk) {
         $reason = "automation name (token '$token')"
-        Write-Warning ("Leaving out $($names[0]): its name has the automation token '$token'. Every device on this tailnet " +
+        Write-Warning ("Leaving out ${display}: its name has the automation token '$token'. Every device on this tailnet " +
           'shares your login, so an allowed CI runner or bot could read your Claude tokens through the management API. ' +
-          "If it is a personal device, pass -AllowAutomationName $($names[0]).")
+          "If it is a personal device, pass -AllowAutomationName $label.")
       } else {
         $decision = 'allowed'
         $reason = $match
+        if ($isNew) {
+          $decision = 'allowed (NEW)'
+          $newDevices.Add($device)
+        }
         if ($token) { $reason += ' (automation name allowed by -AllowAutomationName)' }
         foreach ($ip in $device.IPs) { if (-not $selected.Contains($ip)) { $selected.Add($ip) } }
       }
@@ -435,19 +511,32 @@ foreach ($device in @(Get-CpaTailnetDevices $status)) {
     })
 }
 
-Write-Host "Tailnet devices (owner match: owned by $($self.Login), the login that owns this PC):"
+Write-Host "Tailnet devices (names are MagicDNS names; owner match: owned by $($self.Login), the login that owns this PC):"
 Write-Host (($rows | Format-Table -AutoSize -Wrap | Out-String -Width 400).TrimEnd())
 Write-Host ''
 
+if ($newDevices.Count -gt 0) {
+  Write-Host 'New devices, not allowed before. Check each one before you confirm:'
+  foreach ($device in $newDevices) {
+    $created = $device.Created
+    if (-not $created) { $created = 'unknown' }
+    Write-Host ('  {0}: node {1}, OS {2}, host name {3}, registered {4}' -f $device.Label, $device.ID, $device.OS, $device.HostName, $created)
+    Write-Host ('      IPs {0}' -f (@($device.IPs) -join ' '))
+  }
+  Write-Host '  A device you just set up shows a recent registration date and the OS you expect. An old date or an unexpected OS'
+  Write-Host '  means an existing machine has taken that name: leave it out and check it.'
+  Write-Host ''
+}
+
 if ($selected.Count -eq 0) {
   if ($includePatterns.Count -gt 0) {
-    Write-Host 'No device is selected: -Include matched nothing that -Exclude and the automation guard let through.'
+    Write-Host 'No device is selected: -Include named nothing that -Exclude and the automation guard let through.'
   } else {
     Write-Host 'No device is selected. Without -Include the script keeps the devices already in the live allowed-devices, and there are none.'
   }
-  $suggestion = '<device>,<device>'
+  $suggestion = '<name>,<name>'
   if ($eligible.Count -gt 0) { $suggestion = ($eligible.ToArray() -join ',') }
-  Write-Host "Choose the devices by name, for example:"
+  Write-Host 'Name the devices you want by their exact MagicDNS names. These are all the devices that could be allowed; keep only yours:'
   Write-Host "  devyre\scripts\tailnet-trust.ps1 -Include $suggestion -ShowOnly"
   Write-Host 'Nothing was written.'
   exit 1
@@ -502,7 +591,7 @@ if (-not $liveAvailable) {
   Write-Host 'Not written (preview without the live config).'
   exit 0
 }
-$code = Write-TailnetAuth $ordered $key $section
+$code = Write-TailnetAuth $ordered $key $section $newDevices.ToArray()
 if ($code -eq 0 -and -not $preview) {
   Write-Host 'Check the result with devyre\scripts\exposure-check.ps1.'
 }

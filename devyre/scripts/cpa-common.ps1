@@ -247,7 +247,25 @@ function ConvertTo-CpaStringArray($Value) {
   return $list.ToArray()
 }
 
-# One record per node: this PC (IsSelf) first, then the peers sorted by MagicDNS label.
+# yyyy-MM-dd of a tailscale status timestamp ('' when absent or zero). Windows PowerShell 5.1
+# leaves the JSON text as is; later versions turn it into a DateTime.
+function ConvertTo-CpaDateText($Value) {
+  if ($null -eq $Value) { return '' }
+  if ($Value -is [datetime]) {
+    if ($Value.Year -le 1) { return '' }
+    return $Value.ToUniversalTime().ToString('yyyy-MM-dd')
+  }
+  $text = ([string]$Value).Trim()
+  if ($text -notmatch '^[0-9]{4}-[0-9]{2}-[0-9]{2}') { return '' }
+  $text = $text.Substring(0, 10)
+  if ($text.StartsWith('0001-')) { return '' }
+  return $text
+}
+
+# One record per node: this PC (IsSelf) first, then the peers sorted by MagicDNS label. ID is
+# the stable node ID and Created the registration date; the control plane sets both, while
+# HostName and OS are whatever the node reports about itself, and the MagicDNS label follows the
+# host name unless the machine name is pinned in the admin console. Labels are unique.
 function Get-CpaTailnetDevices($Status) {
   $devices = New-Object 'System.Collections.Generic.List[object]'
   $self = Get-CpaProperty $Status 'Self'
@@ -266,6 +284,7 @@ function Get-CpaTailnetDevices($Status) {
     $ips = @(ConvertTo-CpaStringArray (Get-CpaProperty $node 'TailscaleIPs'))
     $devices.Add([pscustomobject]@{
         IsSelf   = $entry.IsSelf
+        ID       = [string](Get-CpaProperty $node 'ID')
         HostName = [string](Get-CpaProperty $node 'HostName')
         Fqdn     = $fqdn
         Label    = $label
@@ -274,6 +293,7 @@ function Get-CpaTailnetDevices($Status) {
         Tags     = [string[]]@(ConvertTo-CpaStringArray (Get-CpaProperty $node 'Tags'))
         IPs      = [string[]]@($ips | ForEach-Object { ConvertTo-CpaIpText $_ })
         Online   = [bool](Get-CpaProperty $node 'Online')
+        Created  = ConvertTo-CpaDateText (Get-CpaProperty $node 'Created')
       })
   }
   $selfDevice = $devices[0]
