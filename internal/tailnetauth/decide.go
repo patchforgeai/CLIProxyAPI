@@ -15,11 +15,17 @@
 //     Tailscale-User-Name (RFC 2047 Q-encoded when non-ASCII) for untagged,
 //     user-owned nodes. Tagged nodes get no identity headers; Funnel requests get
 //     Tailscale-Funnel-Request.
-//   - serve only forwards requests whose Host is this machine's tailnet name.
+//   - serve only forwards requests whose Host is this machine's tailnet name, and
+//     it keeps that Host, which names the port serve listens on (8318).
 //   - Inside the container every request, from serve, from a browser on this PC or
 //     from another container, arrives from the Docker bridge gateway. Anything that
 //     reaches 127.0.0.1:8317 can therefore forge every header above; the decision
 //     narrows that (loopback Hosts never accept proxy headers) but cannot remove it.
+//   - A browser cannot set Host: it always names the port the browser connected
+//     to. The tailnet path is therefore bound to serve's port. A page that gets
+//     the tailnet name resolved to 127.0.0.1 (DNS rebinding while Tailscale's DNS
+//     is not answering) reaches the loopback publish, and its Host names that
+//     port, which the tailnet path never accepts.
 //   - Browsers send no Sec-Fetch-* headers to URLs that are not potentially
 //     trustworthy, such as the plain-HTTP tailnet URL, and no Origin on GET/HEAD
 //     no-cors requests (navigation, img, script, iframe, redirects). Requiring an
@@ -77,7 +83,8 @@ var proxyHeaders = []string{"X-Forwarded-For", "X-Real-IP", "Forwarded", "X-Forw
 // value. Browsers never add them on their own.
 var signalKeyHeaders = []string{"X-Management-Key", "X-Api-Key", "X-Goog-Api-Key"}
 
-// Policy is management.tailnet-auth combined with server.trusted-proxies.
+// Policy is management.tailnet-auth combined with server.trusted-proxies and
+// server.port.
 type Policy struct {
 	Enabled        bool
 	AllowedLogins  []string
@@ -85,6 +92,11 @@ type Policy struct {
 	AllowedHosts   []string
 	AllowLocal     bool
 	TrustedProxies []string
+	// ServerPort is server.port, the port this server listens on and the one the
+	// loopback publish forwards to. tailscale serve listens on a port of its own,
+	// so a tailnet Host that names this port never came through serve. 0 skips
+	// that check.
+	ServerPort int
 }
 
 // PolicyFromConfig builds the policy from cfg. A nil cfg yields a disabled policy.
@@ -101,6 +113,7 @@ func PolicyFromConfig(cfg *config.Config) Policy {
 		AllowedHosts:   settings.AllowedHosts,
 		AllowLocal:     settings.AllowLocal,
 		TrustedProxies: cfg.TrustedProxies,
+		ServerPort:     cfg.Port,
 	}
 }
 
@@ -176,11 +189,13 @@ func Decide(p Policy, r Request) Decision {
 		return deny("Tailscale Funnel request")
 	}
 	// R4: the Host, and the X-Forwarded-Host serve copies from it, must be allowed.
+	// An entry with a port admits only that port; the tailnet path below demands
+	// one.
 	host, ok := parseHostPort(r.Host)
 	if !ok {
 		return deny("missing or invalid Host")
 	}
-	if !hostAllowed(host.name, p.AllowedHosts) {
+	if !hostAllowed(host, p.AllowedHosts, false) {
 		return deny("Host not in allowed-hosts")
 	}
 	if values := header.Values("X-Forwarded-Host"); len(values) == 1 {
@@ -193,11 +208,12 @@ func Decide(p Policy, r Request) Decision {
 	if reason := browserGuard(header, host); reason != "" {
 		return deny(reason)
 	}
-	// AM4: the Host class picks the only path that can apply.
+	// AM4: the Host class picks the only path that can apply. Loopback names may
+	// be listed without a port; the local path does not look at it.
 	if isLoopbackHost(host.name) {
 		return decideLocal(p, header)
 	}
-	return decideTailnet(p, header)
+	return decideTailnet(p, host, header)
 }
 
 // decideLocal is rule R7 for a loopback Host.
@@ -220,11 +236,28 @@ func decideLocal(p Policy, header http.Header) Decision {
 
 // decideTailnet is rule R6 for a tailnet Host.
 //
+// The path is bound to the port tailscale serve listens on: the Host must name
+// a port, that port must not be server.port, and the tailnet name must be
+// listed in allowed-hosts together with that port (machine.example.ts.net:8318).
+// A bare name in allowed-hosts never opens this path. serve keeps the Host the
+// client sent, so everything it forwards names its own port, while a browser
+// that reaches the loopback publish under the tailnet name names the published
+// port and cannot change that, because Host is a forbidden header.
+//
 // allowed-devices is authoritative. Every node on a single-owner tailnet, the CI
 // runner and bot VMs included, is untagged and owned by the owner's login, so
 // serve stamps all of them with the allowed login. Only the device list tells
 // them apart, which is why an empty list trusts no device at all.
-func decideTailnet(p Policy, header http.Header) Decision {
+func decideTailnet(p Policy, host hostPort, header http.Header) Decision {
+	if host.port == 0 {
+		return deny("tailnet Host without a port")
+	}
+	if p.ServerPort != 0 && host.port == p.ServerPort {
+		return deny("tailnet Host on server.port, which tailscale serve never uses")
+	}
+	if !hostAllowed(host, p.AllowedHosts, true) {
+		return deny("tailnet Host not in allowed-hosts with this port")
+	}
 	values := header.Values("X-Forwarded-For")
 	if len(values) == 0 {
 		return deny("tailnet Host without X-Forwarded-For")
@@ -499,30 +532,41 @@ func validHostName(name string) bool {
 	return true
 }
 
-// normalizeAllowedHost turns an allowed-hosts entry into a host name; a port in
-// the entry is ignored. It returns "" for an entry that does not parse.
-func normalizeAllowedHost(entry string) string {
+// normalizeAllowedHost parses an allowed-hosts entry: a host name or IP literal,
+// optionally with a port (name:port, [IPv6]:port). Port 0 means the entry has
+// none. It reports false for an entry that does not parse.
+func normalizeAllowedHost(entry string) (hostPort, bool) {
 	entry = strings.TrimSpace(entry)
 	if entry == "" {
-		return ""
+		return hostPort{}, false
 	}
 	// A bare IP literal, IPv6 included, is written without brackets. It keeps
 	// the form parseHostPort gives a Host (IPv4-mapped IPv6 is not unmapped).
 	if addr, err := netip.ParseAddr(entry); err == nil {
 		if addr.Zone() != "" {
-			return ""
+			return hostPort{}, false
 		}
-		return addr.String()
+		return hostPort{name: addr.String()}, true
 	}
-	if host, ok := parseHostPort(entry); ok {
-		return host.name
-	}
-	return ""
+	return parseHostPort(entry)
 }
 
-func hostAllowed(name string, allowed []string) bool {
+// hostAllowed reports whether an allowed-hosts entry names host. An entry with a
+// port matches only a Host with that same explicit port; an entry without one
+// matches the name on any port, unless withPort demands an entry with a port.
+func hostAllowed(host hostPort, allowed []string, withPort bool) bool {
 	for _, entry := range allowed {
-		if normalized := normalizeAllowedHost(entry); normalized != "" && normalized == name {
+		listed, ok := normalizeAllowedHost(entry)
+		if !ok || listed.name != host.name {
+			continue
+		}
+		if listed.port != 0 {
+			if listed.port == host.port {
+				return true
+			}
+			continue
+		}
+		if !withPort {
 			return true
 		}
 	}

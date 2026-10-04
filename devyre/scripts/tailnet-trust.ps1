@@ -7,7 +7,8 @@
 .DESCRIPTION
   Reads `tailscale status --json` and builds the passwordless policy:
     allowed-logins   the login that owns this PC
-    allowed-hosts    this PC's MagicDNS FQDN and short name, localhost and 127.0.0.1
+    allowed-hosts    this PC's MagicDNS FQDN and short name, each with tailscale serve's port
+                     (machine.<tailnet>.ts.net:8318), plus localhost and 127.0.0.1
     allowed-devices  every Tailscale IP, IPv4 and IPv6, of the selected devices
 
   Candidates are this PC and the untagged peers owned by the same login. -Include selects them
@@ -454,8 +455,11 @@ if ($selected.Count -eq 0) {
 
 # --- policy ---------------------------------------------------------------------------------------
 
+# The tailnet names carry tailscale serve's port: the server trusts a tailnet name only together
+# with that port, so a page that gets the name resolved to 127.0.0.1 and reaches the loopback
+# publish (port 8317) gets nothing. Loopback names stay bare; the local path ignores the port.
 $hosts = New-Object 'System.Collections.Generic.List[string]'
-foreach ($name in @($self.Fqdn, $self.ShortName, 'localhost', '127.0.0.1')) {
+foreach ($name in @("$($self.Fqdn):$($script:CpaServePort)", "$($self.ShortName):$($script:CpaServePort)", 'localhost', '127.0.0.1')) {
   if ($name -and -not $hosts.Contains($name)) { $hosts.Add($name) }
 }
 $notes = @{}

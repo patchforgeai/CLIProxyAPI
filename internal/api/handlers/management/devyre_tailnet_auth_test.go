@@ -37,14 +37,14 @@ func tailnetTestHash(t *testing.T) string {
 
 func newTailnetTestHandler(t *testing.T, mutate func(*config.Config)) *Handler {
 	t.Helper()
-	cfg := &config.Config{TrustedProxies: []string{"127.0.0.1", "172.16.0.0/12"}}
+	cfg := &config.Config{Port: 8317, TrustedProxies: []string{"127.0.0.1", "172.16.0.0/12"}}
 	cfg.RemoteManagement.AllowRemote = true
 	cfg.RemoteManagement.SecretKey = tailnetTestHash(t)
 	cfg.RemoteManagement.TailnetAuth = config.TailnetAuthConfig{
 		Enabled:        true,
 		AllowedLogins:  []string{tailnetTestLogin},
 		AllowedDevices: []string{tailnetTestDevice},
-		AllowedHosts:   []string{"devbox", "devbox.example-tailnet.ts.net", "localhost", "127.0.0.1"},
+		AllowedHosts:   []string{"devbox:8318", tailnetTestHost, "localhost", "127.0.0.1"},
 		AllowLocal:     true,
 		ProxyAPI:       true,
 	}
@@ -424,7 +424,7 @@ func TestTailnetAuthConfig_V8WritePathRoundTripsAndTakesEffect(t *testing.T) {
 	}
 
 	block := `{"enabled":true,"allowed-logins":["` + tailnetTestLogin + `"],"allowed-devices":["` + tailnetTestDevice + `"],` +
-		`"allowed-hosts":["devbox","devbox.example-tailnet.ts.net","localhost","127.0.0.1"],"allow-local":false,"proxy-api":true}`
+		`"allowed-hosts":["devbox:8318","devbox.example-tailnet.ts.net:8318","localhost","127.0.0.1"],"allow-local":false,"proxy-api":true}`
 	call(http.MethodPut, "/v8/management/config/management/tailnet-auth", block, http.StatusOK)
 
 	var view map[string]any

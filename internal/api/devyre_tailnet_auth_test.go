@@ -46,8 +46,8 @@ const tailnetSrvBlock = `  tailnet-auth:
       - "100.64.0.10"
       - "fd7a:115c:a1e0::10"
     allowed-hosts:
-      - "devbox"
-      - "devbox.example-tailnet.ts.net"
+      - "devbox:8318"
+      - "devbox.example-tailnet.ts.net:8318"
       - "localhost"
       - "127.0.0.1"
     allow-local: true
@@ -233,6 +233,59 @@ func TestTailnetAuthServer_TokenBearingRoutes(t *testing.T) {
 		keyed.Header.Set("Authorization", "Bearer "+tailnetSrvKey)
 		if rec := f.serve(keyed); rec.Code != http.StatusOK {
 			t.Fatalf("%s %s (untrusted, key): status = %d, want 200; body = %s", route.method, route.path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// A web page that gets the tailnet name resolved to 127.0.0.1 (DNS rebinding
+// while Tailscale's DNS is not answering) reaches the loopback publish, and the
+// browser's Host names the published port 8317, never serve's 8318. Its script
+// can add a listed X-Forwarded-For and X-CPA-Keyless (or send a same-origin
+// Origin), and a listed tagged node needs no identity headers. None of that may
+// earn tailnet trust: not with allowed-hosts as tailnet-trust.ps1 writes it
+// (with the serve port), and not with the bare names an older version wrote,
+// which stop granting tailnet trust at all until the script runs again.
+func TestTailnetAuthServer_TailnetNameOnTheAPIPortIsNotTrusted(t *testing.T) {
+	bare := strings.NewReplacer(`"devbox:8318"`, `"devbox"`, `"devbox.example-tailnet.ts.net:8318"`, `"devbox.example-tailnet.ts.net"`).Replace(tailnetSrvBlock)
+	rebound := func(method, path, host string, sameOrigin bool) *http.Request {
+		req := httptest.NewRequest(method, path, nil)
+		req.RemoteAddr = tailnetSrvPeer
+		req.Host = host
+		req.Header.Set("X-Forwarded-For", tailnetSrvDevice)
+		if sameOrigin {
+			req.Header.Set("Origin", "http://"+host)
+		} else {
+			req.Header.Set("X-CPA-Keyless", "1")
+		}
+		return req
+	}
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/v8/management/auth/session"},
+		{http.MethodGet, "/v8/management/credentials/download?name=" + tailnetSrvAuthFile},
+		{http.MethodGet, "/v0/management/auth-files/download?name=" + tailnetSrvAuthFile},
+		{http.MethodPut, "/v8/management/config/management/tailnet-auth/allow-local"},
+		{http.MethodGet, "/v1/models"},
+	}
+	for _, block := range []struct{ name, yaml string }{{"serve port", tailnetSrvBlock}, {"bare names", bare}} {
+		f := newTailnetSrvFixture(t, block.yaml, nil)
+		for _, host := range []string{"devbox.example-tailnet.ts.net:8317", "devbox:8317", "devbox.example-tailnet.ts.net"} {
+			for _, route := range routes {
+				for _, sameOrigin := range []bool{false, true} {
+					if rec := f.serve(rebound(route.method, route.path, host, sameOrigin)); rec.Code != http.StatusUnauthorized {
+						t.Fatalf("%s: %s %s with Host %s (same origin %v): status = %d, want 401; body = %s",
+							block.name, route.method, route.path, host, sameOrigin, rec.Code, rec.Body.String())
+					}
+				}
+			}
+		}
+		// The same listed device through serve's port: trusted only when the
+		// tailnet name is listed with that port.
+		want := http.StatusOK
+		if block.name == "bare names" {
+			want = http.StatusUnauthorized
+		}
+		if rec := f.serve(rebound(http.MethodGet, "/v8/management/auth/session", tailnetSrvHost, false)); rec.Code != want {
+			t.Fatalf("%s: listed device through serve's port: status = %d, want %d; body = %s", block.name, rec.Code, want, rec.Body.String())
 		}
 	}
 }
@@ -661,7 +714,7 @@ func TestTailnetAuthServer_V8ConfigWriteTakesEffect(t *testing.T) {
 	}
 
 	block := `{"enabled":true,"allowed-logins":["owner@example.com"],"allowed-devices":["100.64.0.10","100.64.0.20"],` +
-		`"allowed-hosts":["devbox","devbox.example-tailnet.ts.net","localhost","127.0.0.1"],"allow-local":true,"proxy-api":true}`
+		`"allowed-hosts":["devbox:8318","devbox.example-tailnet.ts.net:8318","localhost","127.0.0.1"],"allow-local":true,"proxy-api":true}`
 	write := tailnetSrvRequest(t, "device", http.MethodPut, "/v8/management/config/management/tailnet-auth", block)
 	write.Header.Set("Authorization", "Bearer "+tailnetSrvKey)
 	if rec := f.serve(write); rec.Code != http.StatusOK {

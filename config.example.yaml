@@ -90,7 +90,7 @@ management:
   #   enabled: false          # Master switch.
   #   allowed-logins: []      # Tailscale-User-Login values allowed without a key; empty = no tailnet trust at all.
   #   allowed-devices: []     # Tailnet IPs allowed without a key; empty = no tailnet device is keyless.
-  #   allowed-hosts: []       # Request Host names (no port, case-insensitive) keyless requests may target; empty = none.
+  #   allowed-hosts: []       # Request Hosts keyless requests may target; empty = none. List a tailnet name with serve's port (name:8318).
   #   allow-local: false      # Trust direct requests from this PC whose Host is localhost, 127.0.0.1 or ::1.
   #   proxy-api: false        # Also accept trusted requests on the proxy API without an API key.
 

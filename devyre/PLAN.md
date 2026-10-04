@@ -795,7 +795,7 @@ management:
     enabled: false        # master switch
     allowed-logins: []    # Tailscale-User-Login values; empty = no tailnet trust at all (fail closed)
     allowed-devices: []   # tailnet IPs allowed without a key; empty = no tailnet device is keyless (fail closed)
-    allowed-hosts: []     # Host names keyless requests may target; empty = no keyless trust (fail closed)
+    allowed-hosts: []     # Hosts keyless requests may target (name or name:port); a tailnet name counts only with serve's port; empty = no keyless trust (fail closed)
     allow-local: false    # trust direct requests on this PC whose Host is localhost, 127.0.0.1 or ::1
     proxy-api: false      # also accept trusted requests on the proxy API without an API key
 ```
@@ -804,9 +804,9 @@ management:
 
 1. `enabled` is true, and the direct TCP peer (`c.RemoteIP()`, not `ClientIP()`) is loopback or inside `server.trusted-proxies`.
 2. No `Tailscale-Funnel-Request` header.
-3. The normalized Host is in `allowed-hosts`; an `X-Forwarded-Host` equals the Host.
+3. The normalized Host is in `allowed-hosts` (an entry with a port matches only that port); an `X-Forwarded-Host` equals the Host.
 4. Browser guard: a present `Sec-Fetch-Site` is `same-origin` or `none`; a present `Origin` is a real origin whose host:port equals the Host. Without `Origin` the request must carry a non-browser signal: `X-CPA-Keyless: 1`, `Authorization: Bearer <non-empty>`, or a non-empty `X-Management-Key`, `X-Api-Key` or `X-Goog-Api-Key` (never query keys or other schemes). A cross-origin page can add a custom header only in CORS mode, which always adds `Origin`.
-5. The Host picks the path. A **loopback Host** allows only the local path, and any `X-Forwarded-For`, `X-Real-IP`, `Forwarded`, `X-Forwarded-Host` or `Tailscale-*` header there is forged, so untrusted; trusted only with `allow-local`. A **tailnet Host** allows only the tailnet path: `X-Forwarded-For` is exactly one IP in 100.64.0.0/10 or fd7a:115c:a1e0::/48 that is **listed in `allowed-devices`** (always; there is no "any device of the login" mode). With any `Tailscale-User-*` header, the decoded `Tailscale-User-Login` must be in `allowed-logins`; without one (a tagged node) the listed IP suffices, but an empty `allowed-logins` still disables all tailnet trust.
+5. The Host picks the path. A **loopback Host** allows only the local path, and any `X-Forwarded-For`, `X-Real-IP`, `Forwarded`, `X-Forwarded-Host` or `Tailscale-*` header there is forged, so untrusted; trusted only with `allow-local`. A **tailnet Host** allows only the tailnet path, which is bound to tailscale serve's port: the Host must name a port, that port must not be `server.port`, and the name must be listed with that port (`<machine>.<tailnet>.ts.net:8318`; a bare name never counts). Then `X-Forwarded-For` is exactly one IP in 100.64.0.0/10 or fd7a:115c:a1e0::/48 that is **listed in `allowed-devices`** (always; there is no "any device of the login" mode). With any `Tailscale-User-*` header, the decoded `Tailscale-User-Login` must be in `allowed-logins`; without one (a tagged node) the listed IP suffices, but an empty `allowed-logins` still disables all tailnet trust.
 6. Any of the headers the decision reads present twice is untrusted.
 7. Anything else falls back to the key check, unchanged. Trusted requests never touch the failure counter, and a wrong key on a trusted request is ignored. A request with **no** credential never counts as a failed attempt, trusted or not.
 
@@ -821,8 +821,8 @@ management:
 
 | Item | What it does |
 |---|---|
-| `scripts/tailnet-trust.ps1` | Candidates: this PC and untagged peers of the owner login. `-Include` wildcards (host name or first MagicDNS label) select; without `-Include` a re-run keeps the devices already allowed. `-Exclude` removes; names with the token `ci`, `runner`, `bot`, `build` or `agent` are dropped unless `-AllowAutomationName` names them. A selected device contributes all its Tailscale IPs. An empty selection writes nothing and exits 1. Writes only `PUT /v8/management/config/management/tailnet-auth` with the complete block; flags keep their live values (template values when the block is new); then re-reads `management` and exits 1 unless only `tailnet-auth` changed. The snapshot holds the secret-key hash and is compared in memory only. A server without `GET /v8/management/auth/session` predates the block and gets no write. `-ShowOnly`/`-WhatIf`, `-Disable`, `-Enable`. |
-| `scripts/exposure-check.ps1` | PASS/FAIL/WARN/SKIP, exit 1 on any FAIL: docker bindings, listeners, LAN reachability, Funnel, exactly one serve handler on 8318 (`/` -> `http://127.0.0.1:8317`, current FQDN, no raw TCP forward), both health URLs, gateway inside `trusted-proxies`, FQDN in `allowed-hosts`, the keyless session probe (SKIP when this PC is not listed), the no-signal and `Origin: http://evil.example` probes, `allow-local` and forged headers on the direct path, and a WARN-only throwaway-container probe. |
+| `scripts/tailnet-trust.ps1` | Writes `allowed-hosts` as this PC's FQDN and short name with serve's port 8318, plus `localhost` and `127.0.0.1`. Candidates: this PC and untagged peers of the owner login. `-Include` wildcards (host name or first MagicDNS label) select; without `-Include` a re-run keeps the devices already allowed. `-Exclude` removes; names with the token `ci`, `runner`, `bot`, `build` or `agent` are dropped unless `-AllowAutomationName` names them. A selected device contributes all its Tailscale IPs. An empty selection writes nothing and exits 1. Writes only `PUT /v8/management/config/management/tailnet-auth` with the complete block; flags keep their live values (template values when the block is new); then re-reads `management` and exits 1 unless only `tailnet-auth` changed. The snapshot holds the secret-key hash and is compared in memory only. A server without `GET /v8/management/auth/session` predates the block and gets no write. `-ShowOnly`/`-WhatIf`, `-Disable`, `-Enable`. |
+| `scripts/exposure-check.ps1` | PASS/FAIL/WARN/SKIP, exit 1 on any FAIL: docker bindings, listeners, LAN reachability, Funnel, exactly one serve handler on 8318 (`/` -> `http://127.0.0.1:8317`, current FQDN, no raw TCP forward), both health URLs, gateway inside `trusted-proxies`, FQDN with port 8318 in `allowed-hosts`, the keyless session probe (SKIP when this PC is not listed), the no-signal and `Origin: http://evil.example` probes, `allow-local` and forged headers on the direct path, the tailnet name as `Host` on the direct path (what a DNS-rebinding page sends, expected 401), nothing on loopback port 8318, and a WARN-only throwaway-container probe. |
 | `scripts/tailscale-serve.ps1` | After configuring, verifies `/healthz` on the current FQDN. On a 404 it refreshes the profile (temporary nickname, then the original, in try/finally, with `--nickname=<value>` as one token and a ProfileName read-back after each step, never printing the prefs), and resets and re-adds serve when entries keyed to an old FQDN remain and every entry is on 8318; otherwise it prints the manual steps. Never enables Funnel. `-ShowOnly`/`-WhatIf`. |
 | `scripts/up.ps1` | Refuses a compose file that publishes beyond 127.0.0.1, and stops a running `cpa` that does. |
 | `scripts/cpa-common.ps1` | Shared helpers; never prints or stores the management key. |
@@ -838,11 +838,12 @@ management:
 | D16 | A missing key never counts toward the ban | The session probe and keyless clients would otherwise ban the shared Docker gateway IP |
 | D17 | `tailnet-trust.ps1` writes only the `tailnet-auth` subtree and verifies the rest is untouched | A whole-config write could drop or reorder unrelated settings |
 | D18 | Out of scope: a tailscaled sidecar, capping tailnet trust by `allow-local` | Not needed for a single-user PC; documented as residual risk instead |
+| D19 | The tailnet path is bound to serve's port: `allowed-hosts` lists tailnet names as `name:8318`, and a tailnet Host on `server.port` or without a port is never trusted | A page that gets the tailnet name resolved to 127.0.0.1 (DNS rebinding while Tailscale's DNS is not answering) reaches the loopback publish with `Host: <name>:8317`, and a browser cannot set `Host`; serve always forwards `Host: <name>:8318` |
 
 ### Residual risks (documented in the README)
 
 - The trusted set is the allowed devices plus anything that can reach this PC's loopback, containers included; `allow-local: false` does not stop local software, which can forge tailnet headers.
-- Over plain HTTP only DNS authenticates the tailnet URL; Serve HTTPS removes that and turns on the Sec-Fetch guard.
+- Over plain HTTP only DNS authenticates the tailnet URL. Rebinding to this PC's loopback gains nothing (D19), but a device connected to the tailnet with Tailscale DNS off can be made to load a hostile page under the tailnet origin; Serve HTTPS removes that and turns on the Sec-Fetch guard.
 - Anything served from the CPA origin (panel, plugin resource pages) acts with keyless admin rights.
 
 ### Acceptance

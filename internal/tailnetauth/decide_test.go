@@ -27,9 +27,10 @@ func testPolicy() Policy {
 		Enabled:        true,
 		AllowedLogins:  []string{testLogin},
 		AllowedDevices: []string{testDevice, testDeviceV6},
-		AllowedHosts:   []string{testShortHost, testTailnetFQD, "localhost", "127.0.0.1"},
+		AllowedHosts:   []string{testShortHost + ":8318", testTailnetURL, "localhost", "127.0.0.1"},
 		AllowLocal:     true,
 		TrustedProxies: []string{"127.0.0.1", "172.16.0.0/12", "192.168.65.0/24"},
+		ServerPort:     8317,
 	}
 }
 
@@ -203,7 +204,6 @@ func TestDecide_R4_HostAndForwardedHost(t *testing.T) {
 	}
 	runDecideCases(t, []decideCase{
 		trustedTailnet("short name", setHost(testShortHost+":8318")),
-		trustedTailnet("FQDN without port", setHost(testTailnetFQD)),
 		trustedTailnet("upper case", setHost("DEVBOX.Example-Tailnet.TS.NET:8318")),
 		trustedTailnet("trailing dot", setHost(testTailnetFQD+".:8318")),
 		trustedTailnet("forwarded host normalized like Host", setHeader("X-Forwarded-Host", "DevBox.Example-Tailnet.ts.net.:8318")),
@@ -226,7 +226,57 @@ func TestDecide_R4_HostAndForwardedHost(t *testing.T) {
 		{name: "forwarded host drops port", request: setHeader("X-Forwarded-Host", testTailnetFQD), reason: "X-Forwarded-Host"},
 		{name: "empty forwarded host", request: setHeader("X-Forwarded-Host", ""), reason: "X-Forwarded-Host"},
 		{name: "allowed-hosts entry with port matches", policy: func(p *Policy) { p.AllowedHosts = []string{testTailnetFQD + ":8318"} }, trusted: true, method: MethodTailnet, login: testLogin, device: testDevice},
-		{name: "allowed-hosts entry normalized", policy: func(p *Policy) { p.AllowedHosts = []string{" DEVBOX.example-tailnet.ts.net. "} }, trusted: true, method: MethodTailnet, login: testLogin, device: testDevice},
+		{name: "allowed-hosts entry normalized", policy: func(p *Policy) { p.AllowedHosts = []string{" DEVBOX.example-tailnet.ts.net.:8318 "} }, trusted: true, method: MethodTailnet, login: testLogin, device: testDevice},
+		{name: "allowed-hosts entry with an invalid port", policy: func(p *Policy) { p.AllowedHosts = []string{testTailnetFQD + ":0", testTailnetFQD + ":x"} }, reason: "allowed-hosts"},
+	})
+}
+
+// The tailnet path is bound to the port tailscale serve listens on. A web page
+// that gets the tailnet name resolved to 127.0.0.1 (DNS rebinding while
+// Tailscale's DNS is not answering) reaches the loopback publish on server.port,
+// and the browser's Host names that port. With a forged, listed X-Forwarded-For
+// and X-CPA-Keyless, and no identity headers (a listed tagged node needs none),
+// it must stay untrusted, whether allowed-hosts carries ports or not.
+func TestDecide_R6_TailnetPathIsBoundToTheServePort(t *testing.T) {
+	// bareHosts is allowed-hosts as an older tailnet-trust.ps1 wrote it.
+	bareHosts := func(p *Policy) { p.AllowedHosts = []string{testShortHost, testTailnetFQD, "localhost", "127.0.0.1"} }
+	rebound := func(host string) func(*Request) {
+		return func(r *Request) {
+			r.Host = host
+			r.Header = http.Header{}
+			r.Header.Set("X-Forwarded-For", testDevice)
+			r.Header.Set(KeylessHeader, "1")
+		}
+	}
+	// A same-origin POST from the rebound page carries an Origin equal to Host.
+	reboundPost := func(host string) func(*Request) {
+		return chain(rebound(host), delHeader(KeylessHeader), setHeader("Origin", "http://"+host))
+	}
+	runDecideCases(t, []decideCase{
+		{name: "FQDN on server.port", request: rebound(testTailnetFQD + ":8317"), reason: "allowed-hosts"},
+		{name: "short name on server.port", request: rebound(testShortHost + ":8317"), reason: "allowed-hosts"},
+		{name: "same-origin POST on server.port", request: reboundPost(testTailnetFQD + ":8317"), reason: "allowed-hosts"},
+		{name: "FQDN on server.port, bare entries", policy: bareHosts, request: rebound(testTailnetFQD + ":8317"), reason: "server.port"},
+		{name: "short name on server.port, bare entries", policy: bareHosts, request: rebound(testShortHost + ":8317"), reason: "server.port"},
+		{name: "same-origin POST on server.port, bare entries", policy: bareHosts, request: reboundPost(testShortHost + ":8317"), reason: "server.port"},
+		{name: "server.port listed explicitly", policy: func(p *Policy) { p.AllowedHosts = append(p.AllowedHosts, testTailnetFQD+":8317") }, request: rebound(testTailnetFQD + ":8317"), reason: "server.port"},
+		{name: "FQDN without a port", request: rebound(testTailnetFQD), reason: "allowed-hosts"},
+		{name: "FQDN without a port, bare entries", policy: bareHosts, request: rebound(testTailnetFQD), reason: "without a port"},
+		{name: "another port, bare entries", policy: bareHosts, request: rebound(testTailnetFQD + ":9000"), reason: "with this port"},
+		{name: "entry for another port", policy: func(p *Policy) { p.AllowedHosts = []string{testTailnetFQD + ":9000"} }, reason: "allowed-hosts"},
+		{name: "serve request, bare entries", policy: bareHosts, reason: "with this port"},
+		{name: "serve request on the listed port", trusted: true, method: MethodTailnet, login: testLogin, device: testDevice},
+		{name: "listed tagged node through serve", request: delHeader("Tailscale-User-Login", "Tailscale-User-Name"), trusted: true, method: MethodTailnet, device: testDevice},
+		{
+			name:    "server.port unknown",
+			policy:  func(p *Policy) { p.ServerPort = 0; p.AllowedHosts = append(p.AllowedHosts, testTailnetFQD+":8317") },
+			request: rebound(testTailnetFQD + ":8317"),
+			trusted: true, method: MethodTailnet, device: testDevice,
+		},
+		{name: "loopback Host on server.port stays local", base: localRequest, trusted: true, method: MethodLocal},
+		{name: "loopback entry with a port", base: localRequest, policy: func(p *Policy) { p.AllowedHosts = []string{"127.0.0.1:8317"} }, trusted: true, method: MethodLocal},
+		{name: "loopback entry for another port", base: localRequest, policy: func(p *Policy) { p.AllowedHosts = []string{"127.0.0.1:9000"} }, reason: "allowed-hosts"},
+		{name: "loopback Host without a port", base: localRequest, request: setHost("localhost"), trusted: true, method: MethodLocal},
 	})
 }
 
@@ -257,16 +307,26 @@ func TestDecide_R5_BrowserGuard(t *testing.T) {
 	trustedTailnet := func(name string, step func(*Request)) decideCase {
 		return decideCase{name: name, request: step, trusted: true, method: MethodTailnet, login: testLogin, device: testDevice}
 	}
+	// A tailnet Host always names its port, so the Origin's scheme default is what
+	// gets normalized: serve on 80 or 443, listed with that port.
+	webPorts := func(p *Policy) { p.AllowedHosts = append(p.AllowedHosts, testTailnetFQD+":80", testTailnetFQD+":443") }
+	defaultPort := func(name, host, origin string) decideCase {
+		return decideCase{name: name, policy: webPorts, request: chain(setHost(host), setHeader("Origin", origin)), trusted: true, method: MethodTailnet, login: testLogin, device: testDevice}
+	}
 	runDecideCases(t, []decideCase{
 		trustedTailnet("Sec-Fetch-Site same-origin", setHeader("Sec-Fetch-Site", "same-origin")),
 		trustedTailnet("Sec-Fetch-Site none", setHeader("Sec-Fetch-Site", "none")),
 		trustedTailnet("same origin", setHeader("Origin", "http://"+testTailnetURL)),
 		trustedTailnet("same origin, upper case", setHeader("Origin", "http://DEVBOX.example-tailnet.ts.net:8318")),
 		trustedTailnet("same origin without signal", chain(delHeader(KeylessHeader), setHeader("Origin", "http://"+testTailnetURL))),
-		trustedTailnet("https origin, default port", chain(setHost(testTailnetFQD), setHeader("Origin", "https://"+testTailnetFQD))),
-		trustedTailnet("https origin, explicit default port", chain(setHost(testTailnetFQD), setHeader("Origin", "https://"+testTailnetFQD+":443"))),
-		trustedTailnet("http origin, explicit default port", chain(setHost(testTailnetFQD), setHeader("Origin", "http://"+testTailnetFQD+":80"))),
-		trustedTailnet("host with default port", chain(setHost(testTailnetFQD+":80"), setHeader("Origin", "http://"+testTailnetFQD))),
+		defaultPort("https origin, default port", testTailnetFQD+":443", "https://"+testTailnetFQD),
+		defaultPort("https origin, explicit default port", testTailnetFQD+":443", "https://"+testTailnetFQD+":443"),
+		defaultPort("http origin, default port", testTailnetFQD+":80", "http://"+testTailnetFQD),
+		defaultPort("http origin, explicit default port", testTailnetFQD+":80", "http://"+testTailnetFQD+":80"),
+		{name: "http origin against port 443 host", policy: webPorts, request: chain(setHost(testTailnetFQD+":443"), setHeader("Origin", "http://"+testTailnetFQD)), reason: "Origin does not match"},
+		{name: "https origin against port 80 host", policy: webPorts, request: chain(setHost(testTailnetFQD+":80"), setHeader("Origin", "https://"+testTailnetFQD)), reason: "Origin does not match"},
+		{name: "local host without port, same origin", base: localRequest, request: chain(setHost("localhost"), setHeader("Origin", "http://localhost")), trusted: true, method: MethodLocal},
+		{name: "local host without port, origin scheme default differs", base: localRequest, request: chain(setHost("localhost"), setHeader("Origin", "https://localhost:80")), reason: "Origin does not match"},
 		{name: "Sec-Fetch-Site cross-site", request: setHeader("Sec-Fetch-Site", "cross-site"), reason: "Sec-Fetch-Site"},
 		{name: "Sec-Fetch-Site same-site", request: setHeader("Sec-Fetch-Site", "same-site"), reason: "Sec-Fetch-Site"},
 		{name: "Sec-Fetch-Site empty", request: setHeader("Sec-Fetch-Site", ""), reason: "Sec-Fetch-Site"},
@@ -276,8 +336,7 @@ func TestDecide_R5_BrowserGuard(t *testing.T) {
 		{name: "null origin", request: setHeader("Origin", "null"), reason: "opaque Origin"},
 		{name: "empty origin", request: setHeader("Origin", ""), reason: "opaque Origin"},
 		{name: "origin port differs", request: setHeader("Origin", "http://"+testTailnetFQD+":8319"), reason: "Origin does not match"},
-		{name: "origin scheme default differs", request: chain(setHost(testTailnetFQD), setHeader("Origin", "https://"+testTailnetFQD+":80")), reason: "Origin does not match"},
-		{name: "https origin against port 80 host", request: chain(setHost(testTailnetFQD+":80"), setHeader("Origin", "https://"+testTailnetFQD)), reason: "Origin does not match"},
+		{name: "origin without the serve port", request: setHeader("Origin", "http://"+testTailnetFQD), reason: "Origin does not match"},
 		{name: "short-name origin against FQDN host", request: setHeader("Origin", "http://"+testShortHost+":8318"), reason: "Origin does not match"},
 		{name: "origin with path", request: setHeader("Origin", "http://"+testTailnetURL+"/"), reason: "invalid Origin"},
 		{name: "origin with query", request: setHeader("Origin", "http://"+testTailnetURL+"?x=1"), reason: "invalid Origin"},
@@ -432,7 +491,7 @@ func TestDecide_R7_AM4_LocalPath(t *testing.T) {
 		trustedLocal("listed .localhost name", "cpa.localhost:8317", "cpa.localhost"),
 		trustedLocal("IPv4-mapped loopback", "[::ffff:127.0.0.1]:8317", "::ffff:127.0.0.1"),
 		{name: "allow-local off", base: localRequest, policy: func(p *Policy) { p.AllowLocal = false }, reason: "allow-local is off"},
-		{name: "loopback host not listed", base: localRequest, policy: func(p *Policy) { p.AllowedHosts = []string{testTailnetFQD, "localhost"} }, reason: "allowed-hosts"},
+		{name: "loopback host not listed", base: localRequest, policy: func(p *Policy) { p.AllowedHosts = []string{testTailnetURL, "localhost"} }, reason: "allowed-hosts"},
 		{name: "empty allowed-logins does not affect local", base: localRequest, policy: func(p *Policy) { p.AllowedLogins = nil }, trusted: true, method: MethodLocal},
 		{name: "empty allowed-devices does not affect local", base: localRequest, policy: func(p *Policy) { p.AllowedDevices = nil }, trusted: true, method: MethodLocal},
 		{name: "forged forwarded-for", base: localRequest, request: setHeader("X-Forwarded-For", testDevice), reason: "X-Forwarded-For on a loopback Host"},
@@ -509,13 +568,14 @@ func TestPolicyFromConfig(t *testing.T) {
 		Enabled:        true,
 		AllowedLogins:  []string{testLogin},
 		AllowedDevices: []string{testDevice},
-		AllowedHosts:   []string{testTailnetFQD},
+		AllowedHosts:   []string{testTailnetURL},
 		AllowLocal:     true,
 		ProxyAPI:       true,
 	}
+	cfg.Port = 8317
 	got := PolicyFromConfig(cfg)
 	if !got.Enabled || !got.AllowLocal || got.AllowedLogins[0] != testLogin || got.AllowedDevices[0] != testDevice ||
-		got.AllowedHosts[0] != testTailnetFQD || got.TrustedProxies[0] != "172.16.0.0/12" {
+		got.AllowedHosts[0] != testTailnetURL || got.TrustedProxies[0] != "172.16.0.0/12" || got.ServerPort != 8317 {
 		t.Fatalf("PolicyFromConfig = %+v", got)
 	}
 }

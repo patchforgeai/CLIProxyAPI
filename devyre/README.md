@@ -76,6 +76,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/selector_expiring_first.go` | The `expiring-first` selector |
 | `sdk/cliproxy/auth/selector_expiring_first_test.go` | Selector tests, including session affinity |
 | `sdk/cliproxy/devyre_service_config_test.go` | Strategy aliases, settings and hot reload through the service config |
+| `test/devyre_scripts_test.go` | Runs the PowerShell scripts with `powershell.exe` against a fake `tailscale status` and a fake management API (skipped without Windows PowerShell): the `allowed-hosts` that `tailnet-trust.ps1` writes |
 
 ### Conflict hotspots
 
@@ -181,7 +182,7 @@ On top of that, `management.tailnet-auth` lets chosen tailnet devices, and this 
 2. Write: the same command without `-ShowOnly`. The script writes only `management.tailnet-auth`, with `PUT /v8/management/config/management/tailnet-auth`, then re-reads the management section and fails unless nothing else changed. The running server applies it at once. A server built before this feature has no `/v8/management/auth/session` and would refuse the block, so the script writes nothing there and asks you to run `up.ps1` first.
 3. Check: `devyre\scripts\exposure-check.ps1`. It must end with 0 FAIL.
 
-The block: `allowed-logins` holds the login that owns this PC; `allowed-devices` holds every Tailscale IP, IPv4 and IPv6, of the selected devices; `allowed-hosts` holds this PC's MagicDNS FQDN and short name, `localhost` and `127.0.0.1`. When the block is new, `enabled`, `allow-local` and `proxy-api` start as `true`, like the deploy template; afterwards the script keeps their live values. Each list fails closed: an empty list means no keyless access through it.
+The block: `allowed-logins` holds the login that owns this PC; `allowed-devices` holds every Tailscale IP, IPv4 and IPv6, of the selected devices; `allowed-hosts` holds this PC's MagicDNS FQDN and short name, each with tailscale serve's port (`<machine>.<tailnet>.ts.net:8318` and `<machine>:8318`), plus `localhost` and `127.0.0.1`. The server trusts a tailnet name only together with that port. An `allowed-hosts` written before this rule had bare names, which grant no tailnet trust any more: after updating the server, run `tailnet-trust.ps1` with no arguments once (`exposure-check.ps1` reports the bare names). When the block is new, `enabled`, `allow-local` and `proxy-api` start as `true`, like the deploy template; afterwards the script keeps their live values. Each list fails closed: an empty list means no keyless access through it.
 
 - **Add a device:** re-run with `-Include` naming every device to allow (the selection replaces the list), `-ShowOnly` first. New devices of your login need the key until you do.
 - **Remove a device:** re-run without it in `-Include`, or add `-Exclude <name>`.
@@ -196,10 +197,10 @@ A request skips the key only when all of these hold:
 
 - `tailnet-auth.enabled` is true, and the container's direct TCP peer is loopback or inside `server.trusted-proxies` (the Docker gateway).
 - It is not a Funnel request.
-- Its `Host` is in `allowed-hosts`, and an `X-Forwarded-Host` equals it.
+- Its `Host` is in `allowed-hosts`, and an `X-Forwarded-Host` equals it. An entry with a port matches only that port.
 - It passes the browser guard. A present `Origin` must be this same origin, and a present `Sec-Fetch-Site` must be `same-origin` or `none`. Without `Origin`, the request must carry a non-browser signal: `X-CPA-Keyless: 1`, `Authorization: Bearer <non-empty token>`, or a non-empty `X-Management-Key`, `X-Api-Key` or `X-Goog-Api-Key`. Browsers never add these on their own; a page from another site can add one only in CORS mode, which always sends its `Origin`, and the guard rejects that `Origin`. Query keys, Basic and other schemes do not count.
 - Then exactly one path applies, chosen by the `Host`:
-  - **Tailnet** (this PC's MagicDNS name, through tailscale serve): `X-Forwarded-For` is exactly one tailnet IP that is listed in `allowed-devices`, and the `Tailscale-User-Login` that serve set is in `allowed-logins`. A listed tagged node, which serve stamps with no identity, needs only its IP, and only while `allowed-logins` is not empty. tailscale serve overwrites `X-Forwarded-For` and the `Tailscale-User-*` headers, so tailnet devices cannot forge them.
+  - **Tailnet** (this PC's MagicDNS name, through tailscale serve): the `Host` names tailscale serve's port and matches an `allowed-hosts` entry with that same port (`<machine>.<tailnet>.ts.net:8318`); a bare name, a `Host` without a port and `server.port` (8317) never count. `X-Forwarded-For` is exactly one tailnet IP that is listed in `allowed-devices`, and the `Tailscale-User-Login` that serve set is in `allowed-logins`. A listed tagged node, which serve stamps with no identity, needs only its IP, and only while `allowed-logins` is not empty. tailscale serve overwrites `X-Forwarded-For` and the `Tailscale-User-*` headers, so tailnet devices cannot forge them, and it keeps the `Host` the browser sent, which always names port 8318.
   - **Local** (a loopback `Host` such as `localhost` or `127.0.0.1`, with `allow-local: true`): a direct request on this PC. Proxy headers (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`, `X-Forwarded-Host`, `Tailscale-*`) never arrive through serve on a loopback name, so with one the request is untrusted.
 - None of the headers the decision reads (`X-Forwarded-For`, `X-Forwarded-Host`, `Origin`, `Sec-Fetch-Site`, `X-CPA-Keyless`, `Tailscale-User-Login`, `Tailscale-User-Name`) appears twice.
 - For the management API, trust never opens more than the key would: a management key must be configured, and `management.allow-remote` must be true unless the client is loopback. Inside the container no client is loopback, this PC and tailscale serve's hop included, so the deploy template keeps `allow-remote: true`.
@@ -208,7 +209,7 @@ Trusted management responses carry no `Access-Control-*` headers and send `Cache
 
 **`allowed-devices` is the only barrier against your own automation.** Every node on this tailnet, the CI runner and the bot VM included, is untagged and owned by the same login, so tailscale serve stamps them all with the allowed login. Only the device list keeps them out, and an allowed CI runner or bot could read the Claude OAuth tokens through the management API. `tailnet-trust.ps1` therefore leaves out any device whose name holds the token `ci`, `runner`, `bot`, `build` or `agent`, unless `-AllowAutomationName` names it exactly. As a second barrier, tag those hosts in the tailnet policy (for example `tag:ci` and `tag:bot`): tagged nodes get no identity headers, and the script never lists tagged nodes.
 
-**The trust boundary is this PC's loopback.** Inside the container, tailscale serve's hop, browsers and programs on this PC, and other containers reaching the host through `host.docker.internal` all arrive from the same Docker gateway, so the server cannot tell them apart. Anything that can reach `127.0.0.1:8317` can also send forged `X-Forwarded-For` and `Tailscale-*` headers with the tailnet name as `Host`. So:
+**The trust boundary is this PC's loopback.** Inside the container, tailscale serve's hop, browsers and programs on this PC, and other containers reaching the host through `host.docker.internal` all arrive from the same Docker gateway, so the server cannot tell them apart. Software that can reach `127.0.0.1:8317` can also send forged `X-Forwarded-For` and `Tailscale-*` headers with any `Host`, the tailnet name on port 8318 included. A web page cannot: browsers never let a page set `Host`, so a page that gets the tailnet name resolved to 127.0.0.1 (DNS rebinding) reaches the loopback publish with `Host: <machine>...:8317`, which the tailnet path refuses. Nothing else may listen on port 8318 on loopback; `exposure-check.ps1` fails if something does, and it sends that rebinding request itself and expects a 401. So:
 
 - The trusted set is the allowed tailnet devices plus anything that can reach this PC's loopback, containers included. `exposure-check.ps1` warns when a throwaway container is trusted as local.
 - `allow-local: false` is no barrier against software on this PC, which can forge the tailnet headers.
@@ -229,14 +230,18 @@ A request without a key no longer counts toward the ban; only a wrong non-empty 
 
 ### Residual risks
 
-- **Plain HTTP.** Over plain HTTP, only DNS authenticates the tailnet URL. Never open it while Tailscale is off; if you did on an untrusted network, clear that site's data on the device. Enabling Serve HTTPS, with the one-time admin link that `tailscale-serve.ps1` prints, removes this risk and turns on the browser `Sec-Fetch` guard, which the plain-HTTP URL never triggers.
+- **Plain HTTP.** Over plain HTTP, only DNS authenticates the tailnet URL. On a device whose tailnet names are answered by someone else's DNS, a hostile network can serve its own page under `http://<machine>.<tailnet>.ts.net:8318`. Two cases:
+  - Tailscale is off or not answering DNS on this PC, and the name is resolved to 127.0.0.1. The page then reaches only the loopback publish on 8317, where the tailnet path never applies because it is bound to port 8318. That holds over plain HTTP and HTTPS alike.
+  - A device is connected to the tailnet but uses another DNS server, with "Use Tailscale DNS" off. The page can then be rebound to this PC's tailnet IP, so it talks to CPA through tailscale serve as that device, with its keyless rights. Keep Tailscale DNS on for every allowed device. Never open the tailnet URL while Tailscale is off, and if you did on an untrusted network, clear that site's data on the device.
+
+  Enabling Serve HTTPS, with the one-time admin link that `tailscale-serve.ps1` prints, removes the second case, because a hostile page cannot present the certificate. It also turns on the browser `Sec-Fetch` guard, which the plain-HTTP URL never triggers.
 - **Same-origin content.** Anything served from the CPA origin, the panel and the plugin resource pages, acts with keyless admin rights. Installing a plugin or publishing a release on the panel fork is therefore equivalent to admin access. `management.disable-auto-update-panel: true` pins the current panel.
 
 ### What exposure-check.ps1 verifies
 
-Exposure: every port of the cpa container is published on 127.0.0.1; nothing listens on `0.0.0.0` or a LAN address for 8317, 54545 or 1455, and 8318 listens on Tailscale addresses only; this PC's LAN addresses cannot reach 8317 or 8318; Funnel is off; tailscale serve has exactly one web handler on port 8318, `/` to `http://127.0.0.1:8317`, keyed to the current MagicDNS name, and no raw TCP forward reaches CPA; both health URLs answer 200.
+Exposure: every port of the cpa container is published on 127.0.0.1; nothing listens on `0.0.0.0` or a LAN address for 8317, 54545 or 1455, and 8318 listens on Tailscale addresses only, not even on loopback; this PC's LAN addresses cannot reach 8317 or 8318; Funnel is off; tailscale serve has exactly one web handler on port 8318, `/` to `http://127.0.0.1:8317`, keyed to the current MagicDNS name, and no raw TCP forward reaches CPA; both health URLs answer 200.
 
-Passwordless: the Docker gateway is inside `server.trusted-proxies`; `allowed-hosts` holds the current FQDN; over the tailnet the keyless session probe is 200 (SKIP when this PC is not in `allowed-devices`), the same request without a signal is 401, and with `Origin: http://evil.example` it is 401 or 403; direct `http://127.0.0.1:8317` follows `allow-local`, and forged tailnet headers or a foreign `Origin` there are refused; a throwaway container trusted as local is a WARN. A failed keyless probe lists its preconditions, `management.allow-remote` included. It reads the live config with the management key, sends no wrong key, and changes nothing.
+Passwordless: the Docker gateway is inside `server.trusted-proxies`; `allowed-hosts` holds the current FQDN with port 8318 (a bare FQDN is reported as written by an older `tailnet-trust.ps1`); over the tailnet the keyless session probe is 200 (SKIP when this PC is not in `allowed-devices`), the same request without a signal is 401, and with `Origin: http://evil.example` it is 401 or 403; direct `http://127.0.0.1:8317` follows `allow-local`, and forged tailnet headers or a foreign `Origin` there are refused; so is a direct request with the tailnet name as `Host` (on 8317 or without a port), a listed `X-Forwarded-For` and `X-CPA-Keyless`, which is what a DNS-rebinding page would send; a throwaway container trusted as local is a WARN. A failed keyless probe lists its preconditions, `management.allow-remote` included. It reads the live config with the management key, sends no wrong key, and changes nothing.
 
 ## Sync with upstream
 
@@ -271,6 +276,7 @@ go test ./internal/tailnetauth/
 go test ./internal/api/handlers/management/ -run 'UsageCache|QuotaObserver|RoutingQuota|ExpiringFirst|RoutingStrategy|TailnetAuth|GetAuthSession|AuthenticateManagementKey'
 go test ./sdk/cliproxy/auth/ -run ExpiringFirst
 go test ./sdk/cliproxy/ -run ExpiringFirst
+go test ./test/ -run Devyre
 ```
 
 The scripts must stay ASCII and parse in Windows PowerShell 5.1; this prints nothing when they do:

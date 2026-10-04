@@ -23,8 +23,8 @@ const devyreTailnetV8Block = `management:
       - "100.64.0.10"
       - "fd7a:115c:a1e0::10"
     allowed-hosts:
-      - "devbox"
-      - "devbox.example-tailnet.ts.net"
+      - "devbox:8318"
+      - "devbox.example-tailnet.ts.net:8318"
       - "localhost"
       - "127.0.0.1"
     allow-local: true # local software is trusted
@@ -36,7 +36,7 @@ func devyreWantTailnetAuth() TailnetAuthConfig {
 		Enabled:        true,
 		AllowedLogins:  []string{"owner@example.com"},
 		AllowedDevices: []string{"100.64.0.10", "fd7a:115c:a1e0::10"},
-		AllowedHosts:   []string{"devbox", "devbox.example-tailnet.ts.net", "localhost", "127.0.0.1"},
+		AllowedHosts:   []string{"devbox:8318", "devbox.example-tailnet.ts.net:8318", "localhost", "127.0.0.1"},
 		AllowLocal:     true,
 		ProxyAPI:       false,
 	}

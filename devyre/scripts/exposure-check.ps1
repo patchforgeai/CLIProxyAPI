@@ -8,7 +8,7 @@
   Exposure:
     - every port the cpa container publishes is bound to 127.0.0.1
     - nothing listens on 0.0.0.0, :: or a LAN address for 8317, 54545 or 1455, and 8318 listens on
-      Tailscale addresses only
+      Tailscale addresses only (not even on loopback: keyless tailnet access is bound to that port)
     - this PC's LAN IPv4 addresses cannot reach 8317 or 8318
     - Tailscale Funnel is off
     - tailscale serve has exactly one web handler on port 8318, / -> http://127.0.0.1:8317, keyed
@@ -16,13 +16,16 @@
     - <this PC's tailnet URL>/healthz and http://127.0.0.1:8317/healthz answer 200
   Passwordless (management.tailnet-auth, read from the live config with the management key):
     - the cpa container's Docker gateway is inside server.trusted-proxies
-    - allowed-hosts holds this PC's current MagicDNS name
+    - allowed-hosts holds this PC's current MagicDNS name with tailscale serve's port (:8318)
     - over the tailnet, GET /v8/management/auth/session with X-CPA-Keyless: 1 and no key is 200
       (SKIP when none of this PC's Tailscale IPs is in allowed-devices)
     - the same request without Origin and without a keyless signal is 401
     - the same request with Origin: http://evil.example is 401 or 403
     - direct http://127.0.0.1:8317 behaves as allow-local says, and forged tailnet headers or a
       foreign Origin on it are refused
+    - a direct request to http://127.0.0.1:8317 with this PC's tailnet name as Host (on 8317, or
+      without a port), a listed X-Forwarded-For and X-CPA-Keyless is refused: that is what a web
+      page sends after getting the tailnet name resolved to 127.0.0.1
     - WARN only: whether a throwaway container from the local image, reaching
       host.docker.internal:8317, is trusted as local
   A failed keyless probe lists its preconditions, including management.allow-remote: the server
@@ -167,16 +170,30 @@ if ($null -ne $self) { $selfIps = @($self.IPs) }
 # --- listeners and LAN --------------------------------------------------------------------------
 
 $badListeners = New-Object 'System.Collections.Generic.List[string]'
+$loopbackServe = New-Object 'System.Collections.Generic.List[string]'
 $listenerText = New-Object 'System.Collections.Generic.List[string]'
-foreach ($listener in @(Get-CpaListeners @(8317, 54545, 1455, 8318))) {
+foreach ($listener in @(Get-CpaListeners @(8317, 54545, 1455, $script:CpaServePort))) {
   $shown = "$($listener.Address):$($listener.Port) ($($listener.Process))"
-  $allowed = Test-CpaLoopbackIp $listener.Address
-  if ($listener.Port -eq 8318) { $allowed = $allowed -or (Test-CpaTailnetIp $listener.Address) }
-  if ($allowed) { $listenerText.Add($shown) } else { $badListeners.Add($shown) }
+  if ($listener.Port -eq $script:CpaServePort) {
+    # Keyless tailnet access is bound to serve's port, so nothing may answer it on loopback.
+    if (Test-CpaTailnetIp $listener.Address) { $listenerText.Add($shown) }
+    elseif (Test-CpaLoopbackIp $listener.Address) { $loopbackServe.Add($shown) }
+    else { $badListeners.Add($shown) }
+  } elseif (Test-CpaLoopbackIp $listener.Address) {
+    $listenerText.Add($shown)
+  } else {
+    $badListeners.Add($shown)
+  }
 }
 if ($badListeners.Count -gt 0) {
   Report 'FAIL' 'listeners' ('listening beyond loopback and the tailnet: ' + ($badListeners.ToArray() -join ', '))
-} else {
+}
+if ($loopbackServe.Count -gt 0) {
+  Report 'FAIL' 'listeners' ('something listens on tailscale serve''s port on loopback: ' + ($loopbackServe.ToArray() -join ', ') +
+    '. Keyless tailnet access is bound to that port, so a web page that gets the tailnet name resolved to 127.0.0.1 ' +
+    'could reach this listener with a trusted Host. Stop it or move it to another port.')
+}
+if ($badListeners.Count -eq 0 -and $loopbackServe.Count -eq 0) {
   Report 'PASS' 'listeners' ('8317, 54545 and 1455 listen on loopback only and 8318 on Tailscale addresses only (' + ($listenerText.ToArray() -join ', ') + ')')
 }
 
@@ -319,7 +336,7 @@ $allowedLogins = @()
 if ($authExists) {
   $enabled = (Get-CpaProperty $auth 'enabled') -eq $true
   $allowLocal = (Get-CpaProperty $auth 'allow-local') -eq $true
-  $allowedHosts = @(ConvertTo-CpaStringArray (Get-CpaProperty $auth 'allowed-hosts') | ForEach-Object { $_.TrimEnd('.').ToLowerInvariant() })
+  $allowedHosts = @(ConvertTo-CpaStringArray (Get-CpaProperty $auth 'allowed-hosts') | ForEach-Object { ConvertTo-CpaHostEntry $_ } | Where-Object { $null -ne $_ })
   $allowedDevices = @(ConvertTo-CpaStringArray (Get-CpaProperty $auth 'allowed-devices') | ForEach-Object { ConvertTo-CpaIpText $_ })
   $allowedLogins = @(ConvertTo-CpaStringArray (Get-CpaProperty $auth 'allowed-logins'))
 }
@@ -351,12 +368,18 @@ if ($configOk) {
   } elseif (-not $enabled) {
     Report 'SKIP' 'passwordless' 'management.tailnet-auth.enabled is false, so every request needs a key (tailnet-trust.ps1 -Enable turns it on).'
   } elseif ($null -ne $self) {
-    # (b) allowed-hosts goes stale on a tailnet rename while the short name keeps working.
-    $hostsOk = $allowedHosts -contains $self.Fqdn
+    # (b) allowed-hosts goes stale on a tailnet rename while the short name keeps working, and a
+    # tailnet name counts only together with tailscale serve's port.
+    $serveHost = "$($self.Fqdn):$($script:CpaServePort)"
+    $hostsOk = Test-CpaHostListed $allowedHosts $self.Fqdn $script:CpaServePort -RequirePort
     if ($hostsOk) {
-      Report 'PASS' 'allowed-hosts' "allowed-hosts holds $($self.Fqdn)"
+      Report 'PASS' 'allowed-hosts' "allowed-hosts holds $serveHost"
+    } elseif (@($allowedHosts | Where-Object { $_.Name -eq $self.Fqdn }).Count -gt 0) {
+      Report 'FAIL' 'allowed-hosts' ("allowed-hosts lists $($self.Fqdn) without tailscale serve's port $($script:CpaServePort), as an older " +
+        'tailnet-trust.ps1 wrote it. The server trusts a tailnet name only together with that port, so no device is keyless over ' +
+        'the tailnet; re-run devyre\scripts\tailnet-trust.ps1.')
     } else {
-      Report 'FAIL' 'allowed-hosts' "allowed-hosts is stale (tailnet renamed?); re-run devyre\scripts\tailnet-trust.ps1. It lacks $($self.Fqdn)."
+      Report 'FAIL' 'allowed-hosts' "allowed-hosts is stale (tailnet renamed?); re-run devyre\scripts\tailnet-trust.ps1. It lacks $serveHost."
     }
     $devicesOk = @($selfIps | Where-Object { $allowedDevices -contains $_ }).Count -gt 0
     $loginOk = $allowedLogins -contains $self.Login
@@ -398,7 +421,7 @@ if ($sessionMissing) {
     $yesNo = @{ $true = 'yes'; $false = 'NO' }
     Write-Host '        Preconditions for keyless access over the tailnet:'
     Write-Host "        (a) Docker gateway inside server.trusted-proxies: $gatewayText"
-    Write-Host "        (b) allowed-hosts holds $($self.Fqdn): $($yesNo[$hostsOk])"
+    Write-Host "        (b) allowed-hosts holds $($self.Fqdn):$($script:CpaServePort): $($yesNo[$hostsOk])"
     Write-Host "        (c) one of this PC's Tailscale IPs is in allowed-devices: $($yesNo[$devicesOk])"
     Write-Host "        (d) management.allow-remote is true (the server sees a tailnet client as remote): $allowRemoteText"
     Write-Host "        allowed-logins holds $($self.Login): $($yesNo[$loginOk])"
@@ -412,10 +435,17 @@ if ($sessionMissing) {
   # Direct requests on this PC: allow-local decides, and proxy markers on a loopback Host are
   # forged by definition (tailscale serve only forwards the tailnet names).
   $apiHost = ''
-  try { $apiHost = ([Uri]$ApiBase).Host.Trim('[', ']').ToLowerInvariant() } catch { $apiHost = '' }
+  $apiPort = 0
+  try {
+    $apiUri = [Uri]$ApiBase
+    $apiHost = $apiUri.Host.Trim('[', ']').ToLowerInvariant()
+    $apiPort = $apiUri.Port
+  } catch {
+    $apiHost = ''
+  }
   if (-not $configOk) {
     Report 'SKIP' 'keyless-local' "the live config is unavailable, so the expected answer is unknown ($(Get-SessionText $localProbe))."
-  } elseif ($enabled -and $allowLocal -and ($allowedHosts -contains $apiHost)) {
+  } elseif ($enabled -and $allowLocal -and (Test-CpaHostListed $allowedHosts $apiHost $apiPort)) {
     if ($localProbe.Status -eq 200 -and (Get-SessionMethod $localProbe) -eq 'local') {
       Report 'PASS' 'keyless-local' "direct $ApiBase with X-CPA-Keyless and no key: $(Get-SessionText $localProbe) (allow-local is on)"
     } else {
@@ -436,6 +466,16 @@ if ($sessionMissing) {
   }
   Report-Refusal 'forged-local' 'a direct request with forged X-Forwarded-For and Tailscale-User-Login on a loopback Host' (Invoke-CpaHttp -Uri "$ApiBase$sessionPath" -Headers $forgedHeaders)
   Report-Refusal 'cross-site-local' "a direct request with Origin $evilOrigin and X-CPA-Keyless" (Invoke-CpaHttp -Uri "$ApiBase$sessionPath" -Headers @{ 'X-CPA-Keyless' = '1'; 'Origin' = $evilOrigin })
+
+  # A web page that gets this PC's tailnet name resolved to 127.0.0.1 reaches this port, and the
+  # browser's Host names it. Its script can add a listed X-Forwarded-For and X-CPA-Keyless, and a
+  # listed tagged node needs no identity headers. The tailnet path accepts only serve's port.
+  if ($null -ne $self -and $apiPort -gt 0) {
+    $reboundHeaders = @{ 'X-CPA-Keyless' = '1'; 'X-Forwarded-For' = $forgedHeaders['X-Forwarded-For'] }
+    foreach ($reboundHost in @("$($self.Fqdn):$apiPort", "$($self.ShortName):$apiPort", $self.Fqdn)) {
+      Report-Refusal 'tailnet-name-local' "a direct request with Host $reboundHost, a listed X-Forwarded-For and X-CPA-Keyless" (Invoke-CpaHttp -Uri "$ApiBase$sessionPath" -HostHeader $reboundHost -Headers $reboundHeaders)
+    }
+  }
 }
 
 # --- containers on this PC (WARN only) ----------------------------------------------------------

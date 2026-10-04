@@ -136,6 +136,58 @@ function ConvertTo-CpaIpText([string]$Ip) {
   return $Ip.Trim().ToLowerInvariant()
 }
 
+# An allowed-hosts entry or a Host value as Name (lower-case, no trailing dot, no brackets) and
+# Port (0 when absent), or $null when it does not parse. Same rules as the server: name:port,
+# [IPv6]:port, or a bare IPv6 literal without a port.
+function ConvertTo-CpaHostEntry([string]$Entry) {
+  $text = ([string]$Entry).Trim()
+  if (-not $text) { return $null }
+  $name = $text
+  $portText = ''
+  if ($text.StartsWith('[')) {
+    $end = $text.IndexOf(']')
+    if ($end -lt 0) { return $null }
+    $name = $text.Substring(1, $end - 1)
+    $rest = $text.Substring($end + 1)
+    if ($rest) {
+      if (-not $rest.StartsWith(':')) { return $null }
+      $portText = $rest.Substring(1)
+      if (-not $portText) { return $null }
+    }
+  } elseif (($text.Split(':').Count - 1) -eq 1) {
+    $index = $text.IndexOf(':')
+    $name = $text.Substring(0, $index)
+    $portText = $text.Substring($index + 1)
+    if (-not $portText) { return $null }
+  }
+  $name = $name.TrimEnd('.').ToLowerInvariant()
+  if (-not $name) { return $null }
+  $port = 0
+  if ($portText) {
+    if ($portText -notmatch '^[0-9]{1,5}$') { return $null }
+    $port = [int]$portText
+    if ($port -lt 1 -or $port -gt 65535) { return $null }
+  }
+  if ($name.Contains(':')) { $name = ConvertTo-CpaIpText $name }
+  return [pscustomobject]@{ Name = $name; Port = $port }
+}
+
+# True when an allowed-hosts entry names Name on Port. An entry with a port matches only that
+# port; an entry without one matches any port unless -RequirePort asks for an entry with a port,
+# which is what the server demands of a tailnet name (tailscale serve's port).
+function Test-CpaHostListed([object[]]$Entries, [string]$Name, [int]$Port, [switch]$RequirePort) {
+  $wanted = ([string]$Name).TrimEnd('.').ToLowerInvariant()
+  foreach ($entry in @($Entries)) {
+    if ($null -eq $entry -or $entry.Name -ne $wanted) { continue }
+    if ($entry.Port -ne 0) {
+      if ($entry.Port -eq $Port) { return $true }
+    } elseif (-not $RequirePort) {
+      return $true
+    }
+  }
+  return $false
+}
+
 # ---------------------------------------------------------------------------------------------
 # Tailscale
 

@@ -23,9 +23,13 @@ type TailnetAuthConfig struct {
 	// only setting that keeps such hosts out.
 	AllowedDevices []string `yaml:"allowed-devices" json:"allowed-devices"`
 
-	// AllowedHosts lists the request Host names that keyless requests may target:
-	// without port, case-insensitive, trailing dot ignored. An empty list
-	// disables all keyless trust (fail closed).
+	// AllowedHosts lists the request Hosts that keyless requests may target, each
+	// a name with an optional port (name:port): case-insensitive, trailing dot
+	// ignored. An entry with a port matches only that port. A tailnet name grants
+	// tailnet trust only when it is listed with the port tailscale serve listens
+	// on (machine.example.ts.net:8318) and the request names that port, never
+	// server.port; loopback names (localhost, 127.0.0.1, ::1) may be listed
+	// without one. An empty list disables all keyless trust (fail closed).
 	AllowedHosts []string `yaml:"allowed-hosts" json:"allowed-hosts"`
 
 	// AllowLocal trusts direct requests from this PC: no X-Forwarded-For, no
