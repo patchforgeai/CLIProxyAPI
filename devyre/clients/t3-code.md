@@ -4,7 +4,7 @@ A click-by-click checklist for wiring T3 Code to the Devyre CLIProxyAPI (CPA) de
 
 Have these ready:
 
-- **Public URL:** `https://<machine>.<tailnet>.ts.net:8318`. `devyre\scripts\tailscale-serve.ps1` prints it, and it is `CPA_PUBLIC_URL` in `devyre\deploy\.env`.
+- **Base URL:** on the PC that runs CPA, use `http://127.0.0.1:8317`; it works without Tailscale. From other tailnet devices, use `https://<machine>.<tailnet>.ts.net:8318`. That URL works only after Tailscale Serve is enabled for the tailnet (`devyre\scripts\tailscale-serve.ps1` prints the one-time enable link if it is not), and it is `CPA_PUBLIC_URL` in `devyre\deploy\.env`. Wherever this checklist shows the ts.net URL, use the base URL for your device.
 - **Management key:** from your password manager. `new-secrets.ps1` printed it once; `new-secrets.ps1 -ShowManagementKey` prints it again.
 - **`t3-code` client key:** copy it without displaying it:
 

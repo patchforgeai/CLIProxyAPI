@@ -509,7 +509,7 @@ Parsers. Each one is pure and has table tests.
 ### RT-3 Usage cache in `APICall` (`internal/api/handlers/management/devyre_usage_cache.go`)
 
 - **Allowlist:** method `GET`, a non-empty auth index, and an exact URL of `https://api.anthropic.com/api/oauth/usage`, `https://api.anthropic.com/api/oauth/profile` or `https://chatgpt.com/backend-api/wham/usage`. Never cache POSTs or the Codex credits URLs, because T3 redeems resets through them.
-  - **Claude usage query variants**, such as the panel's reset-grant check `?cedar_ember=1&skip_spend=1`, are cached too, under their full URL with the Claude usage TTL. Anthropic rate limits the endpoint per account whatever the query, so they count toward the poller's Claude min-gap and share the credential's 429 backoff.
+  - **Claude usage query variants**, such as the panel's reset-grant check `?cedar_ember=1&skip_spend=1`, are cached too, under their full URL with the Claude usage TTL, up to 4 distinct variants per credential. Further variants pass through uncached. Anthropic rate limits the endpoint per account whatever the query, so every variant, cached or not, counts toward the poller's Claude min-gap and shares the credential's 429 backoff.
   - **Writes:** a 2xx `POST`, `PUT`, `PATCH` or `DELETE` through `api-call` for a credential, such as a redeemed reset, makes all of that credential's cached responses stale. The next read goes upstream; the stale body stays as the fallback, and the Claude backoff is kept.
 - **Key:** `authIndex + "|" + url`. **TTL:** Claude usage 5 min, Claude profile 1 h, Codex usage 60 s, all configurable.
 - **Behavior:**
