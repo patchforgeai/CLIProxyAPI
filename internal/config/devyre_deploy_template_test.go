@@ -188,6 +188,41 @@ func assertDevyreTemplateRouting(t *testing.T, routing RoutingConfig) {
 	}
 }
 
+// TestDevyreDeployTemplate_TailnetAuthBlock pins management.tailnet-auth on the raw YAML: switched
+// on, with every list empty so nothing is keyless until devyre/scripts/tailnet-trust.ps1 fills
+// them (fail closed), and with exactly the keys that script writes.
+func TestDevyreDeployTemplate_TailnetAuthBlock(t *testing.T) {
+	var doc struct {
+		Management struct {
+			TailnetAuth map[string]any `yaml:"tailnet-auth"`
+		} `yaml:"management"`
+	}
+	if errDecode := yaml.Unmarshal(readDevyreDeployTemplate(t), &doc); errDecode != nil {
+		t.Fatalf("decode deploy template: %v", errDecode)
+	}
+	want := map[string]any{
+		"enabled":         true,
+		"allowed-logins":  []any{},
+		"allowed-devices": []any{},
+		"allowed-hosts":   []any{},
+		"allow-local":     true,
+		"proxy-api":       true,
+	}
+	if !reflect.DeepEqual(doc.Management.TailnetAuth, want) {
+		t.Errorf("management.tailnet-auth = %v, want %v", doc.Management.TailnetAuth, want)
+	}
+
+	script, errRead := os.ReadFile(filepath.FromSlash("../../devyre/scripts/tailnet-trust.ps1"))
+	if errRead != nil {
+		t.Fatalf("read tailnet-trust.ps1: %v", errRead)
+	}
+	for key := range want {
+		if !strings.Contains(string(script), "'"+key+"'") {
+			t.Errorf("tailnet-trust.ps1 never writes management.tailnet-auth.%s", key)
+		}
+	}
+}
+
 // TestDevyreDeployTemplate_RoutingBlocksMatchPlan pins the key names of the expiring-first
 // and quota-observation blocks (devyre/PLAN.md, RT-5 and Appendix A) on the raw YAML, so the
 // template and the typed routing config cannot drift apart unnoticed.
