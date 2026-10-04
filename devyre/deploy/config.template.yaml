@@ -11,7 +11,8 @@ server:
   # tailscale serve -> 127.0.0.1:8317 -> Docker Desktop -> container. Trust those hops so the
   # real tailnet client IP (X-Forwarded-For) drives bans and logs. Passwordless access depends on
   # it too: management.tailnet-auth trusts nothing unless the Docker gateway (inside
-  # 172.16.0.0/12 here) is in this list. Edits apply only after a container restart. Calibrate in DEP-6.
+  # 172.16.0.0/12 here) is in this list. Passwordless access reads the live list, but bans and
+  # logs read it only at start: restart the container after an edit. Calibrate in DEP-6.
   trusted-proxies:
     - 127.0.0.1
     - 172.16.0.0/12

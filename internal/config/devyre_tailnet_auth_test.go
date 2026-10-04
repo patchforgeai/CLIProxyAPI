@@ -248,8 +248,8 @@ func TestTailnetAuthConfig_ExampleIsValidAndOff(t *testing.T) {
 }
 
 // The deploy template (devyre/deploy/config.template.yaml) turns tailnet-auth on
-// with empty lists that devyre/scripts/tailnet-trust.ps1 fills. Until the
-// template carries the block this check is skipped.
+// with empty lists that devyre/scripts/tailnet-trust.ps1 fills. This is the typed
+// check; TestDevyreDeployTemplate_TailnetAuthBlock pins the raw YAML.
 func TestTailnetAuthConfig_DeployTemplateBlock(t *testing.T) {
 	raw := readDevyreDeployTemplate(t)
 	var doc struct {
@@ -261,7 +261,7 @@ func TestTailnetAuthConfig_DeployTemplateBlock(t *testing.T) {
 		t.Fatalf("decode deploy template: %v", err)
 	}
 	if doc.Management.TailnetAuth == nil {
-		t.Skip("deploy template has no management.tailnet-auth block yet")
+		t.Fatal("deploy template has no management.tailnet-auth block")
 	}
 	// The loader ignores misspelled keys, so pin the key set on the raw YAML.
 	known := map[string]bool{}

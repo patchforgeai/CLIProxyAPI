@@ -25,6 +25,9 @@
       foreign Origin on it are refused
     - WARN only: whether a throwaway container from the local image, reaching
       host.docker.internal:8317, is trusted as local
+  A failed keyless probe lists its preconditions, including management.allow-remote: the server
+  trusts a management request without a key only when allow-remote is on or the client is
+  loopback, and inside the container no client is loopback.
   Requests without a key never count toward the management ban; only wrong keys do, and this
   script sends no wrong key. It changes nothing; the container probe runs `docker run --rm`.
 
@@ -105,7 +108,8 @@ function Report-Refusal([string]$Check, [string]$What, $Response, [switch]$Only4
   if ($Response.Status -eq 401 -or ($Response.Status -eq 403 -and -not $Only401)) {
     Report 'PASS' $Check "$What is refused ($(Get-SessionText $Response))"
   } elseif ($Response.Status -eq 403) {
-    Report 'FAIL' $Check "$What got $(Get-SessionText $Response); expected 401 (is this client IP banned after wrong keys?)"
+    Report 'FAIL' $Check ("$What got $(Get-SessionText $Response); expected 401 (a 403 means this client IP is banned after " +
+      'wrong keys, or management.allow-remote is off)')
   } elseif ($Response.Status -eq 404) {
     Report 'FAIL' $Check "$What got 404: this server has no $sessionPath. Rebuild and restart it with devyre\scripts\up.ps1."
   } else {
@@ -275,6 +279,8 @@ $configProblem = ''
 $trustedProxies = @()
 $auth = $null
 $authExists = $false
+# management.allow-remote: 'yes', 'NO', or 'unknown' when it could not be read.
+$allowRemoteText = 'unknown'
 try { $key = Read-CpaManagementKey $KeyFile } catch { $configProblem = $_.Exception.Message }
 if ($key) {
   $proxiesResponse = Invoke-CpaManagementApi -ApiBase $ApiBase -Key $key -Path '/config/server/trusted-proxies'
@@ -291,6 +297,12 @@ if ($key) {
       $configOk = $true
     } else {
       $configProblem = 'GET /v8/management/config/management/tailnet-auth: ' + (Get-CpaHttpErrorText $authResponse)
+    }
+    $remoteResponse = Invoke-CpaManagementApi -ApiBase $ApiBase -Key $key -Path '/config/management/allow-remote'
+    if ($remoteResponse.Status -eq 200 -and $remoteResponse.Json -eq $true) {
+      $allowRemoteText = 'yes'
+    } elseif ($remoteResponse.Status -eq 200 -or $remoteResponse.Status -eq 404) {
+      $allowRemoteText = 'NO'
     }
   } else {
     $configProblem = 'GET /v8/management/config/server/trusted-proxies: ' + (Get-CpaHttpErrorText $proxiesResponse)
@@ -314,14 +326,16 @@ if ($authExists) {
 
 # (a) Every host-side client, tailscale serve included, reaches the container from the Docker
 # gateway; keyless trust starts with that peer being a trusted proxy.
-$gatewayOk = $false
+$gatewayText = 'not checked'
 if ($configOk -and $gateways.Count -gt 0) {
   $outside = @($gateways | Where-Object { -not (Test-CpaIpInAny $_ $trustedProxies) })
   if ($outside.Count -gt 0) {
+    $gatewayText = 'NO'
     Report 'FAIL' 'trusted-proxies' ("the Docker gateway " + ($outside -join ', ') + ' is not inside server.trusted-proxies (' + ($trustedProxies -join ', ') +
-      '). Keyless access needs the gateway there (and bans need it to see real client IPs); a change to trusted-proxies applies only when the container restarts.')
+      '). Keyless access needs the gateway there, and bans and logs need it to see real client IPs. Keyless access reads the ' +
+      'live list, but bans and logs read it only at start, so restart the container after changing it.')
   } else {
-    $gatewayOk = $true
+    $gatewayText = 'yes'
     Report 'PASS' 'trusted-proxies' ('the Docker gateway ' + ($gateways -join ', ') + ' is inside server.trusted-proxies')
   }
 } elseif ($configOk) {
@@ -383,9 +397,10 @@ if ($sessionMissing) {
     Report 'FAIL' 'keyless-tailnet' "GET $sessionPath over the tailnet with X-CPA-Keyless and no key: $(Get-SessionText $tailnetProbe); expected 200 with method tailnet."
     $yesNo = @{ $true = 'yes'; $false = 'NO' }
     Write-Host '        Preconditions for keyless access over the tailnet:'
-    Write-Host "        (a) Docker gateway inside server.trusted-proxies: $($yesNo[$gatewayOk])"
+    Write-Host "        (a) Docker gateway inside server.trusted-proxies: $gatewayText"
     Write-Host "        (b) allowed-hosts holds $($self.Fqdn): $($yesNo[$hostsOk])"
     Write-Host "        (c) one of this PC's Tailscale IPs is in allowed-devices: $($yesNo[$devicesOk])"
+    Write-Host "        (d) management.allow-remote is true (the server sees a tailnet client as remote): $allowRemoteText"
     Write-Host "        allowed-logins holds $($self.Login): $($yesNo[$loginOk])"
   }
 
@@ -405,6 +420,9 @@ if ($sessionMissing) {
       Report 'PASS' 'keyless-local' "direct $ApiBase with X-CPA-Keyless and no key: $(Get-SessionText $localProbe) (allow-local is on)"
     } else {
       Report 'FAIL' 'keyless-local' "direct $ApiBase with X-CPA-Keyless and no key: $(Get-SessionText $localProbe); allow-local is on, so 200 with method local was expected."
+      Write-Host '        Preconditions for keyless access from this PC:'
+      Write-Host "        (a) Docker gateway inside server.trusted-proxies: $gatewayText"
+      Write-Host "        (d) management.allow-remote is true (inside the container no client is loopback): $allowRemoteText"
     }
   } elseif ($localProbe.Status -eq 200) {
     Report 'FAIL' 'keyless-local' "direct $ApiBase answered without a key although allow-local does not apply: $(Get-SessionText $localProbe)"

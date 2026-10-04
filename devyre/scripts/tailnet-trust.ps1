@@ -27,7 +27,9 @@
   allow-local and proxy-api keep their live values; when the block does not exist yet they start
   as true, like the deploy template. Lists are always sent whole. Afterwards the script re-reads
   the management section and exits 1 unless tailnet-auth is exactly what was sent and nothing
-  else changed.
+  else changed. A server built before tailnet-auth existed has no
+  GET /v8/management/auth/session and rejects the block; the script detects that and writes
+  nothing.
 
 .PARAMETER Include
   Names of the devices to allow, as wildcards: for example machine, iphone*, *pc. -Include *
@@ -236,15 +238,14 @@ function Write-TailnetAuth($Block, [string]$Key, $SectionBefore) {
   if (-not $PSCmdlet.ShouldProcess("management.tailnet-auth on $ApiBase", 'PUT /v8/management/config/management/tailnet-auth')) {
     return 0
   }
+  if ($serverTooOld) {
+    Write-Host "Not written. $serverTooOldText"
+    return 1
+  }
   $body = ConvertTo-Json -InputObject $Block -Depth 20 -Compress
   $put = Invoke-CpaManagementApi -ApiBase $ApiBase -Key $Key -Method 'PUT' -Path $blockPath -Body $body
   if ($put.Status -ne 200) {
-    $text = Get-CpaHttpErrorText $put
-    Write-Host "The server refused the write: $text"
-    if ($text -match 'tailnet-auth') {
-      Write-Host ('This server was built before tailnet-auth existed and rejects it as an unknown field. Rebuild and restart ' +
-        'it with devyre\scripts\up.ps1, then run this script again.')
-    }
+    Write-Host "The server refused the write: $(Get-CpaHttpErrorText $put)"
     return 1
   }
   $sectionAfter = Invoke-CpaManagementApi -ApiBase $ApiBase -Key $Key -Path '/config/management'
@@ -281,6 +282,9 @@ $liveProblem = ''
 $section = $null
 $liveBlock = $null
 $blockExists = $false
+$serverTooOld = $false
+$serverTooOldText = ('This server was built before management.tailnet-auth existed: it has no GET /v8/management/auth/session ' +
+  'and rejects the block as an invalid config. Rebuild and restart it with devyre\scripts\up.ps1, then run this script again.')
 try {
   $key = Read-CpaManagementKey $KeyFile
 } catch {
@@ -290,6 +294,8 @@ if ($key) {
   $sectionResponse = Invoke-CpaManagementApi -ApiBase $ApiBase -Key $key -Path '/config/management'
   if ($sectionResponse.Status -eq 200) {
     $section = $sectionResponse.Json
+    # Only a server that knows tailnet-auth serves the session endpoint (200 for this valid key).
+    $serverTooOld = ((Invoke-CpaManagementApi -ApiBase $ApiBase -Key $key -Path '/auth/session').Status -eq 404)
     $blockResponse = Invoke-CpaManagementApi -ApiBase $ApiBase -Key $key -Path $blockPath
     if ($blockResponse.Status -eq 200) {
       $liveBlock = $blockResponse.Json
@@ -317,6 +323,7 @@ if (-not $liveAvailable) {
   Write-Warning "Cannot read the live config: $liveProblem"
   Write-Warning 'Previewing as if management.tailnet-auth did not exist yet.'
 }
+if ($serverTooOld) { Write-Warning $serverTooOldText }
 
 # --- -Disable: flip the master switch only ------------------------------------------------------
 

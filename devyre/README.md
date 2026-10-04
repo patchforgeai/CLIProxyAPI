@@ -39,17 +39,23 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `devyre/scripts/up.ps1` | Refuses to publish beyond 127.0.0.1, builds and tags the image, recreates the container, waits for `/healthz` and the panel |
 | `internal/api/devyre_routing_readings_route_test.go` | The readings endpoint is on `/v8` only, behind management auth |
 | `internal/api/devyre_t3_hub_contract_test.go` | `TestT3Hub_*`, the T3 Code hub contract |
+| `internal/api/devyre_tailnet_auth.go` | Keyless proxy API for trusted requests (`proxy-api`), the key-only `/v1/ws` wrapper and the anti-framing headers of the panel pages |
+| `internal/api/devyre_tailnet_auth_test.go` | Full-stack `tailnet-auth` tests through the real server and config loader: session endpoint, token-bearing routes, CORS, proxy principal, `/v1/ws`, framing |
 | `internal/api/handlers/management/devyre_quota_observer.go` | Idle-credential usage poller; also forgets the readings of removed credentials |
 | `internal/api/handlers/management/devyre_quota_observer_test.go` | Poller scheduling, min-gap, backoff and pruning tests |
 | `internal/api/handlers/management/devyre_routing_config_test.go` | The routing blocks survive `/v8/management` config writes |
 | `internal/api/handlers/management/devyre_routing_readings.go` | `GET /v8/management/routing/quota-readings` |
 | `internal/api/handlers/management/devyre_routing_readings_test.go` | Readings endpoint golden JSON |
 | `internal/api/handlers/management/devyre_routing_strategy_test.go` | `PUT /routing/strategy` accepts `expiring-first` and its aliases |
+| `internal/api/handlers/management/devyre_tailnet_auth.go` | Keyless management access (`devyreTailnetAuthorize`, which `Middleware()` asks first) and `GET /v8/management/auth/session` |
+| `internal/api/handlers/management/devyre_tailnet_auth_test.go` | Middleware, ban, `allow-remote` and session tests, plus a `/v8` config write round trip |
 | `internal/api/handlers/management/devyre_usage_cache.go` | Usage cache inside `APICall` |
 | `internal/api/handlers/management/devyre_usage_cache_test.go` | Usage cache tests: TTLs, single-flight, stale, backoff, bypass, query variants, writes |
 | `internal/config/devyre_deploy_template_test.go` | Loads the deploy template through the real config loader and checks the typed routing values; pins the `tailnet-auth` block and the keys `tailnet-trust.ps1` writes |
 | `internal/config/devyre_routing.go` | `routing.expiring-first` and `routing.quota-observation` config |
 | `internal/config/devyre_routing_test.go` | Routing config defaults, aliases and save round trips |
+| `internal/config/devyre_tailnet_auth.go` | `management.tailnet-auth` settings (`TailnetAuthConfig`); every setting defaults to off |
+| `internal/config/devyre_tailnet_auth_test.go` | `tailnet-auth` defaults, both layouts, v8 validation, save round trips, the `config.example.yaml` block and the typed deploy-template check |
 | `internal/managementasset/devyre_updater_test.go` | Pins the panel source to the fork |
 | `internal/quotareading/claude.go` | Claude header and usage-body parsers |
 | `internal/quotareading/claude_test.go` | Claude parser tests |
@@ -64,6 +70,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/quotareading/reading.go` | Readings model: `Window`, `Kind`, `Reading` |
 | `internal/quotareading/store.go` | Readings store: `Put`, `Replace`, `Effective` |
 | `internal/quotareading/store_test.go` | Store tests |
+| `internal/tailnetauth/decide.go` | The trust decision: `Decide`, a pure function of the policy and the request |
+| `internal/tailnetauth/decide_test.go` | Table tests for every rule of the decision |
 | `sdk/cliproxy/auth/devyre_priority.go` | Exports the selectors' priority and availability rules for the readings endpoint |
 | `sdk/cliproxy/auth/selector_expiring_first.go` | The `expiring-first` selector |
 | `sdk/cliproxy/auth/selector_expiring_first_test.go` | Selector tests, including session affinity |
@@ -75,14 +83,18 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 
 | File | Our change |
 |---|---|
-| `config.example.yaml` | `management.panel-github-repository` is the fork; `routing:` documents `expiring-first` and the `expiring-first` and `quota-observation` blocks. |
+| `config.example.yaml` | `management.panel-github-repository` is the fork; a commented `management.tailnet-auth` block with every setting off; `routing:` documents `expiring-first` and the `expiring-first` and `quota-observation` blocks. |
 | `internal/api/handlers/management/api_tools.go` | Three hunks hook the usage cache into `APICall`: a lookup after `auth_index` and `url` are parsed, complete or fail after the upstream call, and a record on success. `/v0` and `/v8` share this handler. |
 | `internal/api/handlers/management/auth_files.go` | `extractCodexIDTokenClaims` also emits `chatgpt_plan_type`, the key T3 Code reads. |
 | `internal/api/handlers/management/config_basic.go` | `normalizeRoutingStrategy` accepts `expiring-first`, so `PUT /routing/strategy` does too. |
-| `internal/api/server.go` | Starts the quota observer once, right after the management handler is created. |
-| `internal/api/server_management_v8.go` | One line registers `GET /v8/management/routing/quota-readings`. |
+| `internal/api/handlers/management/handler.go` | Two hunks: `Middleware()` asks `devyreTailnetAuthorize` first and skips the key for a trusted request, and the missing-key branch of `AuthenticateManagementKey` no longer calls `fail()`, so only a wrong key counts toward the ban. |
+| `internal/api/server.go` | Starts the quota observer once, right after the management handler is created. One line adds `devyreTailnetContext` to the engine, so the proxy API's keyless check reads the live config. |
+| `internal/api/server_management.go` | `serveManagementControlPanel` calls `devyreDenyFraming`. |
+| `internal/api/server_management_v8.go` | Two lines register `GET /v8/management/routing/quota-readings` and `GET /v8/management/auth/session`. |
+| `internal/api/server_middleware.go` | Two hunks: `accessAuthMiddleware` falls back to `devyreKeylessProxyAccess` after the API keys fail with a 401, and `serveExampleAPIKeyWarningPage` calls `devyreDenyFraming`. |
+| `internal/api/server_routes.go` | `AttachWebsocketRoute` uses `devyreKeyOnlyAuthMiddleware`, so `/v1/ws` is never keyless. |
 | `internal/config/config_defaults.go` | `DefaultPanelGitHubRepository` points at the Devyre panel fork. |
-| `internal/config/config_types.go` | The `Strategy` comment, plus the `ExpiringFirst` and `QuotaObservation` fields on `RoutingConfig`. |
+| `internal/config/config_types.go` | The `Strategy` comment, the `ExpiringFirst` and `QuotaObservation` fields on `RoutingConfig`, and `RemoteManagement.TailnetAuth` (`management.tailnet-auth`). |
 | `internal/config/config_yaml.go` | `isKnownDefaultValue` keeps explicit zero values of the pointer-backed routing settings (`devyreKeepsExplicitZero`), so a save does not drop them. |
 | `internal/managementasset/updater.go` | `defaultManagementReleaseURL` and `defaultManagementFallbackURL` point at the Devyre panel releases. Never restore `cpamc.router-for.me`. |
 | `sdk/cliproxy/service_config.go` | `expiring-first` aliases in `normalizedRoutingRuntimeState`, construction in `newRoutingSelector`, and the gate and log settings in `routingRuntimeState`. That struct must stay comparable: no pointers, maps or slices. |
@@ -166,7 +178,7 @@ On top of that, `management.tailnet-auth` lets chosen tailnet devices, and this 
 ### Set it up
 
 1. Preview: `devyre\scripts\tailnet-trust.ps1 -Include <this PC>,<phone>,<laptop> -ShowOnly`. Names are wildcards, matched against each device's host name and the first label of its MagicDNS name. iPhones report the host name `localhost`, so use their MagicDNS label, for example `iphone*`. `-Include *` takes every untagged device of your login except the automation names below. The table lists every device with its decision and the reason.
-2. Write: the same command without `-ShowOnly`. The script writes only `management.tailnet-auth`, with `PUT /v8/management/config/management/tailnet-auth`, then re-reads the management section and fails unless nothing else changed. The running server applies it at once. A server built before this feature refuses the write as an unknown field: run `up.ps1` first.
+2. Write: the same command without `-ShowOnly`. The script writes only `management.tailnet-auth`, with `PUT /v8/management/config/management/tailnet-auth`, then re-reads the management section and fails unless nothing else changed. The running server applies it at once. A server built before this feature has no `/v8/management/auth/session` and would refuse the block, so the script writes nothing there and asks you to run `up.ps1` first.
 3. Check: `devyre\scripts\exposure-check.ps1`. It must end with 0 FAIL.
 
 The block: `allowed-logins` holds the login that owns this PC; `allowed-devices` holds every Tailscale IP, IPv4 and IPv6, of the selected devices; `allowed-hosts` holds this PC's MagicDNS FQDN and short name, `localhost` and `127.0.0.1`. When the block is new, `enabled`, `allow-local` and `proxy-api` start as `true`, like the deploy template; afterwards the script keeps their live values. Each list fails closed: an empty list means no keyless access through it.
@@ -176,7 +188,7 @@ The block: `allowed-logins` holds the login that owns this PC; `allowed-devices`
 - **After a tailnet rename:** run `tailscale-serve.ps1`, then `tailnet-trust.ps1` with no arguments. Without `-Include` it keeps the devices that are already allowed and refreshes the names: the FQDN in `allowed-hosts` goes stale on a rename while the short name keeps working.
 - **Turn it off:** `tailnet-trust.ps1 -Disable`. Every request needs a key again at once; `-Enable` turns it back on. `allow-local` and `proxy-api` are in the panel's config editor under `management.tailnet-auth`, or set one from this PC, for example: `Invoke-RestMethod -Method Put -Uri http://127.0.0.1:8317/v8/management/config/management/tailnet-auth/allow-local -Headers @{ 'X-CPA-Keyless' = '1' } -ContentType application/json -Body 'false'` (that request itself relies on `allow-local`; send `Authorization = "Bearer <management key>"` instead when it is off).
 
-Scripts and `curl` send `X-CPA-Keyless: 1`, or any `Authorization: Bearer` value, and no key: `curl.exe -H "X-CPA-Keyless: 1" http://127.0.0.1:8317/v8/management/auth/session` answers `{"authenticated":true,"method":"local",...}` (`"tailnet"` over the tailnet, `"key"` with a valid key, 401 otherwise). The panel probes that endpoint at start-up. The header is a constant, not a secret.
+Scripts and `curl` send `X-CPA-Keyless: 1`, or any `Authorization: Bearer` value, and no key: `curl.exe -H "X-CPA-Keyless: 1" http://127.0.0.1:8317/v8/management/auth/session` (a fork-only endpoint, not in upstream's API docs) answers `{"authenticated":true,"method":"local","login":"","device":""}`. Over the tailnet `method` is `"tailnet"`, `device` is the caller's tailnet IP and `login` its login (empty for a listed tagged node). Trust is checked before the key, so `"key"` appears only when a valid key authenticated an untrusted request; otherwise the answer is 401. The panel probes that endpoint at start-up. The header is a constant, not a secret.
 
 ### Who is trusted, and why
 
@@ -188,8 +200,11 @@ A request skips the key only when all of these hold:
 - It passes the browser guard. A present `Origin` must be this same origin, and a present `Sec-Fetch-Site` must be `same-origin` or `none`. Without `Origin`, the request must carry a non-browser signal: `X-CPA-Keyless: 1`, `Authorization: Bearer <non-empty token>`, or a non-empty `X-Management-Key`, `X-Api-Key` or `X-Goog-Api-Key`. Browsers never add these on their own; a page from another site can add one only in CORS mode, which always sends its `Origin`, and the guard rejects that `Origin`. Query keys, Basic and other schemes do not count.
 - Then exactly one path applies, chosen by the `Host`:
   - **Tailnet** (this PC's MagicDNS name, through tailscale serve): `X-Forwarded-For` is exactly one tailnet IP that is listed in `allowed-devices`, and the `Tailscale-User-Login` that serve set is in `allowed-logins`. A listed tagged node, which serve stamps with no identity, needs only its IP, and only while `allowed-logins` is not empty. tailscale serve overwrites `X-Forwarded-For` and the `Tailscale-User-*` headers, so tailnet devices cannot forge them.
-  - **Local** (`localhost` or `127.0.0.1`, with `allow-local: true`): a direct request on this PC. Proxy headers (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`, `X-Forwarded-Host`, `Tailscale-*`) never arrive through serve on a loopback name, so with one the request is untrusted.
+  - **Local** (a loopback `Host` such as `localhost` or `127.0.0.1`, with `allow-local: true`): a direct request on this PC. Proxy headers (`X-Forwarded-For`, `X-Real-IP`, `Forwarded`, `X-Forwarded-Host`, `Tailscale-*`) never arrive through serve on a loopback name, so with one the request is untrusted.
 - None of the headers the decision reads (`X-Forwarded-For`, `X-Forwarded-Host`, `Origin`, `Sec-Fetch-Site`, `X-CPA-Keyless`, `Tailscale-User-Login`, `Tailscale-User-Name`) appears twice.
+- For the management API, trust never opens more than the key would: a management key must be configured, and `management.allow-remote` must be true unless the client is loopback. Inside the container no client is loopback, this PC and tailscale serve's hop included, so the deploy template keeps `allow-remote: true`.
+
+Trusted management responses carry no `Access-Control-*` headers and send `Cache-Control: no-store`, so another origin can never read them. `/management.html` and the safe-mode page at `/` refuse framing (`Content-Security-Policy: frame-ancestors 'none'`, `X-Frame-Options: DENY`).
 
 **`allowed-devices` is the only barrier against your own automation.** Every node on this tailnet, the CI runner and the bot VM included, is untagged and owned by the same login, so tailscale serve stamps them all with the allowed login. Only the device list keeps them out, and an allowed CI runner or bot could read the Claude OAuth tokens through the management API. `tailnet-trust.ps1` therefore leaves out any device whose name holds the token `ci`, `runner`, `bot`, `build` or `agent`, unless `-AllowAutomationName` names it exactly. As a second barrier, tag those hosts in the tailnet policy (for example `tag:ci` and `tag:bot`): tagged nodes get no identity headers, and the script never lists tagged nodes.
 
@@ -199,7 +214,7 @@ A request skips the key only when all of these hold:
 - `allow-local: false` is no barrier against software on this PC, which can forge the tailnet headers.
 - Processes running as your user can read `secrets\` and `auths\` anyway.
 - Passwordless access suits only a single-user PC whose containers you trust.
-- It depends on loopback-only publishing: published on the LAN, any device there could forge the headers. `up.ps1` refuses that and `exposure-check.ps1` checks it. `server.trusted-proxies` must also contain the Docker gateway, and a change there applies only after a container restart.
+- It depends on loopback-only publishing: published on the LAN, any device there could forge the headers. `up.ps1` refuses that and `exposure-check.ps1` checks it. `server.trusted-proxies` must also contain the Docker gateway. Passwordless access reads that list live, but bans and logs read it only at start, so restart the container after changing it.
 
 ### What still needs the key
 
@@ -210,7 +225,7 @@ A request skips the key only when all of these hold:
 
 A request without a key no longer counts toward the ban; only a wrong non-empty key does, and five of them ban the client IP for 30 minutes. Trusted requests never touch the counter, and a wrong key on a trusted request is ignored, so T3 Code can keep any key.
 
-**Proxy API (`proxy-api: true`).** A valid API key always wins, so configured clients keep their own usage rows and isolation. A trusted request without a valid API key is attributed to `tailnet:<login>@<device IP>` (the login is empty for a listed tagged node) or to `local`. That principal also seeds caller-scope session isolation, the Claude MCP alias secret, the Codex prompt-cache key and the xAI reasoning-replay namespace, which is why it is per device. It need not be secret: the server derives it from verified identity, and only software inside the trust boundary could forge it.
+**Proxy API (`proxy-api: true`).** A valid API key always wins, so configured clients keep their own usage rows and isolation. A trusted request without a valid API key is attributed to `tailnet:<login>@<device IP>` (the login is empty for a listed tagged node) or to `local`; like every keyless request it needs a non-browser signal, and any non-empty `Authorization: Bearer` or `X-Api-Key` value counts. That principal also seeds caller-scope session isolation, the Claude MCP alias secret, the Codex prompt-cache key and the xAI reasoning-replay namespace, which is why it is per device. It need not be secret: the server derives it from verified identity, and only software inside the trust boundary could forge it.
 
 ### Residual risks
 
@@ -221,7 +236,7 @@ A request without a key no longer counts toward the ban; only a wrong non-empty 
 
 Exposure: every port of the cpa container is published on 127.0.0.1; nothing listens on `0.0.0.0` or a LAN address for 8317, 54545 or 1455, and 8318 listens on Tailscale addresses only; this PC's LAN addresses cannot reach 8317 or 8318; Funnel is off; tailscale serve has exactly one web handler on port 8318, `/` to `http://127.0.0.1:8317`, keyed to the current MagicDNS name, and no raw TCP forward reaches CPA; both health URLs answer 200.
 
-Passwordless: the Docker gateway is inside `server.trusted-proxies`; `allowed-hosts` holds the current FQDN; over the tailnet the keyless session probe is 200 (SKIP when this PC is not in `allowed-devices`), the same request without a signal is 401, and with `Origin: http://evil.example` it is 401 or 403; direct `http://127.0.0.1:8317` follows `allow-local`, and forged tailnet headers or a foreign `Origin` there are refused; a throwaway container trusted as local is a WARN. It reads the live config with the management key, sends no wrong key, and changes nothing.
+Passwordless: the Docker gateway is inside `server.trusted-proxies`; `allowed-hosts` holds the current FQDN; over the tailnet the keyless session probe is 200 (SKIP when this PC is not in `allowed-devices`), the same request without a signal is 401, and with `Origin: http://evil.example` it is 401 or 403; direct `http://127.0.0.1:8317` follows `allow-local`, and forged tailnet headers or a foreign `Origin` there are refused; a throwaway container trusted as local is a WARN. A failed keyless probe lists its preconditions, `management.allow-remote` included. It reads the live config with the management key, sends no wrong key, and changes nothing.
 
 ## Sync with upstream
 
@@ -248,11 +263,12 @@ Run `devyre\scripts\backup.ps1 -Destination <folder>`. It writes `config.yaml`, 
 ## Fork tests
 
 ```powershell
-go test ./internal/api/ -run 'T3Hub|QuotaReadings'
+go test ./internal/api/ -run 'T3Hub|QuotaReadings|TailnetAuth|DevyreKeylessProxy'
 go test ./internal/managementasset/ -run DevyrePanelSource
-go test ./internal/config/ -run 'DevyreDeployTemplate|ExpiringFirst'   # includes the tailnet-auth template block
+go test ./internal/config/ -run 'DevyreDeployTemplate|ExpiringFirst|TailnetAuth'
 go test ./internal/quotareading/
-go test ./internal/api/handlers/management/ -run 'UsageCache|QuotaObserver|RoutingQuota|ExpiringFirst|RoutingStrategy'
+go test ./internal/tailnetauth/
+go test ./internal/api/handlers/management/ -run 'UsageCache|QuotaObserver|RoutingQuota|ExpiringFirst|RoutingStrategy|TailnetAuth|GetAuthSession|AuthenticateManagementKey'
 go test ./sdk/cliproxy/auth/ -run ExpiringFirst
 go test ./sdk/cliproxy/ -run ExpiringFirst
 ```
