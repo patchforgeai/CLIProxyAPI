@@ -126,10 +126,17 @@ access:
 
 # Routing strategy for selecting credentials when multiple match.
 routing:
-  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first
+  strategy: "round-robin" # round-robin (default), weighted-round-robin, fill-first, expiring-first
   # weighted-round-robin uses each credential's integer weight (default 1, maximum 1,000,000).
   # Non-positive weights exclude the credential while this strategy is active.
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
+  # expiring-first (aliases: expiringfirst, ef, soonest-reset) burns the credential whose quota
+  # would be lost soonest: the remaining percent of its longest window divided by the hours until
+  # that window resets. Short windows (24h or less) and model-scoped windows only gate. Credentials
+  # without quota readings rank last, and priority tiers keep their meaning. With session-affinity,
+  # a bound session never moves for urgency, only when its credential becomes unavailable or the
+  # binding expires.
+  # Tune it with the expiring-first and quota-observation blocks at the end of this section.
   # Enable universal session-sticky routing for all clients.
   # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
   # followed by prompt_cache_key, Responses conversation IDs, legacy body IDs,
@@ -188,6 +195,33 @@ routing:
     # Cooldown duration in seconds for transient upstream errors (408/500/502/503/504/520-526).
     # Set to 0 to keep the legacy 60-second cooldown; set to -1 to disable transient error cooldowns.
     transient-error-cooldown-seconds: 0
+
+  # Settings for strategy: expiring-first.
+  # expiring-first:
+  #   # Gate a credential while a short window (such as Claude's 5-hour limit), or the
+  #   # model-scoped window of the requested model family, has at most this percent left.
+  #   # Range 0-100. Default: 2.
+  #   gate-remaining-percent: 2
+  #   # Log every pick at info level instead of debug. Default: false.
+  #   log-picks: false
+
+  # Quota readings that feed expiring-first: response headers, usage bodies fetched through the
+  # management api-call endpoint (panel, T3 Code hub), and an idle-credential poller.
+  # Durations accept Go duration strings ("30s", "5m", "1h"); invalid or non-positive values use the default.
+  # quota-observation:
+  #   # Caches GET usage calls made through api-call so several consumers cannot trip the
+  #   # provider rate limits. Claude's usage endpoint is tightly rate limited.
+  #   usage-cache:
+  #     enabled: true            # Default: true, whatever the strategy.
+  #     claude-usage-ttl: "5m"   # Default: 5m.
+  #     codex-usage-ttl: "60s"   # Default: 60s.
+  #     refresh-floor: "30s"     # Minimum age of the last upstream call before a refresh may bypass the cache. Default: 30s.
+  #   # Polls the usage endpoint of credentials that carry no recent traffic.
+  #   poller:
+  #     enabled: true            # Default: on when strategy is expiring-first, off otherwise.
+  #     claude-interval: "30m"   # Poll a Claude credential whose newest weekly reading is older than this. Default: 30m.
+  #     claude-min-gap: "10m"    # Minimum gap between any two Claude usage calls. Default: 10m.
+  #     codex-interval: "5m"     # Poll a Codex credential whose newest weekly reading is older than this. Default: 5m.
 
 # Shared request/response behavior.
 requests:

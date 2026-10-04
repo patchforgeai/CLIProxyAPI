@@ -351,7 +351,8 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first".
+	// Supported values: "round-robin" (default), "weighted-round-robin", "fill-first",
+	// "expiring-first" (devyre: prefers the credential whose quota resets soonest).
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// SessionAffinity enables universal session-sticky routing for all clients.
@@ -371,6 +372,10 @@ type RoutingConfig struct {
 	// When false, subagents are distributed across the credential pool via the fallback selector.
 	// Default: true. Ignored when SessionAffinity is false.
 	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
+
+	// devyre: expiring-first selector and quota observation settings (devyre_routing.go).
+	ExpiringFirst    ExpiringFirstConfig    `yaml:"expiring-first,omitempty" json:"expiring-first,omitempty"`
+	QuotaObservation QuotaObservationConfig `yaml:"quota-observation,omitempty" json:"quota-observation,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.

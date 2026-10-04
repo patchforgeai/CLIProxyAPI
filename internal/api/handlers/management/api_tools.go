@@ -135,6 +135,14 @@ func (h *Handler) APICall(c *gin.Context) {
 	authIndex := firstNonEmptyString(body.AuthIndexSnake, body.AuthIndexCamel, body.AuthIndexPascal)
 	auth := h.authByIndex(authIndex)
 
+	// devyre: allowlisted usage GETs go through the usage cache (devyre_usage_cache.go).
+	usageCall := h.beginUsageCall(c, method, urlStr, auth)
+	if cached, ok := usageCall.cachedResponse(); ok {
+		c.JSON(http.StatusOK, cached)
+		return
+	}
+	defer usageCall.release()
+
 	reqHeaders := body.Header
 	if reqHeaders == nil {
 		reqHeaders = map[string]string{}
@@ -217,6 +225,10 @@ func (h *Handler) APICall(c *gin.Context) {
 	resp, errDo := httpClient.Do(req)
 	if errDo != nil {
 		log.WithError(errDo).Debug("management APICall request failed")
+		if stale := usageCall.fail(); stale != nil { // devyre: answer usage GETs from cache
+			c.JSON(http.StatusOK, *stale)
+			return
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": "request failed"})
 		return
 	}
@@ -228,15 +240,20 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	respBody, errReadAll := io.ReadAll(resp.Body)
 	if errReadAll != nil {
+		if stale := usageCall.fail(); stale != nil { // devyre: answer usage GETs from cache
+			c.JSON(http.StatusOK, *stale)
+			return
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
 	}
 
-	c.JSON(http.StatusOK, apiCallResponse{
+	// devyre: complete records usage responses and may answer an upstream error from cache.
+	c.JSON(http.StatusOK, usageCall.complete(apiCallResponse{
 		StatusCode: resp.StatusCode,
 		Header:     resp.Header,
 		Body:       string(respBody),
-	})
+	}))
 }
 
 func firstNonEmptyString(values ...*string) string {
