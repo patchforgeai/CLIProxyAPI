@@ -22,6 +22,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `devyre/README.md` | This file |
 | `devyre/clients/codex-config.toml` | Optional Codex CLI provider |
 | `devyre/clients/powershell-profile.ps1` | Claude Code CLI wiring: `Enable-CpaPool`, `Disable-CpaPool`, `claude-direct`, `claudex` |
+| `devyre/clients/claude-pool.cmd` | `claude-pool`: one Claude Code run through the pool. Works in any shell and needs no PowerShell execution policy change |
+| `devyre/.gitattributes` | Keeps `*.cmd` files in CRLF for cmd.exe |
 | `devyre/clients/t3-code.md` | Click-by-click T3 Code setup: hub, pooled Claude instance, Claude Direct |
 | `devyre/deploy/.env.example` | Compose variables; copy it to the gitignored `.env` |
 | `devyre/deploy/config.template.yaml` | Runtime config template (v8 layout) that `new-secrets.ps1` renders |
@@ -133,7 +135,9 @@ Steps, from the repository root in PowerShell:
 5. **Log in accounts.** Open the panel (`http://127.0.0.1:8317/management.html` on the host, or `<tailnet URL>/management.html` from another device) and log in with the management key. Under OAuth Login, add each Claude account, using a separate browser profile or private window per account.
 6. **Wire the clients.**
    - T3 Code: follow `devyre\clients\t3-code.md`.
-   - Claude Code CLI: append `devyre\clients\powershell-profile.ps1` to `$PROFILE`. In a new shell, once the accounts are logged in, run `Enable-CpaPool`.
+   - Claude Code CLI, either way:
+     - **`claude-pool`.** Copy `devyre\clients\claude-pool.cmd` to a folder on PATH, for example `%USERPROFILE%\.local\bin`, next to `claude.exe`. Then `claude-pool` runs Claude Code through the pool and plain `claude` stays on your own login. It works in cmd, PowerShell and Git Bash with no execution-policy change.
+     - **Profile functions.** Dot-source `devyre\clients\powershell-profile.ps1` from `$PROFILE`. In a new shell, once the accounts are logged in, run `Enable-CpaPool`, which makes plain `claude` pooled. Windows PowerShell only loads `$PROFILE` when the execution policy allows scripts; the default Restricted policy skips it.
    - Codex CLI (optional): see `devyre\clients\codex-config.toml`.
 
 Day to day:
