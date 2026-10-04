@@ -389,6 +389,11 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 		return false
 	}
 
+	// devyre: explicit zero values of pointer-backed routing settings, and the new sections holding them.
+	if devyreKeepsExplicitZero(path, node) {
+		return false
+	}
+
 	// First check if it's a zero value
 	if isZeroValueNode(node) {
 		return true
