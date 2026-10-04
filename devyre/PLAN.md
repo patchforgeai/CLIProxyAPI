@@ -95,7 +95,7 @@ Pause and ask at each of these:
 | D2 | Panel = upstream `main` merged with `chhoumann/dev@24633a8` as a real merge, so authorship is kept. Credit it in README | MIT, already calibrated against Theo's frame, 1500+ tests. Don't rebuild it |
 | D3 | **Claude ledger, per the user:** <br>• Headline = `seven-day` ("7-day limit"). <br>• Secondary pooled line = `five-hour`. <br>• Row columns = 7-day, 5-hour, then any other reported model windows. <br>• `seven-day-fable` is **hidden in Ledger**, still visible in Cards, and shown only if it is an account's only window | "Opus 5.5 is great, we don't really use Fable right now" |
 | D4 | Default theme `dark`. Everything else in the shell stays upstream | That *is* Theo's look (F1) |
-| D5 | New built-in strategy `expiring-first`, a core selector wrapped by `SessionAffinitySelector`. <br>• Urgency = remaining % of the credential's longest window ÷ hours until that window resets. <br>• Short windows (≤ 24 h) and model-scoped windows only gate. <br>• Unknowns rank last, round-robin among themselves. <br>• Priority tiers keep their meaning. <br>• **Bound threads never migrate for urgency.** They move only when the credential becomes unavailable or the affinity TTL (1 h) lapses | Matches Theo (F10) and bandoyer's analysis (#8, #10). A migration rewrites the whole cached prefix (about $0.50-0.80 per 100k tokens at API rates), which outweighs the ordering gain |
+| D5 | New built-in strategy `expiring-first`, a core selector wrapped by `SessionAffinitySelector`. <br>• Urgency = remaining % of the credential's longest window ÷ hours until that window resets. <br>• Short windows (≤ 24 h) and model-scoped windows only gate. Long windows rank, and also gate once exhausted. <br>• Unknowns rank last, round-robin among themselves. <br>• Priority tiers keep their meaning. <br>• **Bound threads never migrate for urgency.** They move only when the credential becomes unavailable or the affinity TTL (1 h) lapses | Matches Theo (F10) and bandoyer's analysis (#8, #10). A migration rewrites the whole cached prefix (about $0.50-0.80 per 100k tokens at API rates), which outweighs the ordering gain |
 | D6 | One in-memory **quota-readings** store fed from three sources: <br>• Response headers, already in `Auth.Quota.Signals`. <br>• Every usage body that passes through `api-call` (panel and T3 hub). <br>• An idle-credential poller. <br>The newest reading per window wins | Covers idle credentials without extra traffic |
 | D7 | **Usage cache** inside `APICall`, for allowlisted GET usage and profile URLs only: <br>• TTL: Claude 5 min, Codex 60 s, profile 1 h. <br>• Single-flight per key. <br>• Serves stale data on error. <br>• Claude 429 backoff: 5 min doubling to 1 h. <br>• Explicit bypass header with a 30 s floor | Three consumers (T3 hub, panel, poller) must not trip Claude's limiter (F11) |
 | D8 | Keep the T3 hub's `/v0` endpoints and pin them with contract tests. If upstream deletes them, add a `devyre_v0_shim.go` | F6 and F7 |
@@ -468,7 +468,7 @@ Cover:
 ```go
 package quotareading
 
-type Kind int // KindShort: ≤24h window, gates only. KindLong: >24h, ranks. KindScoped: model-specific, gates matching models.
+type Kind int // KindShort: ≤24h window, gates only. KindLong: >24h, ranks, and gates once exhausted. KindScoped: model-specific, gates matching models.
 type Source string // "header" | "usage" | "poll"
 
 type Window struct {
@@ -560,7 +560,7 @@ Algorithm. It is deterministic given readings and `now`.
 
 1. `available, err := getSelectorAvailableAuths(ctx, auths, provider, model, now)`. This already drops disabled and cooling credentials and keeps the **highest priority tier**. Then `available = preferCodexWebsocketAuths(ctx, provider, available)`.
 2. For each auth, compute `r := quotareading.Effective(quotareading.Default(), a.ID, a.Provider, a.Quota.Signals, a.Quota.ObservedAt, now)`.
-3. **Gate:** the auth is gated if any Short window, or any Scoped window whose `Model` family matches the requested `model`, has remaining ≤ `GateRemainingPercent` and `ResetsAt` after now. Family match: the model name contains "fable", "opus" or "sonnet", lowercased.
+3. **Gate:** the auth is gated if any Short or Long window, or any Scoped window whose `Model` family matches the requested `model`, has remaining ≤ `GateRemainingPercent` and `ResetsAt` after now. An exhausted Long window gates too: the credential would only answer 429 until it resets. Family match: the model name contains "fable", "opus" or "sonnet", lowercased.
 4. **Urgency:** take the Long window with the largest `Length`. If there is none, take the longest window of any kind. Then `urgency = remaining% / max(hoursUntil(ResetsAt), 0.25)`. If there is no window or no reset time, the urgency is unknown.
 5. **Order:**
    - Known urgencies descending, with ties broken by round-robin on ID.
@@ -587,7 +587,7 @@ Algorithm. It is deterministic given readings and `now`.
 **Tests** in `selector_expiring_first_test.go`, table-driven with a fake clock:
 - A (40% left, resets in 3 h) beats B (90%, 4 d).
 - D (80%, 2 h) beats C (1%, 10 min).
-- A credential with an exhausted 5-hour window is gated.
+- A credential with an exhausted 5-hour window is gated, and so is one with an exhausted weekly window.
 - A Fable-scoped window gates only Fable models.
 - A passed reset counts as a full window with low urgency.
 - Unknowns rank after the knowns, round-robin among themselves.

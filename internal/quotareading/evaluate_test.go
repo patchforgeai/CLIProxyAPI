@@ -52,8 +52,10 @@ func TestQuotaReadingEvaluateUrgencyOrdering(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			first := Evaluate(Reading{AuthID: "first", Windows: []Window{tc.first}}, "claude-opus-5-5", testNow, defaultGate)
-			second := Evaluate(Reading{AuthID: "second", Windows: []Window{tc.second}}, "claude-opus-5-5", testNow, defaultGate)
+			// A zero gate compares urgency alone: under the default gate C's 1%
+			// would gate it (TestQuotaReadingEvaluateGates covers that).
+			first := Evaluate(Reading{AuthID: "first", Windows: []Window{tc.first}}, "claude-opus-5-5", testNow, 0)
+			second := Evaluate(Reading{AuthID: "second", Windows: []Window{tc.second}}, "claude-opus-5-5", testNow, 0)
 			if !first.UrgencyKnown || !second.UrgencyKnown || !first.Usable || !second.Usable {
 				t.Fatalf("evaluations = %+v / %+v", first, second)
 			}
@@ -123,8 +125,54 @@ func TestQuotaReadingEvaluateGates(t *testing.T) {
 			wantUsable: true,
 		},
 		{
-			name:       "an exhausted long window ranks but never gates",
-			windows:    []Window{longWindow(0, 24*time.Hour)},
+			name:        "an exhausted long window gates",
+			windows:     []Window{longWindow(0, 24*time.Hour)},
+			model:       "claude-opus-5-5",
+			gate:        defaultGate,
+			wantReason:  "7d exhausted",
+			wantResetIn: 24 * time.Hour,
+		},
+		{
+			name:        "a long window at the gate threshold gates a model-agnostic view",
+			windows:     []Window{shortWindow(80, time.Hour), longWindow(2, 10*time.Minute)},
+			gate:        defaultGate,
+			wantReason:  "7d exhausted",
+			wantResetIn: 10 * time.Minute,
+		},
+		{
+			name:       "a long window above the gate threshold is usable",
+			windows:    []Window{shortWindow(80, time.Hour), longWindow(2.5, 10*time.Minute)},
+			gate:       defaultGate,
+			wantUsable: true,
+		},
+		{
+			name:        "exhausted short and long windows report both and the latest reset",
+			windows:     []Window{longWindow(1, 3*24*time.Hour), shortWindow(0, 2*time.Hour)},
+			model:       "claude-sonnet-5",
+			gate:        defaultGate,
+			wantReason:  "5h exhausted, 7d exhausted",
+			wantResetIn: 3 * 24 * time.Hour,
+		},
+		{
+			name: "an exhausted codex weekly-only primary gates",
+			windows: []Window{{
+				ID: "primary", Kind: KindLong, UsedPercent: 100, ResetsAt: testNow.Add(50 * time.Hour),
+				Length: 7 * 24 * time.Hour, ObservedAt: testNow, Source: SourceUsage,
+			}},
+			model:       "gpt-5.5",
+			gate:        defaultGate,
+			wantReason:  "primary exhausted",
+			wantResetIn: 50 * time.Hour,
+		},
+		{
+			name:       "an exhausted long window whose reset passed does not gate",
+			windows:    []Window{longWindow(0, -time.Minute)},
+			gate:       defaultGate,
+			wantUsable: true,
+		},
+		{
+			name:       "an exhausted long window with an unknown reset does not gate",
+			windows:    []Window{{ID: "7d", Kind: KindLong, UsedPercent: 100, Length: 7 * 24 * time.Hour}},
 			gate:       defaultGate,
 			wantUsable: true,
 		},
@@ -179,6 +227,18 @@ func TestQuotaReadingEvaluateGates(t *testing.T) {
 				t.Fatalf("GateResetsAt = %v, want %v", got.GateResetsAt, wantReset)
 			}
 		})
+	}
+}
+
+// A gated credential keeps its urgency, which the selector's all-gated fallback
+// and pick logs report.
+func TestQuotaReadingEvaluateExhaustedLongWindowStillRanks(t *testing.T) {
+	got := Evaluate(Reading{AuthID: "auth-a", Windows: []Window{longWindow(1, 4*time.Hour)}}, "claude-opus-5-5", testNow, defaultGate)
+	if got.Usable || got.GateReason != "7d exhausted" || !got.GateResetsAt.Equal(testNow.Add(4*time.Hour)) {
+		t.Fatalf("Evaluate = %+v, want gated on the exhausted 7d window", got)
+	}
+	if !got.UrgencyKnown || got.RankWindowID != "7d" || !approxEqual(got.Urgency, 0.25) {
+		t.Fatalf("Evaluate = %+v, want it still ranked on 7d at 0.25%%/h", got)
 	}
 }
 

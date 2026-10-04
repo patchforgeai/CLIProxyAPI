@@ -14,8 +14,8 @@ const minUrgencyHours = 0.25
 type Evaluation struct {
 	// Usable is false when any gate applies.
 	Usable bool
-	// GateReason names the gating windows, e.g. "5h exhausted" or
-	// "7d:fable exhausted"; it is empty when usable.
+	// GateReason names the gating windows, e.g. "5h exhausted", "7d exhausted"
+	// or "7d:fable exhausted"; it is empty when usable.
 	GateReason string
 	// GateResetsAt is the latest reset among the gating windows.
 	GateResetsAt time.Time
@@ -28,8 +28,11 @@ type Evaluation struct {
 // Evaluate gates and ranks a reading for model at now. Pass a reading already
 // normalized by Effective; Evaluate itself does not roll resets forward.
 //
-// Gate: a short window, or a scoped window whose Model equals ModelFamily(model),
-// with RemainingPercent() <= gateRemainingPercent and ResetsAt after now.
+// Gate: any window that applies to the request, with RemainingPercent() <=
+// gateRemainingPercent and ResetsAt after now. Short and long windows always
+// apply; a scoped window applies when its Model equals ModelFamily(model). An
+// exhausted long window therefore gates too: the credential would only answer
+// 429 until that window resets.
 //
 // Ranking window: the long window with the largest Length (ties: the earliest
 // known ResetsAt, then the smallest ID). Without a long window, the longest
@@ -44,7 +47,7 @@ func Evaluate(r Reading, model string, now time.Time, gateRemainingPercent float
 
 	var gating []string
 	for _, window := range r.Windows {
-		applies := window.Kind == KindShort ||
+		applies := window.Kind == KindShort || window.Kind == KindLong ||
 			(window.Kind == KindScoped && window.Model != "" && window.Model == family)
 		exhausted := window.RemainingPercent() <= gateRemainingPercent
 		if !applies || !exhausted || !window.ResetsAt.After(now) {

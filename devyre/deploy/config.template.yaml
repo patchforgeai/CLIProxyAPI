@@ -39,7 +39,7 @@ routing:
     max-retry-credentials: 0
     max-retry-interval: 30
   expiring-first:
-    gate-remaining-percent: 2        # skip a credential whose 5-hour (or matching model) window is this close to empty
+    gate-remaining-percent: 2        # skip a credential whose 5-hour, 7-day or matching model window is this close to empty
     log-picks: true                  # log every pick at info level (reason=most-urgent|no-data|all-gated)
   quota-observation:
     usage-cache:                     # shields Claude's rate-limited usage endpoint from the panel, T3 hub and poller

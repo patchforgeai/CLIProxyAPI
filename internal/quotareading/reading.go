@@ -27,9 +27,11 @@ const (
 type Kind int
 
 const (
-	// KindShort is a window of at most 24 hours. It only gates.
+	// KindShort is a window of at most 24 hours. It gates and never ranks
+	// while a long window is known.
 	KindShort Kind = iota
-	// KindLong is a window longer than 24 hours. It ranks credentials.
+	// KindLong is a window longer than 24 hours. It ranks credentials, and
+	// gates them once exhausted.
 	KindLong
 	// KindScoped is model specific. It gates requests for the matching model family.
 	KindScoped

@@ -24,7 +24,7 @@ const (
 
 // ExpiringFirstConfig tunes the expiring-first credential selector.
 type ExpiringFirstConfig struct {
-	// GateRemainingPercent gates a credential when a short or matching
+	// GateRemainingPercent gates a credential when a short, long or matching
 	// model-scoped window has at most this much quota left. Default: 2.
 	GateRemainingPercent *float64 `yaml:"gate-remaining-percent,omitempty" json:"gate-remaining-percent,omitempty"`
 

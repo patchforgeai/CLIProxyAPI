@@ -104,6 +104,7 @@ func TestExpiringFirstSelectorPick(t *testing.T) {
 	tests := []struct {
 		name        string
 		model       string
+		gate        *float64 // nil keeps the default gate of 2
 		auths       []*Auth
 		wantID      string
 		wantReason  string
@@ -120,14 +121,37 @@ func TestExpiringFirstSelectorPick(t *testing.T) {
 			wantID: "a", wantReason: expiringFirstReasonMostUrgent, wantUrgency: 40.0 / 3,
 		},
 		{
-			// D: 80% left in 2h outranks C: 1% left in 10 minutes, floored to 15 minutes.
+			// D: 80% left in 2h outranks C: 1% left in 10 minutes, floored to 15
+			// minutes. A zero gate keeps C usable so urgency alone decides; the
+			// default gate would also skip C as exhausted.
 			name:  "D beats C",
 			model: "claude-opus-5-5",
+			gate:  new(0.0),
 			auths: []*Auth{
 				efClaudeAuth("c", efWindow{"7d", 1, 10 * time.Minute}),
 				efClaudeAuth("d", efWindow{"7d", 80, 2 * efHour}),
 			},
 			wantID: "d", wantReason: expiringFirstReasonMostUrgent, wantUrgency: 40,
+		},
+		{
+			// A would be the most urgent (2%/h), but its weekly window is at the
+			// gate, so it would only answer 429 until that window resets.
+			name:  "exhausted weekly window gates",
+			model: "claude-opus-5-5",
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"7d", 2, efHour}),
+				efClaudeAuth("b", efWindow{"7d", 20, 6 * efDay}),
+			},
+			wantID: "b", wantReason: expiringFirstReasonMostUrgent, wantUrgency: 20.0 / 144,
+		},
+		{
+			name:  "all weekly windows exhausted falls back to the earliest weekly reset",
+			model: "claude-opus-5-5",
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"7d", 0, 3 * efDay}),
+				efClaudeAuth("b", efWindow{"7d", 1, efDay}),
+			},
+			wantID: "b", wantReason: expiringFirstReasonAllGated, wantUrgency: 1.0 / 24,
 		},
 		{
 			name:  "exhausted 5h window gates",
@@ -289,8 +313,14 @@ func TestExpiringFirstSelectorPick(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			selector := newTestExpiringFirstSelector()
-			picked, reason, err := selector.pick(context.Background(), "claude", tc.model, tc.auths)
+			newSelector := func() *ExpiringFirstSelector {
+				selector := newTestExpiringFirstSelector()
+				if tc.gate != nil {
+					selector.GateRemainingPercent = *tc.gate
+				}
+				return selector
+			}
+			picked, reason, err := newSelector().pick(context.Background(), "claude", tc.model, tc.auths)
 			if err != nil {
 				t.Fatalf("pick() error = %v", err)
 			}
@@ -300,7 +330,7 @@ func TestExpiringFirstSelectorPick(t *testing.T) {
 			if picked.eval.UrgencyKnown != (tc.wantUrgency != 0) || !efApprox(picked.eval.Urgency, tc.wantUrgency) {
 				t.Fatalf("urgency = %v (known %t), want %v", picked.eval.Urgency, picked.eval.UrgencyKnown, tc.wantUrgency)
 			}
-			got, errPick := newTestExpiringFirstSelector().Pick(context.Background(), "claude", tc.model, cliproxyexecutor.Options{}, tc.auths)
+			got, errPick := newSelector().Pick(context.Background(), "claude", tc.model, cliproxyexecutor.Options{}, tc.auths)
 			if errPick != nil || got == nil || got.ID != tc.wantID {
 				t.Fatalf("Pick() = %+v, %v; want %s", got, errPick, tc.wantID)
 			}

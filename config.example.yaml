@@ -132,10 +132,10 @@ routing:
   # For OAuth/file credentials, add a top-level numeric "weight" field to the auth JSON.
   # expiring-first (aliases: expiringfirst, ef, soonest-reset) burns the credential whose quota
   # would be lost soonest: the remaining percent of its longest window divided by the hours until
-  # that window resets. Short windows (24h or less) and model-scoped windows only gate. Credentials
-  # without quota readings rank last, and priority tiers keep their meaning. With session-affinity,
-  # a bound session never moves for urgency, only when its credential becomes unavailable or the
-  # binding expires.
+  # that window resets. Short windows (24h or less) and model-scoped windows only gate; any window,
+  # the longest included, gates once exhausted. Credentials without quota readings rank last, and
+  # priority tiers keep their meaning. With session-affinity, a bound session never moves for
+  # urgency, only when its credential becomes unavailable or the binding expires.
   # Tune it with the expiring-first and quota-observation blocks at the end of this section.
   # Enable universal session-sticky routing for all clients.
   # Explicit Claude Code, Codex, OpenCode, and pi session headers are preferred,
@@ -198,9 +198,9 @@ routing:
 
   # Settings for strategy: expiring-first.
   # expiring-first:
-  #   # Gate a credential while a short window (such as Claude's 5-hour limit), or the
-  #   # model-scoped window of the requested model family, has at most this percent left.
-  #   # Range 0-100. Default: 2.
+  #   # Gate a credential while a short window (such as Claude's 5-hour limit), a long window
+  #   # (such as the 7-day limit), or the model-scoped window of the requested model family has
+  #   # at most this percent left. Range 0-100. Default: 2.
   #   gate-remaining-percent: 2
   #   # Log every pick at info level instead of debug. Default: false.
   #   log-picks: false

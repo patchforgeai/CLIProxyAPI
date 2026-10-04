@@ -35,10 +35,12 @@ const expiringFirstMaxRotationKeys = 4096
 // longest window over 24 hours, such as Claude's 7-day limit, else its longest
 // window) divided by the hours until that window resets, so quota that is
 // about to reset unused is burned first.
-// Short windows (24 hours or less) and windows scoped to the requested model
-// family only gate: a credential is skipped while such a window has at most
-// GateRemainingPercent left and has not reset yet. Readings come from
-// quotareading.Default() merged with the credential's response-header signals.
+// A credential is gated (skipped) while any window that applies to the request
+// has at most GateRemainingPercent left and has not reset yet: its short
+// windows (24 hours or less), its long windows, and the windows scoped to the
+// requested model family. Short and scoped windows only gate; they never rank
+// while a long window is known. Readings come from quotareading.Default()
+// merged with the credential's response-header signals.
 //
 // Picks are deterministic given the readings and the clock: usable credentials
 // with a known urgency come first, highest urgency wins; then usable
@@ -50,9 +52,9 @@ const expiringFirstMaxRotationKeys = 4096
 // bound session keeps its credential while it stays available; this selector
 // only places new and failed-over sessions.
 type ExpiringFirstSelector struct {
-	// GateRemainingPercent is the remaining percent at or below which a short or
-	// matching model-scoped window gates the credential. The routing config
-	// defaults it to 2 (routing.expiring-first.gate-remaining-percent).
+	// GateRemainingPercent is the remaining percent at or below which a short,
+	// long or matching model-scoped window gates the credential. The routing
+	// config defaults it to 2 (routing.expiring-first.gate-remaining-percent).
 	GateRemainingPercent float64
 	// LogPicks logs every pick at info level instead of debug.
 	LogPicks bool
