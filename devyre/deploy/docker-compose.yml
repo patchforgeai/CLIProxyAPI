@@ -1,0 +1,32 @@
+# Devyre CPA on this PC. Build and start it with devyre/scripts/up.ps1, or by hand:
+#   docker compose -f devyre/deploy/docker-compose.yml --env-file devyre/deploy/.env up -d --build
+# Every port is published on 127.0.0.1 only. tailscale serve (devyre/scripts/tailscale-serve.ps1)
+# is the only way in from the tailnet; never publish on 0.0.0.0 or turn on Tailscale Funnel.
+name: cpa
+services:
+  cpa:
+    image: cpa-devyre:current
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${CPA_VERSION:-devyre}
+        COMMIT: ${CPA_COMMIT:-none}
+        BUILD_DATE: ${CPA_BUILD_DATE:-unknown}
+    container_name: cpa
+    command: ["./CLIProxyAPI", "--config", "/data/config.yaml"]
+    environment:
+      TZ: ${CPA_TZ:-America/Los_Angeles}   # Go honors TZ at runtime (tzdata is in the image)
+      WRITABLE_PATH: /data                 # logs -> /data/logs, panel -> /data/static
+    ports:
+      - "127.0.0.1:8317:8317"     # API + panel (tailscale serve fronts this)
+      - "127.0.0.1:54545:54545"   # Claude OAuth callback for panel logins from this PC
+      - "127.0.0.1:1455:1455"     # Codex OAuth callback (optional)
+    volumes:
+      - ${CPA_HOME:?set CPA_HOME in .env}:/data
+    logging:                      # keep docker logs bounded on an always-on box
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    restart: unless-stopped

@@ -1,0 +1,12 @@
+# Optional (plan CLI-4): Codex CLI through the CPA pool. Append to %USERPROFILE%\.codex\config.toml
+# and select it per run with: codex -c model_provider=cliproxy
+# Needs Codex (ChatGPT) credentials logged in to CPA and CLIPROXY_API_KEY set to the codex-cli key
+# (%USERPROFILE%\.cli-proxy-api\secrets\client-codex-cli.txt). Replace <machine>.<tailnet> with your
+# tailnet name (keep it out of git), or use http://127.0.0.1:8317/v1 on the host itself.
+[model_providers.cliproxy]
+name = "OpenAI"                                   # Codex keys remote compaction etc. off the display name
+base_url = "https://<machine>.<tailnet>.ts.net:8318/v1"
+env_key = "CLIPROXY_API_KEY"                      # sent as Authorization: Bearer
+wire_api = "responses"
+supports_websockets = true
+requires_openai_auth = true
