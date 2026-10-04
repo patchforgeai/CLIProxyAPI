@@ -315,6 +315,10 @@ func normalizeRoutingStrategy(strategy string) (string, bool) {
 	case "fill-first", "fillfirst", "ff":
 		return "fill-first", true
 	default:
+		// devyre: expiring-first and its aliases (internal/config/devyre_routing.go).
+		if config.IsExpiringFirstStrategy(normalized) {
+			return "expiring-first", true
+		}
 		return "", false
 	}
 }
