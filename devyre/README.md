@@ -36,6 +36,9 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `devyre/scripts/sync-upstream.ps1` | Merges `upstream/main` into a sync branch and runs the checks |
 | `devyre/scripts/tailnet-trust.ps1` | Writes `management.tailnet-auth` (allowed logins, devices and hosts) from `tailscale status` into the live config |
 | `devyre/scripts/tailscale-serve.ps1` | Publishes CPA on the tailnet at `<machine>.<tailnet>.ts.net:8318` (HTTPS when Serve HTTPS is enabled, otherwise tailnet-only HTTP), verifies `/healthz` and repairs a serve entry left on an old tailnet name |
+| `devyre/scripts/ensure-running.ps1` | Starts whatever is down: Docker Desktop, the `cpa` container, the tailnet serve entry |
+| `devyre/scripts/install-autostart.ps1` | Registers the "Devyre CPA" scheduled task: `ensure-running.ps1` at sign-in and every 5 minutes |
+| `devyre/start-cpa.cmd` | Double-click starter for `ensure-running.ps1` |
 | `devyre/scripts/up.ps1` | Refuses to publish beyond 127.0.0.1, builds and tags the image, recreates the container, waits for `/healthz` and the panel |
 | `internal/api/devyre_routing_readings_route_test.go` | The readings endpoint is on `/v8` only, behind management auth |
 | `internal/api/devyre_t3_hub_contract_test.go` | `TestT3Hub_*`, the T3 Code hub contract |
@@ -166,6 +169,21 @@ Day to day:
 - To rotate secrets, run `new-secrets.ps1 -Rotate`. It keeps the previous `config.yaml` as `config.yaml.bak-<timestamp>`, carries `management.tailnet-auth` (the passwordless devices, which exist only in `config.yaml`) over unchanged, and restarts the running container, so the old keys stop working at once. Then update the password manager, the T3 hub key and T3's `ANTHROPIC_AUTH_TOKEN`. If an allowed device may be compromised, add `-ResetTailnetAuth`: the block then comes from the template with empty lists, nothing is keyless, and you allow your devices again with `tailnet-trust.ps1 -Include <names>` (a run without `-Include` has nothing to keep).
 - To bypass the pool, use `claude-direct` for one run, or `Disable-CpaPool`. In T3, use the "Claude Direct" instance.
 - After a tailnet rename, run `tailscale-serve.ps1`, then `tailnet-trust.ps1` with no arguments, then `exposure-check.ps1`.
+
+## Keep it running
+
+- **Start now:** double-click `devyre\start-cpa.cmd`. It runs `devyre\scripts\ensure-running.ps1`, which checks the chain and fixes only what is down:
+  1. If the Docker engine is unreachable, it starts Docker Desktop and waits up to 5 minutes for the engine.
+  2. If `cpa` is not answering `http://127.0.0.1:8317/healthz`, it runs `docker compose up -d` and waits for health.
+  3. If the tailnet URL is down, for example after a tailnet rename, it runs `tailscale-serve.ps1 -Http`, at most once an hour.
+  It is safe to run any time.
+- **Autostart:** run `powershell -ExecutionPolicy Bypass -File devyre\scripts\install-autostart.ps1` once.
+  - It registers the per-user scheduled task "Devyre CPA", which runs `ensure-running.ps1` hidden at every sign-in (after 30 s) and every 5 minutes after that.
+  - A crash, a Docker restart, sleep/resume or a tailnet rename heals within minutes.
+  - It starts Docker Desktop itself, so it works even when Docker Desktop's "start at sign-in" entry is disabled in Task Manager's Startup apps.
+  - No admin rights are needed. Docker Desktop runs only inside a signed-in session, so CPA comes up when you sign in, not at the login screen.
+  - Remove it with `install-autostart.ps1 -Remove`.
+- **Log:** `%USERPROFILE%\.cli-proxy-api\logs\ensure-running.log`. A healthy check writes nothing.
 
 ## Tailnet-only and passwordless
 
