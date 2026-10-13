@@ -12,6 +12,7 @@ The design, the verified facts and the decisions behind this fork are in [PLAN.m
 - **`expiring-first` routing.** A built-in strategy that prefers the credential whose quota would be lost soonest. Session affinity still keeps a thread on its credential. `GET /v8/management/routing/quota-readings` shows the ranking.
 - **Deploy kit.** Docker Compose on loopback only, `tailscale serve` on port 8318, PowerShell scripts for secrets, start-up, backup and upstream syncs, and client snippets.
 - **Tailnet-only and passwordless.** CPA is reachable only from this PC and the tailnet, and chosen tailnet devices plus this PC use it without a key (`management.tailnet-auth`). `exposure-check.ps1` verifies both. See [Tailnet-only and passwordless](#tailnet-only-and-passwordless).
+- **Sidecar lifeline.** `-lifeline-stdin` lets a supervising process own the server's lifetime through stdin, in place of the 10-second keep-alive idle limit that upstream applies with `-password`. Off by default. See [Sidecar lifeline](#sidecar-lifeline).
 
 ### Fork-only files
 
@@ -40,6 +41,10 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `devyre/scripts/install-autostart.ps1` | Registers the "Devyre CPA" scheduled task: `ensure-running.ps1` at sign-in and every 5 minutes |
 | `devyre/start-cpa.cmd` | Double-click starter for `ensure-running.ps1` |
 | `devyre/scripts/up.ps1` | Refuses to publish beyond 127.0.0.1, builds and tags the image, recreates the container, waits for `/healthz` and the panel |
+| `cmd/server/devyre_lifeline.go` | Registers `-lifeline-stdin` |
+| `cmd/server/devyre_lifeline_test.go` | The flag is a boolean listed in the help output, and argv scanning never takes the next argument as its value |
+| `internal/api/devyre_lifeline.go` | `WithDevyreKeepAliveProbe`: `/keep-alive`, authenticated by the local password, without the idle watcher |
+| `internal/api/devyre_lifeline_test.go` | The probe answers only the local password, starts no watcher, and adds nothing next to `WithKeepAliveEndpoint` |
 | `internal/api/devyre_routing_readings_route_test.go` | The readings endpoint is on `/v8` only, behind management auth |
 | `internal/api/devyre_t3_hub_contract_test.go` | `TestT3Hub_*`, the T3 Code hub contract |
 | `internal/api/devyre_tailnet_auth.go` | Keyless proxy API for trusted requests (`proxy-api`), the key-only `/v1/ws` wrapper and the anti-framing headers of the panel pages |
@@ -54,6 +59,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/handlers/management/devyre_tailnet_auth_test.go` | Middleware, ban, `allow-remote` and session tests, a `/v8` config write round trip, and the debug decision lines as the log formatter renders them |
 | `internal/api/handlers/management/devyre_usage_cache.go` | Usage cache inside `APICall` |
 | `internal/api/handlers/management/devyre_usage_cache_test.go` | Usage cache tests: TTLs, single-flight, stale, backoff, bypass, query variants, writes |
+| `internal/cmd/devyre_lifeline.go` | The stdin lifeline: `SetStdinLifeline`, the shutdown line, and the run context that ends with stdin |
+| `internal/cmd/devyre_lifeline_test.go` | Line parsing (EOF, `shutdown`, CRLF, unknown and over-long lines, read errors), and `StartService` in process: `/keep-alive` with the local password, then a graceful stop on a shutdown line and on EOF |
 | `internal/config/devyre_deploy_template_test.go` | Loads the deploy template through the real config loader and checks the typed routing values; pins the `tailnet-auth` block and the keys `tailnet-trust.ps1` writes |
 | `internal/config/devyre_routing.go` | `routing.expiring-first` and `routing.quota-observation` config |
 | `internal/config/devyre_routing_test.go` | Routing config defaults, aliases and save round trips |
@@ -87,16 +94,19 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 
 | File | Our change |
 |---|---|
+| `cmd/server/main.go` | `argvFlagConsumesValue` lists `lifeline-stdin` among the flags that take no value. The flag itself is registered in `cmd/server/devyre_lifeline.go`. |
 | `config.example.yaml` | `management.panel-github-repository` is the fork; a commented `management.tailnet-auth` block with every setting off; `routing:` documents `expiring-first` and the `expiring-first` and `quota-observation` blocks. |
 | `internal/api/handlers/management/api_tools.go` | Three hunks hook the usage cache into `APICall`: a lookup after `auth_index` and `url` are parsed, complete or fail after the upstream call, and a record on success. `/v0` and `/v8` share this handler. |
 | `internal/api/handlers/management/auth_files.go` | `extractCodexIDTokenClaims` also emits `chatgpt_plan_type`, the key T3 Code reads. |
 | `internal/api/handlers/management/config_basic.go` | `normalizeRoutingStrategy` accepts `expiring-first`, so `PUT /routing/strategy` does too. |
 | `internal/api/handlers/management/handler.go` | Two hunks: `Middleware()` asks `devyreTailnetAuthorize` first and skips the key for a trusted request, and the missing-key branch of `AuthenticateManagementKey` no longer calls `fail()`, so only a wrong key counts toward the ban. |
-| `internal/api/server.go` | Starts the quota observer once, right after the management handler is created. One line adds `devyreTailnetContext` to the engine, so the proxy API's keyless check reads the live config. |
+| `internal/api/server.go` | Starts the quota observer once, right after the management handler is created. One line adds `devyreTailnetContext` to the engine, so the proxy API's keyless check reads the live config. One `if`, after the keep-alive setup, registers the lifeline's `/keep-alive` (`devyreEnableKeepAliveProbe`). |
 | `internal/api/server_management.go` | `serveManagementControlPanel` calls `devyreDenyFraming`. |
 | `internal/api/server_management_v8.go` | Two lines register `GET /v8/management/routing/quota-readings` and `GET /v8/management/auth/session`. |
 | `internal/api/server_middleware.go` | Two hunks: `accessAuthMiddleware` falls back to `devyreKeylessProxyAccess` after the API keys fail with a 401, and `serveExampleAPIKeyWarningPage` calls `devyreDenyFraming`. |
+| `internal/api/server_options.go` | The `devyreKeepAliveProbe` field that `WithDevyreKeepAliveProbe` sets. |
 | `internal/api/server_routes.go` | `AttachWebsocketRoute` uses `devyreKeyOnlyAuthMiddleware`, so `/v1/ws` is never keyless. |
+| `internal/cmd/run.go` | With the stdin lifeline on, `StartServiceWithPluginHost` runs until the lifeline ends (`devyreWithLifeline`) instead of applying the 10-second keep-alive idle limit. |
 | `internal/config/config_defaults.go` | `DefaultPanelGitHubRepository` points at the Devyre panel fork. |
 | `internal/config/config_types.go` | The `Strategy` comment, the `ExpiringFirst` and `QuotaObservation` fields on `RoutingConfig`, and `RemoteManagement.TailnetAuth` (`management.tailnet-auth`). |
 | `internal/config/config_yaml.go` | `isKnownDefaultValue` keeps explicit zero values of the pointer-backed routing settings (`devyreKeepsExplicitZero`), so a save does not drop them. |
@@ -267,6 +277,18 @@ Exposure: every port of the cpa container is published on 127.0.0.1; nothing lis
 
 Passwordless: the Docker gateway is inside `server.trusted-proxies`; `allowed-hosts` holds the current FQDN with port 8318 (a bare FQDN is reported as written by an older `tailnet-trust.ps1`, and a block that is on with empty `allowed-hosts` and `allowed-devices`, the template's, is a SKIP rather than a stale name); over the tailnet the keyless session probe is 200 (SKIP when this PC is not in `allowed-devices`), the same request without a signal is 401, and with `Origin: http://evil.example` it is 401 or 403; direct `http://127.0.0.1:8317` follows `allow-local`, and forged tailnet headers or a foreign `Origin` there are refused; so is a direct request with the tailnet name as `Host` (on 8317 or without a port), a listed `X-Forwarded-For` and `X-CPA-Keyless`, which is what a DNS-rebinding page would send; a throwaway container trusted as local is a WARN. A failed keyless probe lists its preconditions, `management.allow-remote` included. It reads the live config with the management key, sends no wrong key, and changes nothing.
 
+## Sidecar lifeline
+
+Upstream stops a server started with `-password` 10 seconds after the last authenticated `GET /keep-alive`, so the process that started it has to ping it every few seconds, and loses it after a 10-second stall of its own. With `-lifeline-stdin` that process holds the server's stdin instead:
+
+- The server shuts down gracefully, as on SIGTERM, when stdin reaches EOF (the supervisor closed it, or exited and the OS closed it) or reads the line `shutdown`. Surrounding whitespace and a trailing CR are ignored; other lines are ignored with a warning. On Windows, where a parent cannot send a console child a signal, this is the graceful way to stop it.
+- `/keep-alive` has no idle limit. It still answers 200 to the local password and 401 to anything else, so the supervisor can prove that the process on the port is the one it started, and check on it when it needs to, without pinging.
+- Without `-password` there is no `/keep-alive`, as upstream.
+- Connect stdin to a pipe the supervisor keeps open. With stdin at `NUL` or `/dev/null` the server stops at once.
+- A supervisor can tell whether a build has the flag from its help output: `-h` lists `-lifeline-stdin`.
+
+The flag is off by default and changes nothing else. The Docker deployment does not use it.
+
 ## Sync with upstream
 
 1. Run `devyre\scripts\sync-upstream.ps1`. It requires a clean tree, fast-forwards `main` from `origin`, creates `sync/upstream-YYYYMMDD` and merges `upstream/main`. It then runs `gofmt -l`, `go build ./cmd/server` and `go test ./...`. It never pushes.
@@ -292,7 +314,9 @@ Run `devyre\scripts\backup.ps1 -Destination <folder>`. It writes `config.yaml`, 
 ## Fork tests
 
 ```powershell
-go test ./internal/api/ -run 'T3Hub|QuotaReadings|TailnetAuth|DevyreKeylessProxy'
+go test ./internal/api/ -run 'T3Hub|QuotaReadings|TailnetAuth|DevyreKeylessProxy|DevyreKeepAlive'
+go test ./internal/cmd/ -run 'Lifeline'
+go test ./cmd/server/ -run LifelineStdin
 go test ./internal/managementasset/ -run DevyrePanelSource
 go test ./internal/config/ -run 'DevyreDeployTemplate|ExpiringFirst|TailnetAuth'
 go test ./internal/quotareading/
