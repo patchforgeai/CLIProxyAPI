@@ -102,11 +102,15 @@ func TestDevyreDeployTemplate_LoadsIntoExpectedConfig(t *testing.T) {
 	if !looksLikeBcrypt(management.SecretKey) {
 		t.Error("management.secret-key was not hashed on load")
 	}
-	if management.DisableControlPanel || management.DisableAutoUpdatePanel {
-		t.Errorf("control panel disabled=%v auto-update disabled=%v, want both false", management.DisableControlPanel, management.DisableAutoUpdatePanel)
+	if management.DisableControlPanel {
+		t.Error("management.disable-control-panel = true; the deployment serves the panel built into the image")
 	}
-	if management.PanelGitHubRepository != "https://github.com/Devyre/Cli-Proxy-API-Management-Center" {
-		t.Errorf("management.panel-github-repository = %q, want the Devyre panel fork", management.PanelGitHubRepository)
+	// The panel is built into the binary and never downloaded, so the template sets none of
+	// the download keys, which would suggest otherwise.
+	for _, key := range []string{"disable-auto-update-panel", "panel-github-repository"} {
+		if regexp.MustCompile(`(?m)^\s*` + key + `\s*:`).MatchString(rendered) {
+			t.Errorf("the deploy template sets management.%s, which this fork ignores", key)
+		}
 	}
 
 	wantKeys := []string{

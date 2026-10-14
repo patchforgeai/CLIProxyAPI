@@ -8,6 +8,8 @@ package test
 // tailnet name.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -707,5 +709,172 @@ func TestDevyreCommon_AllowedHostsHelpers(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("helper results = %v\nwant %v\noutput:\n%s", got, want, output)
+	}
+}
+
+// devyreFakeGh answers the two gh calls update-panel.ps1 makes, from files next
+// to it: `gh api repos/<repo>/releases/latest` prints release.json, and `gh
+// release download ... --output <file>` copies asset.html there. Every call is
+// appended to gh-calls.txt.
+const devyreFakeGh = "@echo off\r\n" +
+	"echo %*>>\"%~dp0gh-calls.txt\"\r\n" +
+	"if \"%~1\"==\"api\" if \"%~2\"==\"repos/example/panel/releases/latest\" (\r\n" +
+	"  type \"%~dp0release.json\"\r\n" +
+	"  exit /b 0\r\n" +
+	")\r\n" +
+	"if \"%~1 %~2\"==\"release download\" if \"%~8\"==\"--output\" (\r\n" +
+	"  copy /y \"%~dp0asset.html\" \"%~9\" >nul\r\n" +
+	"  exit /b 0\r\n" +
+	")\r\n" +
+	"echo HTTP 404: Not Found 1>&2\r\n" +
+	"exit /b 1\r\n"
+
+// devyreUpdatePanelFixture is a copy of the scripts and the panel folder in a
+// temp tree, so update-panel.ps1 rewrites the copy and never the repository.
+type devyreUpdatePanelFixture struct {
+	t        *testing.T
+	env      []string
+	binDir   string
+	script   string
+	panelDir string
+}
+
+const devyreSeedPanel = "<!doctype html><html>seed panel</html>"
+
+func newDevyreUpdatePanelFixture(t *testing.T) *devyreUpdatePanelFixture {
+	t.Helper()
+	devyrePowerShell(t)
+	dir := t.TempDir()
+	f := &devyreUpdatePanelFixture{
+		t:        t,
+		binDir:   filepath.Join(dir, "bin"),
+		script:   filepath.Join(dir, "repo", "devyre", "scripts", "update-panel.ps1"),
+		panelDir: filepath.Join(dir, "repo", "internal", "managementasset", "devyre_panel"),
+	}
+	for _, path := range []string{f.binDir, filepath.Dir(f.script), f.panelDir} {
+		if errMkdir := os.MkdirAll(path, 0o700); errMkdir != nil {
+			t.Fatal(errMkdir)
+		}
+	}
+	for _, name := range []string{"update-panel.ps1", "cpa-common.ps1"} {
+		raw, errRead := os.ReadFile(filepath.Join(devyreScriptsDir, name))
+		if errRead != nil {
+			t.Fatal(errRead)
+		}
+		if errWrite := os.WriteFile(filepath.Join(filepath.Dir(f.script), name), raw, 0o600); errWrite != nil {
+			t.Fatal(errWrite)
+		}
+	}
+	f.write(filepath.Join(f.binDir, "gh.cmd"), devyreFakeGh)
+	f.write(filepath.Join(f.panelDir, "management.html"), devyreSeedPanel)
+	f.write(filepath.Join(f.panelDir, "panel.json"), `{"version":"v1.0.0-devyre.1","source":"seed","sha256":"`+devyreSha256Hex(devyreSeedPanel)+`"}`)
+	f.env = devyreScriptEnv(t, dir, f.binDir)
+	return f
+}
+
+func devyreSha256Hex(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+func (f *devyreUpdatePanelFixture) write(path, content string) {
+	f.t.Helper()
+	if errWrite := os.WriteFile(path, []byte(content), 0o600); errWrite != nil {
+		f.t.Fatal(errWrite)
+	}
+}
+
+func (f *devyreUpdatePanelFixture) read(name string) string {
+	f.t.Helper()
+	raw, errRead := os.ReadFile(filepath.Join(f.panelDir, name))
+	if errRead != nil {
+		f.t.Fatal(errRead)
+	}
+	return string(raw)
+}
+
+// release publishes asset as management.html of release tag, listing digest.
+func (f *devyreUpdatePanelFixture) release(tag, asset, digest string) {
+	f.t.Helper()
+	assetJSON := map[string]any{"name": "management.html", "size": len(asset)}
+	if digest != "" {
+		assetJSON["digest"] = digest
+	}
+	raw, errMarshal := json.Marshal(map[string]any{"tag_name": tag, "assets": []any{map[string]any{"name": "notes.txt"}, assetJSON}})
+	if errMarshal != nil {
+		f.t.Fatal(errMarshal)
+	}
+	f.write(filepath.Join(f.binDir, "release.json"), string(raw))
+	f.write(filepath.Join(f.binDir, "asset.html"), asset)
+}
+
+func (f *devyreUpdatePanelFixture) run() devyreScriptRun {
+	f.t.Helper()
+	cmd := exec.Command(devyrePowerShell(f.t), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", f.script, "-Repository", "example/panel")
+	cmd.Env = f.env
+	output, errRun := cmd.CombinedOutput()
+	run := devyreScriptRun{output: string(output)}
+	var exitErr *exec.ExitError
+	switch {
+	case errRun == nil:
+	case errors.As(errRun, &exitErr):
+		run.exitCode = exitErr.ExitCode()
+	default:
+		f.t.Fatalf("run update-panel.ps1: %v", errRun)
+	}
+	return run
+}
+
+// update-panel.ps1 vendors a release's management.html only when it matches the
+// sha256 digest GitHub lists for it, and records version, source and hash next
+// to it in the layout internal/managementasset reads (devyre_panel_test.go).
+func TestDevyreUpdatePanel_VendorsAVerifiedRelease(t *testing.T) {
+	f := newDevyreUpdatePanelFixture(t)
+	unchanged := func(name string, run devyreScriptRun, reason string) {
+		t.Helper()
+		if run.exitCode == 0 || !strings.Contains(run.output, reason) {
+			t.Fatalf("%s: exit %d, want a refusal naming %q; output:\n%s", name, run.exitCode, reason, run.output)
+		}
+		if got := f.read("management.html"); got != devyreSeedPanel {
+			t.Fatalf("%s: management.html = %q, want the seed kept", name, got)
+		}
+		if leftovers, _ := filepath.Glob(filepath.Join(f.panelDir, ".management-*")); len(leftovers) != 0 {
+			t.Fatalf("%s: staged files left behind: %v", name, leftovers)
+		}
+	}
+
+	const panel = "<!DOCTYPE html><html>panel v9</html>\n"
+	f.release("v9.9.9-devyre.1", panel, "sha256:"+devyreSha256Hex("something else"))
+	unchanged("digest mismatch", f.run(), "Nothing was changed")
+	f.release("v9.9.9-devyre.1", panel, "")
+	unchanged("no digest", f.run(), "lists no sha256 digest")
+	f.release("v9.9.9-devyre.1", "not a page", "sha256:"+devyreSha256Hex("not a page"))
+	unchanged("not an HTML page", f.run(), "is not a panel build")
+
+	f.release("v9.9.9-devyre.1", panel, "sha256:"+strings.ToUpper(devyreSha256Hex(panel)))
+	run := f.run()
+	if run.exitCode != 0 || !strings.Contains(run.output, "Embedded panel: v9.9.9-devyre.1 (was v1.0.0-devyre.1") {
+		t.Fatalf("verified release: exit %d; output:\n%s", run.exitCode, run.output)
+	}
+	if got := f.read("management.html"); got != panel {
+		t.Fatalf("management.html = %q, want the release asset byte for byte", got)
+	}
+	want := "{\n" +
+		"  \"version\": \"v9.9.9-devyre.1\",\n" +
+		"  \"source\": \"https://github.com/example/panel/releases/tag/v9.9.9-devyre.1\",\n" +
+		"  \"sha256\": \"" + devyreSha256Hex(panel) + "\"\n" +
+		"}\n"
+	if got := f.read("panel.json"); got != want {
+		t.Fatalf("panel.json =\n%s\nwant\n%s", got, want)
+	}
+	if again := f.run(); again.exitCode != 0 || !strings.Contains(again.output, "already this build") {
+		t.Fatalf("second run: exit %d; output:\n%s", again.exitCode, again.output)
+	}
+
+	calls, _ := os.ReadFile(filepath.Join(f.binDir, "gh-calls.txt"))
+	for _, line := range strings.Split(strings.TrimSpace(strings.ReplaceAll(string(calls), "\r\n", "\n")), "\n") {
+		if !strings.HasPrefix(line, "api repos/example/panel/releases/latest") && !strings.HasPrefix(line, "release download v9.9.9-devyre.1 --repo example/panel --pattern management.html --output ") {
+			t.Fatalf("unexpected gh call %q", line)
+		}
 	}
 }

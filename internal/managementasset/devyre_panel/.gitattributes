@@ -1,0 +1,3 @@
+# The panel is embedded byte for byte and pinned by its sha256 in panel.json: never convert it.
+management.html binary
+panel.json text eol=lf

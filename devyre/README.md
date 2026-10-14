@@ -6,7 +6,7 @@ The design, the verified facts and the decisions behind this fork are in [PLAN.m
 
 ## What differs from upstream
 
-- **Panel source.** The server downloads `management.html` from the releases of [Devyre/Cli-Proxy-API-Management-Center](https://github.com/Devyre/Cli-Proxy-API-Management-Center): upstream's panel plus chhoumann's quota ledger, a 7-day Claude headline with Fable hidden in the ledger, and a dark default theme. When the panel file is missing and the release lookup fails, the fallback also downloads from that fork's latest release. It never falls back to the stock panel.
+- **Embedded panel.** The panel is built into the binary and never downloaded or updated: a release of [the panel fork](https://github.com/patchforgeai/Cli-Proxy-API-Management-Center), which is upstream's panel plus chhoumann's quota ledger, a 7-day Claude headline with Fable hidden in the ledger, and a dark default theme. `update-panel.ps1` refreshes it, and `-tags devyre_nopanel` builds a server without it. It never serves the stock panel. See [Embedded panel](#embedded-panel).
 - **T3 Code hub contract.** `TestT3Hub_*` pin the deprecated `/v0/management` endpoints that T3 Code's "CLIProxyAPI hub" decodes (`auth-files`, `api-call`, `reset-quota`), plus `/v8/management/requests/api-call`, which the panel uses. The auth-files listing also reports a Codex plan as `id_token.chatgpt_plan_type`, the key T3 reads, next to upstream's `id_token.plan_type`.
 - **Quota readings and usage cache.** One in-memory store of quota readings, fed by response headers, by usage bodies passing through `api-call`, and by an idle-credential poller. A usage cache inside `APICall` keeps the panel, the T3 hub and the poller from tripping Claude's rate-limited usage endpoint. See [Routing and quota readings](#routing-and-quota-readings).
 - **`expiring-first` routing.** A built-in strategy that prefers the credential whose quota would be lost soonest. Session affinity still keeps a thread on its credential. `GET /v8/management/routing/quota-readings` shows the ranking.
@@ -41,10 +41,13 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `devyre/scripts/install-autostart.ps1` | Registers the "Devyre CPA" scheduled task: `ensure-running.ps1` at sign-in and every 5 minutes |
 | `devyre/start-cpa.cmd` | Double-click starter for `ensure-running.ps1` |
 | `devyre/scripts/up.ps1` | Refuses to publish beyond 127.0.0.1, builds and tags the image, recreates the container, waits for `/healthz` and the panel |
+| `devyre/scripts/update-panel.ps1` | Refreshes the embedded panel: a panel fork release through your own `gh` login, kept only when it matches the sha256 digest the release lists, or a clean local build of a clone; writes `management.html` and `panel.json` and never commits |
 | `cmd/server/devyre_lifeline.go` | Registers `-lifeline-stdin` |
 | `cmd/server/devyre_lifeline_test.go` | The flag is a boolean listed in the help output, and argv scanning never takes the next argument as its value |
 | `internal/api/devyre_lifeline.go` | `WithDevyreKeepAliveProbe`: `/keep-alive`, authenticated by the local password, without the idle watcher |
 | `internal/api/devyre_lifeline_test.go` | The probe answers only the local password, starts no watcher, and adds nothing next to `WithKeepAliveEndpoint` |
+| `internal/api/devyre_panel.go` | `devyreServePanel`: `/management.html` from the panel built into the binary, with its sha256 as the `ETag`, or from the file `MANAGEMENT_STATIC_PATH` names; 404 in a `devyre_nopanel` build; never downloads |
+| `internal/api/devyre_panel_test.go` | Through the real server, with every request that leaves the machine refused and recorded: the embedded bytes, headers and a 304 revalidation with no request made and no file written (404 under `devyre_nopanel`), the `MANAGEMENT_STATIC_PATH` override, and 404 with `disable-control-panel` |
 | `internal/api/devyre_routing_readings_route_test.go` | The readings endpoint is on `/v8` only, behind management auth |
 | `internal/api/devyre_t3_hub_contract_test.go` | `TestT3Hub_*`, the T3 Code hub contract |
 | `internal/api/devyre_tailnet_auth.go` | Keyless proxy API for trusted requests (`proxy-api`), the key-only `/v1/ws` wrapper and the anti-framing headers of the panel pages |
@@ -66,7 +69,14 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/config/devyre_routing_test.go` | Routing config defaults, aliases and save round trips |
 | `internal/config/devyre_tailnet_auth.go` | `management.tailnet-auth` settings (`TailnetAuthConfig`); every setting defaults to off |
 | `internal/config/devyre_tailnet_auth_test.go` | `tailnet-auth` defaults, both layouts, v8 validation, save round trips, the `config.example.yaml` block and the typed deploy-template check |
-| `internal/managementasset/devyre_updater_test.go` | Pins the panel source to the fork |
+| `internal/managementasset/devyre_panel.go` | `Panel()` (the embedded panel, its version and sha256), `PanelOverridePath()`, and the stand-ins that keep upstream's updater and downloader from running |
+| `internal/managementasset/devyre_panel_embed.go` | Embeds `devyre_panel/management.html` and `panel.json` in the default build |
+| `internal/managementasset/devyre_panel_nopanel.go` | The `devyre_nopanel` build: no panel bytes |
+| `internal/managementasset/devyre_panel/.gitattributes` | Keeps `management.html` byte for byte (`binary`) and `panel.json` in LF on every checkout |
+| `internal/managementasset/devyre_panel/management.html` | The embedded panel: the panel fork's release asset |
+| `internal/managementasset/devyre_panel/panel.json` | Its version, source and sha256, written by `update-panel.ps1` |
+| `internal/managementasset/devyre_panel_test.go` | The record matches the file, the embedded bytes are the file, `devyre_nopanel` embeds nothing (`go list`), and neither the updater nor the downloader makes a request, writes a file or starts a goroutine |
+| `internal/managementasset/devyre_updater_test.go` | Pins upstream's dormant download source to the panel fork, never the stock panel |
 | `internal/quotareading/claude.go` | Claude header and usage-body parsers |
 | `internal/quotareading/claude_test.go` | Claude parser tests |
 | `internal/quotareading/codex.go` | Codex header and usage-body parsers |
@@ -86,7 +96,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/selector_expiring_first.go` | The `expiring-first` selector |
 | `sdk/cliproxy/auth/selector_expiring_first_test.go` | Selector tests, including session affinity |
 | `sdk/cliproxy/devyre_service_config_test.go` | Strategy aliases, settings and hot reload through the service config |
-| `test/devyre_scripts_test.go` | Runs the PowerShell scripts with `powershell.exe` against a fake `tailscale status` and a fake management API (skipped without Windows PowerShell): the `allowed-hosts` that `tailnet-trust.ps1` writes, and its device selection (new devices only by exact MagicDNS name, renamed automation hosts, confirmation, the automation guard); `new-secrets.ps1 -Rotate` keeping the `tailnet-auth` block that the server wrote, with a fake `docker` first on `PATH`; the `cpa-common.ps1` helpers that `exposure-check.ps1` reads `allowed-hosts` with |
+| `test/devyre_scripts_test.go` | Runs the PowerShell scripts with `powershell.exe` against a fake `tailscale status` and a fake management API (skipped without Windows PowerShell): the `allowed-hosts` that `tailnet-trust.ps1` writes, and its device selection (new devices only by exact MagicDNS name, renamed automation hosts, confirmation, the automation guard); `new-secrets.ps1 -Rotate` keeping the `tailnet-auth` block that the server wrote, with a fake `docker` first on `PATH`; the `cpa-common.ps1` helpers that `exposure-check.ps1` reads `allowed-hosts` with; `update-panel.ps1` on a copy of the panel folder with a fake `gh`, vendoring a release only when it matches its sha256 digest and is an HTML page, and writing its record |
 
 ### Conflict hotspots
 
@@ -95,22 +105,22 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | File | Our change |
 |---|---|
 | `cmd/server/main.go` | `argvFlagConsumesValue` lists `lifeline-stdin` among the flags that take no value. The flag itself is registered in `cmd/server/devyre_lifeline.go`. |
-| `config.example.yaml` | `management.panel-github-repository` is the fork; a commented `management.tailnet-auth` block with every setting off; `routing:` documents `expiring-first` and the `expiring-first` and `quota-observation` blocks. |
+| `config.example.yaml` | A `devyre:` comment above `disable-control-panel` says the panel is built in, so `disable-auto-update-panel` and `panel-github-repository` have no effect, and `panel-github-repository` names the panel fork; a commented `management.tailnet-auth` block with every setting off; `routing:` documents `expiring-first` and the `expiring-first` and `quota-observation` blocks. |
 | `internal/api/handlers/management/api_tools.go` | Three hunks hook the usage cache into `APICall`: a lookup after `auth_index` and `url` are parsed, complete or fail after the upstream call, and a record on success. `/v0` and `/v8` share this handler. |
 | `internal/api/handlers/management/auth_files.go` | `extractCodexIDTokenClaims` also emits `chatgpt_plan_type`, the key T3 Code reads. |
 | `internal/api/handlers/management/config_basic.go` | `normalizeRoutingStrategy` accepts `expiring-first`, so `PUT /routing/strategy` does too. |
 | `internal/api/handlers/management/handler.go` | Two hunks: `Middleware()` asks `devyreTailnetAuthorize` first and skips the key for a trusted request, and the missing-key branch of `AuthenticateManagementKey` no longer calls `fail()`, so only a wrong key counts toward the ban. |
 | `internal/api/server.go` | Starts the quota observer once, right after the management handler is created. One line adds `devyreTailnetContext` to the engine, so the proxy API's keyless check reads the live config. One `if`, after the keep-alive setup, registers the lifeline's `/keep-alive` (`devyreEnableKeepAliveProbe`). |
-| `internal/api/server_management.go` | `serveManagementControlPanel` calls `devyreDenyFraming`. |
+| `internal/api/server_management.go` | `serveManagementControlPanel` calls `devyreDenyFraming`, and once the control panel is known to be enabled it answers through `devyreServePanel` and returns, so upstream's file-or-download path after it never runs. |
 | `internal/api/server_management_v8.go` | Two lines register `GET /v8/management/routing/quota-readings` and `GET /v8/management/auth/session`. |
 | `internal/api/server_middleware.go` | Two hunks: `accessAuthMiddleware` falls back to `devyreKeylessProxyAccess` after the API keys fail with a 401, and `serveExampleAPIKeyWarningPage` calls `devyreDenyFraming`. |
 | `internal/api/server_options.go` | The `devyreKeepAliveProbe` field that `WithDevyreKeepAliveProbe` sets. |
 | `internal/api/server_routes.go` | `AttachWebsocketRoute` uses `devyreKeyOnlyAuthMiddleware`, so `/v1/ws` is never keyless. |
 | `internal/cmd/run.go` | With the stdin lifeline on, `StartServiceWithPluginHost` runs until the lifeline ends (`devyreWithLifeline`) instead of applying the 10-second keep-alive idle limit. |
-| `internal/config/config_defaults.go` | `DefaultPanelGitHubRepository` points at the Devyre panel fork. |
+| `internal/config/config_defaults.go` | `DefaultPanelGitHubRepository` points at the panel fork; nothing fetches from it. |
 | `internal/config/config_types.go` | The `Strategy` comment, the `ExpiringFirst` and `QuotaObservation` fields on `RoutingConfig`, and `RemoteManagement.TailnetAuth` (`management.tailnet-auth`). |
 | `internal/config/config_yaml.go` | `isKnownDefaultValue` keeps explicit zero values of the pointer-backed routing settings (`devyreKeepsExplicitZero`), so a save does not drop them. |
-| `internal/managementasset/updater.go` | `defaultManagementReleaseURL` and `defaultManagementFallbackURL` point at the Devyre panel releases. Never restore `cpamc.router-for.me`. |
+| `internal/managementasset/updater.go` | `defaultManagementReleaseURL` and `defaultManagementFallbackURL` point at the panel fork's releases; never restore `cpamc.router-for.me`. `StartAutoUpdater` returns through `devyreSkipAutoUpdater` (which logs the panel served) and `EnsureLatestManagementHTML` through `devyreRefuseDownload`, so no updater starts and nothing is downloaded, whoever calls them. |
 | `sdk/cliproxy/service_config.go` | `expiring-first` aliases in `normalizedRoutingRuntimeState`, construction in `newRoutingSelector`, and the gate and log settings in `routingRuntimeState`. That struct must stay comparable: no pointers, maps or slices. |
 
 If upstream deletes the `/v0/management` routes, `TestT3Hub_*` fails first. Restore the three routes T3 uses (`GET auth-files`, `POST api-call`, `POST reset-quota`) in `internal/api/devyre_v0_shim.go`.
@@ -149,7 +159,8 @@ This runs on this PC with Docker Desktop, and Tailscale fronts it. Prerequisites
 
 - Docker Desktop running, with "Start Docker Desktop when you sign in" enabled.
 - Tailscale logged in, with MagicDNS and HTTPS certificates enabled for the tailnet (admin console, DNS page).
-- A published panel release on the Devyre panel fork that includes `management.html`.
+
+The panel is built into the image, so nothing else is needed: no token, no download, no access to the panel fork.
 
 Steps, from the repository root in PowerShell:
 
@@ -269,7 +280,7 @@ A request without a key no longer counts toward the ban; only a wrong non-empty 
   - A device is connected to the tailnet but uses another DNS server, with "Use Tailscale DNS" off. The page can then be rebound to this PC's tailnet IP, so it talks to CPA through tailscale serve as that device, with its keyless rights. Keep Tailscale DNS on for every allowed device. Never open the tailnet URL while Tailscale is off, and if you did on an untrusted network, clear that site's data on the device.
 
   Enabling Serve HTTPS, with the one-time admin link that `tailscale-serve.ps1` prints, removes the second case, because a hostile page cannot present the certificate. It also turns on the browser `Sec-Fetch` guard, which the plain-HTTP URL never triggers.
-- **Same-origin content.** Anything served from the CPA origin, the panel and the plugin resource pages, acts with keyless admin rights. Installing a plugin or publishing a release on the panel fork is therefore equivalent to admin access. `management.disable-auto-update-panel: true` pins the current panel.
+- **Same-origin content.** Anything served from the CPA origin, the panel and the plugin resource pages, acts with keyless admin rights. Installing a plugin is therefore equivalent to admin access. The panel changes only through a commit to this repository and a rebuild (`update-panel.ps1`, then `up.ps1`): a release published on the panel fork never reaches a running server, and neither does a file left in `static\`.
 
 ### What exposure-check.ps1 verifies
 
@@ -289,21 +300,32 @@ Upstream stops a server started with `-password` 10 seconds after the last authe
 
 The flag is off by default and changes nothing else. The Docker deployment does not use it.
 
+## Embedded panel
+
+The server answers `/management.html` from a copy of the panel built into the binary, `internal/managementasset/devyre_panel/management.html`: the release asset of [the panel fork](https://github.com/patchforgeai/Cli-Proxy-API-Management-Center), byte for byte. `panel.json` next to it records the version, the source and the sha256, and `go test ./internal/managementasset/` fails when the file and the record disagree.
+
+- **Nothing is downloaded.** No release lookup, no fallback page, no update every 3 hours and no file under `static\`. Upstream's downloader stays in `updater.go`, so syncs merge cleanly, but it never runs. `disable-auto-update-panel`, `panel-github-repository` and GitHub tokens have no effect, and the panel fork can be private. A `management.html` that an older build left in `%USERPROFILE%\.cli-proxy-api\static\` is ignored and can be deleted.
+- **Responses.** `Content-Type: text/html; charset=utf-8` and the anti-framing headers as before, plus the sha256 as a strong `ETag` with `Cache-Control: no-cache`: a browser revalidates and gets a 304 until the binary changes. At start the log names the panel, for example `management panel: the embedded v1.25.3-devyre.2 (sha256 71a9e04b...); never downloaded`.
+- **Override.** When upstream's `MANAGEMENT_STATIC_PATH` names an existing file, or a folder holding `management.html`, that file is served instead, as it is. It is never downloaded or updated, and while it is missing the embedded panel answers. Use it to try a panel build without rebuilding the server. The deployment does not set it.
+- **Without the panel.** `go build -tags devyre_nopanel ./cmd/server` leaves it out, about 3 MB less, for embedders that turn the control panel off, such as a desktop app's sidecar: `/management.html` then answers 404 (unless the override names a file). The default build and the Docker image include it. `disable-control-panel: true` answers 404 in either build.
+
+**Refresh it** with `devyre\scripts\update-panel.ps1`, for the latest release, or `-Tag <tag>`. It downloads `management.html` with your own `gh` login, refuses it unless it matches the sha256 digest the release lists and is an HTML page, and rewrites `management.html` and `panel.json`. `-Clone <path>` builds a local clone of the panel fork instead, the way its release workflow does (`bun install --frozen-lockfile`, then `bun run build` with `VERSION` set to the clone's `git describe`). The clone must have no uncommitted changes and reach a `v*-devyre.*` tag; the record then names the commit. The script never commits: run the panel tests it prints, review the diff, commit with `feat(devyre): embed panel <version>`, and run `up.ps1`.
+
 ## Sync with upstream
 
-1. Run `devyre\scripts\sync-upstream.ps1`. It requires a clean tree, fast-forwards `main` from `origin`, creates `sync/upstream-YYYYMMDD` and merges `upstream/main`. It then runs `gofmt -l`, `go build ./cmd/server` and `go test ./...`. It never pushes.
+1. Run `devyre\scripts\sync-upstream.ps1`. It requires a clean tree, fast-forwards `main` from `origin`, creates `sync/upstream-YYYYMMDD` and merges `upstream/main`. It then runs the checks: `gofmt -l`, `go build ./cmd/server` and `go build -tags devyre_nopanel ./cmd/server`, `go test ./...`, and `go test -tags devyre_nopanel ./internal/managementasset/ ./internal/api/ -run DevyrePanel`. It never pushes.
 2. If the merge conflicts, resolve the conflicts at the hotspots above, keeping upstream's behavior plus our hunks. Commit the merge, then run the checks by hand. `go test ./internal/api/ -run T3Hub` must stay green.
 3. Push the branch and open the PR against the fork, never against upstream:
-   `gh pr create --repo Devyre/CLIProxyAPI --base main --head sync/upstream-YYYYMMDD`.
+   `gh pr create --repo patchforgeai/CLIProxyAPI --base main --head sync/upstream-YYYYMMDD`.
 4. Merge the PR, tag `v<upstream version>-devyre.<n>`, and run `up.ps1`.
 
-The panel fork syncs separately in its own repository: merge `upstream/main`, check `chhoumann/dev` for ledger updates, run `bun run verify`, then tag `v<upstream version>-devyre.<n>`. The server picks up a new panel release at its next start, or within 3 hours.
+The panel fork syncs separately in its own repository: merge `upstream/main`, check `chhoumann/dev` for ledger updates, run `bun run verify`, then tag `v<upstream version>-devyre.<n>` and push the tag; its release workflow publishes `management.html`. Then embed that release here with `devyre\scripts\update-panel.ps1 -Tag <tag>`, commit, and run `up.ps1`.
 
 ## Rollback
 
 - **Server image.** `docker images cpa-devyre` lists the builds. Run `docker tag cpa-devyre:<previous-sha> cpa-devyre:current`, then `devyre\scripts\up.ps1 -NoBuild`.
 - **Routing only.** In the panel, set `routing.strategy` back to `round-robin`. It hot-reloads.
-- **Panel.** Run `gh release edit <previous-tag> --repo Devyre/Cli-Proxy-API-Management-Center --latest`, delete `%USERPROFILE%\.cli-proxy-api\static\management.html`, then run `docker restart cpa`.
+- **Panel.** Run `devyre\scripts\update-panel.ps1 -Tag <previous-tag>`, or `git revert` the commit that embedded the panel, then commit and run `up.ps1`. Rolling back the server image (above) also rolls back the panel built into it.
 - **Clients.** Run `Disable-CpaPool`. In T3, use the "Claude Direct" instance or remove the proxy variables from the Claude instance.
 - **Passwordless access only.** Run `devyre\scripts\tailnet-trust.ps1 -Disable`. Every request needs a key again at once; clients that send a real key keep working.
 
@@ -314,10 +336,11 @@ Run `devyre\scripts\backup.ps1 -Destination <folder>`. It writes `config.yaml`, 
 ## Fork tests
 
 ```powershell
-go test ./internal/api/ -run 'T3Hub|QuotaReadings|TailnetAuth|DevyreKeylessProxy|DevyreKeepAlive'
+go test ./internal/api/ -run 'T3Hub|QuotaReadings|TailnetAuth|DevyreKeylessProxy|DevyreKeepAlive|DevyrePanel'
 go test ./internal/cmd/ -run 'Lifeline'
 go test ./cmd/server/ -run LifelineStdin
-go test ./internal/managementasset/ -run DevyrePanelSource
+go test ./internal/managementasset/ -run DevyrePanel
+go test -tags devyre_nopanel ./internal/managementasset/ ./internal/api/ -run DevyrePanel
 go test ./internal/config/ -run 'DevyreDeployTemplate|ExpiringFirst|TailnetAuth'
 go test ./internal/quotareading/
 go test ./internal/tailnetauth/

@@ -21,9 +21,7 @@ server:
 management:
   allow-remote: true                 # the container never sees loopback; panel and T3 hub arrive via tailscale
   secret-key: "__MANAGEMENT_KEY__"   # plaintext here; hashed in place on first start
-  disable-control-panel: false
-  disable-auto-update-panel: false   # verified-digest updates from our fork at start and every 3h
-  panel-github-repository: "https://github.com/Devyre/Cli-Proxy-API-Management-Center"
+  disable-control-panel: false       # the panel is built into the image; nothing is downloaded or auto-updated
   # Passwordless access for allowed tailnet devices and this PC (devyre/README.md, "Tailnet-only
   # and passwordless"). The lists start empty, so nothing is keyless until
   # devyre/scripts/tailnet-trust.ps1 fills them through the management API.
