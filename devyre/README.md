@@ -13,6 +13,7 @@ The design, the verified facts and the decisions behind this fork are in [PLAN.m
 - **Deploy kit.** Docker Compose on loopback only, `tailscale serve` on port 8318, PowerShell scripts for secrets, start-up, backup and upstream syncs, and client snippets.
 - **Tailnet-only and passwordless.** CPA is reachable only from this PC and the tailnet, and chosen tailnet devices plus this PC use it without a key (`management.tailnet-auth`). `exposure-check.ps1` verifies both. See [Tailnet-only and passwordless](#tailnet-only-and-passwordless).
 - **Sidecar lifeline.** `-lifeline-stdin` lets a supervising process own the server's lifetime through stdin, in place of the 10-second keep-alive idle limit that upstream applies with `-password`. Off by default. See [Sidecar lifeline](#sidecar-lifeline).
+- **OAuth redirect port.** The Claude and Codex OAuth starts take an opt-in `redirect_port`, used for the authorize URL and the token exchange, so a caller with its own callback listener on an OS-assigned port never collides with whatever holds 54545 or 1455. Without it nothing changes. See [OAuth redirect port](#oauth-redirect-port).
 
 ### Fork-only files
 
@@ -52,6 +53,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/devyre_t3_hub_contract_test.go` | `TestT3Hub_*`, the T3 Code hub contract |
 | `internal/api/devyre_tailnet_auth.go` | Keyless proxy API for trusted requests (`proxy-api`), the key-only `/v1/ws` wrapper and the anti-framing headers of the panel pages |
 | `internal/api/devyre_tailnet_auth_test.go` | Full-stack `tailnet-auth` tests through the real server and config loader: session endpoint, token-bearing routes, CORS, proxy principal, `/v1/ws`, framing, the tailnet name on the API port, the rendered proxy debug lines |
+| `internal/api/handlers/management/devyre_oauth_redirect.go` | `redirect_port` on the Claude and Codex OAuth starts: parsing, the refusals, and the redirect-aware authorize URL and exchange |
+| `internal/api/handlers/management/devyre_oauth_redirect_test.go` | Through `StartOAuthV8`: the default redirects unchanged, the moved ones per provider, every refused value and the `is_webui` combination, a Codex exchange that uses the moved redirect, and a service that cannot move it |
 | `internal/api/handlers/management/devyre_quota_observer.go` | Idle-credential usage poller; also forgets the readings of removed credentials |
 | `internal/api/handlers/management/devyre_quota_observer_test.go` | Poller scheduling, min-gap, backoff and pruning tests |
 | `internal/api/handlers/management/devyre_routing_config_test.go` | The routing blocks survive `/v8/management` config writes |
@@ -62,6 +65,10 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/handlers/management/devyre_tailnet_auth_test.go` | Middleware, ban, `allow-remote` and session tests, a `/v8` config write round trip, and the debug decision lines as the log formatter renders them |
 | `internal/api/handlers/management/devyre_usage_cache.go` | Usage cache inside `APICall` |
 | `internal/api/handlers/management/devyre_usage_cache_test.go` | Usage cache tests: TTLs, single-flight, stale, backoff, bypass, query variants, writes |
+| `internal/auth/claude/devyre_redirect.go` | `LoopbackRedirectURI` (`http://localhost:<port>/callback`), `GenerateAuthURLWithRedirect`, `ExchangeCodeForTokensWithRedirect` |
+| `internal/auth/claude/devyre_redirect_test.go` | Only the redirect changes in the authorize URL; the exchange body carries the moved redirect |
+| `internal/auth/codex/devyre_redirect.go` | `LoopbackRedirectURI` (`http://127.0.0.1:<port>/auth/callback`), `GenerateAuthURLWithRedirect` (upstream already has `ExchangeCodeForTokensWithRedirect`) |
+| `internal/auth/codex/devyre_redirect_test.go` | Only the redirect changes in the authorize URL |
 | `internal/cmd/devyre_lifeline.go` | The stdin lifeline: `SetStdinLifeline`, the shutdown line, and the run context that ends with stdin |
 | `internal/cmd/devyre_lifeline_test.go` | Line parsing (EOF, `shutdown`, CRLF, unknown and over-long lines, read errors), and `StartService` in process: `/keep-alive` with the local password, then a graceful stop on a shutdown line and on EOF |
 | `internal/config/devyre_deploy_template_test.go` | Loads the deploy template through the real config loader and checks the typed routing values; pins the `tailnet-auth` block and the keys `tailnet-trust.ps1` writes |
@@ -108,6 +115,9 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `config.example.yaml` | A `devyre:` comment above `disable-control-panel` says the panel is built in, so `disable-auto-update-panel` and `panel-github-repository` have no effect, and `panel-github-repository` names the panel fork; a commented `management.tailnet-auth` block with every setting off; `routing:` documents `expiring-first` and the `expiring-first` and `quota-observation` blocks. |
 | `internal/api/handlers/management/api_tools.go` | Three hunks hook the usage cache into `APICall`: a lookup after `auth_index` and `url` are parsed, complete or fail after the upstream call, and a record on success. `/v0` and `/v8` share this handler. |
 | `internal/api/handlers/management/auth_files.go` | `extractCodexIDTokenClaims` also emits `chatgpt_plan_type`, the key T3 Code reads. |
+| `internal/api/handlers/management/auth_files_provider_oauth.go` | `RequestAnthropicToken` and `RequestCodexToken` read `redirect_port` first (`devyreOAuthRedirect`), and build the authorize URL and exchange the code through `devyreClaudeAuthURL`/`devyreClaudeExchange` and `devyreCodexAuthURL`/`devyreCodexExchange`, which fall back to upstream's calls without it. |
+| `internal/auth/claude/anthropic_auth.go` | `GenerateAuthURL` and `ExchangeCodeForTokens` became wrappers passing `RedirectURI` to unexported `generateAuthURL` and `exchangeCodeForTokens`, which take the redirect as a parameter. |
+| `internal/auth/codex/openai_auth.go` | `GenerateAuthURL` became a wrapper passing `RedirectURI` to an unexported `generateAuthURL`. |
 | `internal/api/handlers/management/config_basic.go` | `normalizeRoutingStrategy` accepts `expiring-first`, so `PUT /routing/strategy` does too. |
 | `internal/api/handlers/management/handler.go` | Two hunks: `Middleware()` asks `devyreTailnetAuthorize` first and skips the key for a trusted request, and the missing-key branch of `AuthenticateManagementKey` no longer calls `fail()`, so only a wrong key counts toward the ban. |
 | `internal/api/server.go` | Starts the quota observer once, right after the management handler is created. One line adds `devyreTailnetContext` to the engine, so the proxy API's keyless check reads the live config. One `if`, after the keep-alive setup, registers the lifeline's `/keep-alive` (`devyreEnableKeepAliveProbe`). |
@@ -300,6 +310,21 @@ Upstream stops a server started with `-password` 10 seconds after the last authe
 
 The flag is off by default and changes nothing else. The Docker deployment does not use it.
 
+## OAuth redirect port
+
+`GET /v8/management/oauth/auth-url?provider=claude|codex&redirect_port=<port>` (and the deprecated `/v0/management/anthropic-auth-url` and `codex-auth-url`, which share the handlers) puts a loopback redirect on that port into the authorize URL, and the same redirect into the token exchange, which the provider requires. A caller that runs its own callback listener on a port the OS picked for it, such as a desktop app's sidecar supervisor, then never collides with another program holding the provider's fixed port (this deployment publishes 54545 and 1455 itself, and `codex login` takes 1455). Without the parameter nothing changes.
+
+| Provider | Redirect for `redirect_port=<port>` | Why this form |
+|---|---|---|
+| Claude | `http://localhost:<port>/callback` | What Claude Code itself sends: its own listener binds `127.0.0.1` on port 0, the OS picks the port, for every sign-in, with the same client id. |
+| Codex | `http://127.0.0.1:<port>/auth/callback` | auth.openai.com accepts any port only for the loopback IP literal (RFC 8252 §7.3). `localhost` with a port other than 1455, `[::1]`, another path or another host answer `invalid_authorize_request`. |
+
+- A value that is not plain decimal digits from 1 to 65535 answers 400 `invalid redirect_port`, and so does an empty one. With `is_webui` it answers 400 too: that flow's callback forwarder listens on the fixed port.
+- The router never listens on the port; the caller does, and hands the code to `/v8/management/oauth/callback` as before.
+- A caller can tell a router without the parameter (upstream, or an older fork) from the returned URL: its `redirect_uri` still names the fixed port.
+
+Evidence (2026-10-13, no sign-in and nothing submitted: each authorize URL a throwaway router returned was loaded in headless Chrome 154 with a fresh profile, only `redirect_uri` changed, and the page it settled on was read): for Codex, `localhost:1455`, `127.0.0.1:1455` and `127.0.0.1:<random>` reached the "Welcome back" sign-in page, while `localhost:<random>`, `[::1]:<random>`, `localhost:1455/other`, `127.0.0.1:<random>/other` and `https://example.com/auth/callback` got `{"error":{"code":"invalid_authorize_request"}}`. claude.ai checks nothing before sign-in (the non-loopback control also reached its sign-in page), so for Claude the evidence is Claude Code 2.1.296 itself, whose OAuth listener starts with `listen(0, "127.0.0.1")` and sends `http://localhost:${port}/callback` in both requests. The app's `scripts/probe-oauth-redirects.ts` repeats the check.
+
 ## Embedded panel
 
 The server answers `/management.html` from a copy of the panel built into the binary, `internal/managementasset/devyre_panel/management.html`: the release asset of [the panel fork](https://github.com/Devyre/Cli-Proxy-API-Management-Center), byte for byte. `panel.json` next to it records the version, the source and the sha256, and `go test ./internal/managementasset/` fails when the file and the record disagree.
@@ -344,7 +369,8 @@ go test -tags devyre_nopanel ./internal/managementasset/ ./internal/api/ -run De
 go test ./internal/config/ -run 'DevyreDeployTemplate|ExpiringFirst|TailnetAuth'
 go test ./internal/quotareading/
 go test ./internal/tailnetauth/
-go test ./internal/api/handlers/management/ -run 'UsageCache|QuotaObserver|RoutingQuota|ExpiringFirst|RoutingStrategy|TailnetAuth|GetAuthSession|AuthenticateManagementKey'
+go test ./internal/api/handlers/management/ -run 'UsageCache|QuotaObserver|RoutingQuota|ExpiringFirst|RoutingStrategy|TailnetAuth|GetAuthSession|AuthenticateManagementKey|DevyreRedirect'
+go test ./internal/auth/claude/ ./internal/auth/codex/ -run Devyre
 go test ./sdk/cliproxy/auth/ -run ExpiringFirst
 go test ./sdk/cliproxy/ -run ExpiringFirst
 go test ./test/ -run Devyre

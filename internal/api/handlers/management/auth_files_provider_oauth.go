@@ -37,6 +37,11 @@ type codexOAuthService interface {
 func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
+	// devyre: an opt-in redirect port for the caller's own listener (devyre_oauth_redirect.go).
+	redirectURI, okRedirect := devyreOAuthRedirect(c, claude.LoopbackRedirectURI)
+	if !okRedirect {
+		return
+	}
 
 	fmt.Println("Initializing Claude authentication...")
 
@@ -60,7 +65,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 	anthropicAuth := claude.NewClaudeAuth(h.cfg)
 
 	// Generate authorization URL (then override redirect_uri to reuse server port)
-	authURL, state, err := anthropicAuth.GenerateAuthURL(state, pkceCodes)
+	authURL, state, err := devyreClaudeAuthURL(anthropicAuth, state, pkceCodes, redirectURI)
 	if err != nil {
 		log.Errorf("Failed to generate authorization URL: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
@@ -143,7 +148,7 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 		code := strings.Split(rawCode, "#")[0]
 
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := anthropicAuth.ExchangeCodeForTokens(ctx, code, state, pkceCodes)
+		bundle, errExchange := devyreClaudeExchange(ctx, anthropicAuth, code, state, pkceCodes, redirectURI)
 		if errExchange != nil {
 			authErr := claude.NewAuthenticationError(claude.ErrCodeExchangeFailed, errExchange)
 			log.Errorf("Failed to exchange authorization code for tokens: %v", authErr)
@@ -198,6 +203,11 @@ func (h *Handler) RequestAnthropicToken(c *gin.Context) {
 func (h *Handler) RequestCodexToken(c *gin.Context) {
 	ctx := context.Background()
 	ctx = PopulateAuthContext(ctx, c)
+	// devyre: an opt-in redirect port for the caller's own listener (devyre_oauth_redirect.go).
+	redirectURI, okRedirect := devyreOAuthRedirect(c, codex.LoopbackRedirectURI)
+	if !okRedirect {
+		return
+	}
 
 	fmt.Println("Initializing Codex authentication...")
 
@@ -221,7 +231,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	openaiAuth := newCodexOAuthService(h.cfg)
 
 	// Generate authorization URL
-	authURL, err := openaiAuth.GenerateAuthURL(state, pkceCodes)
+	authURL, err := devyreCodexAuthURL(openaiAuth, state, pkceCodes, redirectURI)
 	if err != nil {
 		log.Errorf("Failed to generate authorization URL: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate authorization url"})
@@ -290,7 +300,7 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 
 		log.Debug("Authorization code received, exchanging for tokens...")
 		// Exchange code for tokens using internal auth service
-		bundle, errExchange := openaiAuth.ExchangeCodeForTokens(ctx, code, pkceCodes)
+		bundle, errExchange := devyreCodexExchange(ctx, openaiAuth, code, pkceCodes, redirectURI)
 		if errExchange != nil {
 			authErr := codex.NewAuthenticationError(codex.ErrCodeExchangeFailed, errExchange)
 			SetOAuthSessionError(state, oauthSessionErrorWithCause("Failed to exchange authorization code for tokens", errExchange))
