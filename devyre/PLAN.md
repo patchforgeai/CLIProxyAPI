@@ -25,7 +25,7 @@ Established from the reference frame and the source code:
 
 ### What we build
 
-1. **Panel fork** ([Cli-Proxy-API-Management-Center](https://github.com/patchforgeai/Cli-Proxy-API-Management-Center)): upstream v1.25.3 plus chhoumann's ledger, pinned. Our changes on top:
+1. **Panel fork** ([Cli-Proxy-API-Management-Center](https://github.com/Devyre/Cli-Proxy-API-Management-Center)): upstream v1.25.3 plus chhoumann's ledger, pinned. Our changes on top:
    - The Claude headline is the account-wide **7-day limit**, which Opus 5.5 consumes.
    - The secondary pool is the **5-hour** window.
    - **Fable is hidden** in the ledger but stays in Cards.
@@ -216,7 +216,7 @@ If upstream moved past the pins when you start, use the new HEADs. The ledger me
 gh repo fork router-for-me/CLIProxyAPI --clone=false --default-branch-only
 gh repo fork router-for-me/Cli-Proxy-API-Management-Center --clone=false --default-branch-only
 gh repo view patchforgeai/CLIProxyAPI --json parent --jq .parent.nameWithOwner                       # router-for-me/CLIProxyAPI
-gh repo view patchforgeai/Cli-Proxy-API-Management-Center --json parent --jq .parent.nameWithOwner   # router-for-me/Cli-Proxy-API-Management-Center
+gh repo view Devyre/Cli-Proxy-API-Management-Center --json parent --jq .parent.nameWithOwner   # router-for-me/Cli-Proxy-API-Management-Center
 ```
 
 **P0-2, server fork into this folder.** The folder already holds `PLAN.md` and `.reference/`, so initialize in place instead of cloning:
@@ -242,17 +242,17 @@ gh repo set-default patchforgeai/CLIProxyAPI
 
 ```powershell
 Set-Location Z:\Code\repos\Devyre
-git clone -c core.autocrlf=false -c core.eol=lf https://github.com/patchforgeai/Cli-Proxy-API-Management-Center.git
+git clone -c core.autocrlf=false -c core.eol=lf https://github.com/Devyre/Cli-Proxy-API-Management-Center.git
 Set-Location Cli-Proxy-API-Management-Center
 git remote add upstream  https://github.com/router-for-me/Cli-Proxy-API-Management-Center.git
 git remote add chhoumann https://github.com/chhoumann/Cli-Proxy-API-Management-Center.git
 git fetch --all --tags
-gh repo set-default patchforgeai/Cli-Proxy-API-Management-Center
+gh repo set-default Devyre/Cli-Proxy-API-Management-Center
 ```
 
 **P0-4, Actions.**
 - Enable Actions on the panel fork; its `release.yml` builds `management.html` when a `v*` tag is pushed:
-  `gh api -X PUT repos/patchforgeai/Cli-Proxy-API-Management-Center/actions/permissions -F enabled=true -f allowed_actions=all`.
+  `gh api -X PUT repos/Devyre/Cli-Proxy-API-Management-Center/actions/permissions -F enabled=true -f allowed_actions=all`.
 - Leave Actions **disabled** on the server fork. Its workflows push to Docker Hub and upstream release channels:
   `gh api -X PUT repos/patchforgeai/CLIProxyAPI/actions/permissions -F enabled=false`.
 
@@ -394,7 +394,7 @@ In `src/stores/useThemeStore.ts`, change the persisted initial `theme: 'auto'` t
    ```powershell
    git tag v1.25.3-devyre.1; git push origin main --tags
    ```
-3. Check that `gh release view v1.25.3-devyre.1 --repo patchforgeai/Cli-Proxy-API-Management-Center --json assets --jq '.assets[].name'` lists `management.html`.
+3. Check that `gh release view v1.25.3-devyre.1 --repo Devyre/Cli-Proxy-API-Management-Center --json assets --jq '.assets[].name'` lists `management.html`.
 
 Release `-devyre.1` at M1 after UI-1…UI-4, and `-devyre.2` at M2 after UI-5. Since section 17, `devyre\scripts\update-panel.ps1 -Tag <tag>` embeds a release in the server, which ships it with its next build. Upstream's `release.yml` publishes non-prerelease, which "latest" requires.
 
@@ -408,8 +408,8 @@ Superseded by section 17: the server builds the panel into the binary and never 
 
 - In `internal/managementasset/updater.go`:
   ```go
-  defaultManagementReleaseURL  = "https://api.github.com/repos/patchforgeai/Cli-Proxy-API-Management-Center/releases/latest"
-  defaultManagementFallbackURL = "https://github.com/patchforgeai/Cli-Proxy-API-Management-Center/releases/latest/download/management.html" // devyre: never fall back to the stock panel
+  defaultManagementReleaseURL  = "https://api.github.com/repos/Devyre/Cli-Proxy-API-Management-Center/releases/latest"
+  defaultManagementFallbackURL = "https://github.com/Devyre/Cli-Proxy-API-Management-Center/releases/latest/download/management.html" // devyre: never fall back to the stock panel
   ```
 - In `config.example.yaml`, set `management.panel-github-repository` to the fork URL.
 - Grep `Cli-Proxy-API-Management-Center` and `cpamc.router-for.me` across `*.go` and update any other default consistently. Adjust `updater_test.go` if it pins the constants.
@@ -864,7 +864,7 @@ management:
 
 **Request:** the panel fork is becoming private, so anonymous release downloads stop working, and nobody should have to configure a token. The deployment must be contained and fire-and-forget. User-facing documentation: `devyre/README.md`, "Embedded panel".
 
-The repositories moved the same day, to https://github.com/patchforgeai/CLIProxyAPI (server fork) and https://github.com/patchforgeai/Cli-Proxy-API-Management-Center (panel fork); this plan's commands use the new addresses.
+The server fork moved the same day, to https://github.com/patchforgeai/CLIProxyAPI; the panel fork stays at https://github.com/Devyre/Cli-Proxy-API-Management-Center. This plan's commands use those addresses.
 
 ### Decisions (do not relitigate)
 

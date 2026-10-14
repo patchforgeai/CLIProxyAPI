@@ -81,7 +81,7 @@ management:
   # base-url: "https://proxy.example.com"
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
-  panel-github-repository: "https://github.com/patchforgeai/Cli-Proxy-API-Management-Center"
+  panel-github-repository: "https://github.com/Devyre/Cli-Proxy-API-Management-Center"
 
   # Passwordless access for allowed tailnet devices behind tailscale serve and, optionally, this PC.
   # Every setting defaults to off and every empty list fails closed. Trusted requests skip the

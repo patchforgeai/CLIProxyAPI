@@ -20,7 +20,7 @@
   Release tag, such as v1.25.3-devyre.2. Default: the latest release.
 
 .PARAMETER Repository
-  The panel fork on GitHub, owner/name. Default: patchforgeai/Cli-Proxy-API-Management-Center.
+  The panel fork on GitHub, owner/name. Default: Devyre/Cli-Proxy-API-Management-Center.
 
 .PARAMETER Clone
   Path to a local clone of the panel fork to build instead of downloading a release.
@@ -37,7 +37,7 @@
 [CmdletBinding(DefaultParameterSetName = 'Release')]
 param(
   [Parameter(ParameterSetName = 'Release')][string]$Tag,
-  [Parameter(ParameterSetName = 'Release')][string]$Repository = 'patchforgeai/Cli-Proxy-API-Management-Center',
+  [Parameter(ParameterSetName = 'Release')][string]$Repository = 'Devyre/Cli-Proxy-API-Management-Center',
   [Parameter(ParameterSetName = 'Clone', Mandatory = $true)][string]$Clone
 )
 $ErrorActionPreference = 'Stop'

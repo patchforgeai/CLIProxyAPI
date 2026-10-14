@@ -26,7 +26,7 @@ import (
 const (
 	devyrePanelHTMLFile   = "devyre_panel/management.html"
 	devyrePanelRecordFile = "devyre_panel/panel.json"
-	devyrePanelReleaseTag = "https://github.com/patchforgeai/Cli-Proxy-API-Management-Center/releases/tag/"
+	devyrePanelReleaseTag = "https://github.com/Devyre/Cli-Proxy-API-Management-Center/releases/tag/"
 )
 
 var (

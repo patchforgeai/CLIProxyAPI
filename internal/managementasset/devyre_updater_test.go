@@ -19,9 +19,9 @@ import (
 // restores the stock panel source.
 
 const (
-	devyrePanelRepository = "https://github.com/patchforgeai/Cli-Proxy-API-Management-Center"
-	devyrePanelReleaseAPI = "https://api.github.com/repos/patchforgeai/Cli-Proxy-API-Management-Center/releases/latest"
-	devyrePanelFallback   = "https://github.com/patchforgeai/Cli-Proxy-API-Management-Center/releases/latest/download/management.html"
+	devyrePanelRepository = "https://github.com/Devyre/Cli-Proxy-API-Management-Center"
+	devyrePanelReleaseAPI = "https://api.github.com/repos/Devyre/Cli-Proxy-API-Management-Center/releases/latest"
+	devyrePanelFallback   = "https://github.com/Devyre/Cli-Proxy-API-Management-Center/releases/latest/download/management.html"
 )
 
 type devyreRoundTripFunc func(*http.Request) (*http.Response, error)
@@ -56,7 +56,7 @@ func TestDevyrePanelSource_FallbackNeverUsesStockPanel(t *testing.T) {
 	if parsed.Scheme != "https" || parsed.Host != "github.com" {
 		t.Fatalf("fallback URL %q must be an https github.com release download", defaultManagementFallbackURL)
 	}
-	if !strings.HasPrefix(parsed.Path, "/patchforgeai/Cli-Proxy-API-Management-Center/releases/") || !strings.HasSuffix(parsed.Path, "/"+managementAssetName) {
+	if !strings.HasPrefix(parsed.Path, "/Devyre/Cli-Proxy-API-Management-Center/releases/") || !strings.HasSuffix(parsed.Path, "/"+managementAssetName) {
 		t.Fatalf("fallback URL %q must download %s from the panel fork's releases", defaultManagementFallbackURL, managementAssetName)
 	}
 	for _, stock := range []string{"router-for", "cpamc."} {
