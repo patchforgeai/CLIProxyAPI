@@ -789,7 +789,7 @@ Run `devyre\scripts\backup.ps1`. It writes `config.yaml`, `auths\` and `secrets\
 
 ### Config (`management.tailnet-auth`)
 
-Code defaults are all off or empty; the deploy template switches `enabled`, `allow-local` and `proxy-api` on and leaves the lists empty for `devyre/scripts/tailnet-trust.ps1` to fill.
+Code defaults are all off or empty; the deploy template switches `enabled` and `proxy-api` on, keeps `allow-local` off (other containers on this PC reach the loopback publish through `host.docker.internal`) and leaves the lists empty for `devyre/scripts/tailnet-trust.ps1` to fill.
 
 ```yaml
 management:

@@ -609,8 +609,9 @@ func TestDevyreNewSecrets_RotateKeepsTheTailnetAuthBlock(t *testing.T) {
 		t.Fatalf("backup tailnet-auth = %+v, want %+v", got, want)
 	}
 
-	// -ResetTailnetAuth starts the policy from the template: on, nothing keyless.
-	// The backup name has a one-second resolution, so move the first one away.
+	// -ResetTailnetAuth starts the policy from the template: on, allow-local off,
+	// nothing keyless. The backup name has a one-second resolution, so move the
+	// first one away.
 	if errRename := os.Rename(backups[0], filepath.Join(dir, "first-backup.yaml")); errRename != nil {
 		t.Fatal(errRename)
 	}
@@ -618,9 +619,9 @@ func TestDevyreNewSecrets_RotateKeepsTheTailnetAuthBlock(t *testing.T) {
 	if reset.exitCode != 0 || !strings.Contains(reset.output, "reset to the template") {
 		t.Fatalf("-Rotate -ResetTailnetAuth: exit %d; output:\n%s", reset.exitCode, reset.output)
 	}
-	if got := devyreLoadTailnetAuth(t, configPath); !got.Enabled || !got.AllowLocal || !got.ProxyAPI ||
+	if got := devyreLoadTailnetAuth(t, configPath); !got.Enabled || got.AllowLocal || !got.ProxyAPI ||
 		len(got.AllowedLogins)+len(got.AllowedDevices)+len(got.AllowedHosts) != 0 {
-		t.Fatalf("tailnet-auth after -ResetTailnetAuth = %+v, want the template block", got)
+		t.Fatalf("tailnet-auth after -ResetTailnetAuth = %+v, want the template block (enabled and proxy-api on, allow-local off, empty lists)", got)
 	}
 	if refused := runDevyreScript(t, env, "new-secrets.ps1", "-ResetTailnetAuth"); refused.exitCode == 0 {
 		t.Fatalf("-ResetTailnetAuth without -Rotate was accepted; output:\n%s", refused.output)
