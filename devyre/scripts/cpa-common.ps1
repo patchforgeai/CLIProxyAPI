@@ -671,9 +671,45 @@ function Get-CpaContainerGateways($Info) {
   return $gateways.ToArray()
 }
 
-# Ports a compose file would publish beyond 127.0.0.1, read from `docker compose config`.
-function Get-CpaComposePublishProblems([string]$Docker, [string]$Compose, [string]$EnvFile) {
-  $arguments = @('compose', '-f', $Compose)
+# The compose files for cpa: the base file plus its OAuth overlay (docker-compose.oauth.yml next
+# to it, the callback ports 54545 and 1455) when that exists.
+function Get-CpaComposeFiles([string]$Compose) {
+  $overlay = [System.IO.Path]::ChangeExtension($Compose, '.oauth.yml')
+  if (Test-Path -LiteralPath $overlay) { return @($Compose, $overlay) }
+  return @($Compose)
+}
+
+# docker compose up -d for cpa with the OAuth overlay, falling back to the base file alone when
+# Docker cannot publish the callback ports. At boot Windows reserves random blocks of the dynamic
+# port range for Hyper-V; when one covers 54545 the whole container used to stay down, 8317
+# included. Returns ExitCode, Output, OAuthPorts (whether the overlay is in effect) and
+# OAuthError (why it was dropped).
+function Invoke-CpaComposeUp([string]$Docker, [string]$Compose, [string]$EnvFile, [string[]]$UpArguments = @()) {
+  $files = @(Get-CpaComposeFiles $Compose)
+  $tail = @('--env-file', $EnvFile, 'up', '-d') + @($UpArguments)
+  $arguments = @('compose')
+  foreach ($file in $files) { $arguments += @('-f', $file) }
+  $result = Invoke-CpaNative -FilePath $Docker -Arguments ($arguments + $tail) -TimeoutSec 600
+  $oauth = ($files.Count -gt 1)
+  $oauthError = ''
+  if ($result.ExitCode -ne 0 -and $oauth -and $result.StdErr -match 'ports are not available|address already in use') {
+    $oauthError = (($result.StdErr.Trim() -split "`n") | Select-Object -Last 1).Trim()
+    if ($tail -notcontains '--force-recreate') { $tail += '--force-recreate' }
+    $result = Invoke-CpaNative -FilePath $Docker -Arguments (@('compose', '-f', $Compose) + $tail) -TimeoutSec 600
+    $oauth = $false
+  }
+  return [pscustomobject]@{
+    ExitCode   = $result.ExitCode
+    Output     = ($result.StdOut + "`n" + $result.StdErr).Trim()
+    OAuthPorts = $oauth
+    OAuthError = $oauthError
+  }
+}
+
+# Ports the compose files would publish beyond 127.0.0.1, read from `docker compose config`.
+function Get-CpaComposePublishProblems([string]$Docker, [string[]]$Compose, [string]$EnvFile) {
+  $arguments = @('compose')
+  foreach ($file in $Compose) { $arguments += @('-f', $file) }
   if ($EnvFile) { $arguments += @('--env-file', $EnvFile) }
   $arguments += @('config', '--format', 'json')
   $result = Invoke-CpaNative -FilePath $Docker -Arguments $arguments -TimeoutSec 60

@@ -32,6 +32,8 @@ $stampFile = Join-Path $logDir 'ensure-running.serve-repair'
 $dockerDesktop = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
 $tailscale = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
 
+. (Join-Path $PSScriptRoot 'cpa-common.ps1')
+
 if (-not (Test-Path -LiteralPath $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 if ((Test-Path -LiteralPath $logFile) -and (Get-Item -LiteralPath $logFile).Length -gt 1MB) {
   Move-Item -LiteralPath $logFile -Destination "$logFile.1" -Force
@@ -90,13 +92,30 @@ try {
 
     # 2. cpa container
     if (-not (Test-Path -LiteralPath $envFile)) { Write-Log "FAIL missing $envFile (copy .env.example)"; exit 1 }
+    $docker = Get-CpaDockerExe
+    if (-not $docker) { $docker = Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin\docker.exe' }
     Write-Log 'cpa is not answering; running docker compose up -d.'
-    $r = Invoke-NativeQuiet { docker compose -f $compose --env-file $envFile up -d }
+    $r = Invoke-CpaComposeUp -Docker $docker -Compose $compose -EnvFile $envFile
     if ($r.ExitCode -ne 0) { Write-Log ("FAIL docker compose up: " + $r.Output); exit 1 }
-    $deadline = (Get-Date).AddSeconds(120)
+    if ($r.OAuthError) { Write-Log ("WARN started without the OAuth callback ports (Windows reserved them): " + $r.OAuthError) }
+    $deadline = (Get-Date).AddSeconds(30)
     while (-not ($localOk = Test-Http200 'http://127.0.0.1:8317/healthz')) {
-      if ((Get-Date) -gt $deadline) { Write-Log 'FAIL cpa did not answer /healthz within 120s (see docker logs cpa).'; exit 1 }
+      if ((Get-Date) -gt $deadline) { break }
       Start-Sleep -Seconds 2
+    }
+    # A container can show "Up" with no port published, for example after Docker Desktop's
+    # restart policy started it at boot and a publish failed; "up -d" leaves such a container
+    # alone. Recreating it binds the ports again.
+    if (-not $localOk) {
+      Write-Log 'cpa is running but not reachable (ports not published?); recreating the container.'
+      $r = Invoke-CpaComposeUp -Docker $docker -Compose $compose -EnvFile $envFile -UpArguments @('--force-recreate')
+      if ($r.ExitCode -ne 0) { Write-Log ("FAIL docker compose up --force-recreate: " + $r.Output); exit 1 }
+      if ($r.OAuthError) { Write-Log ("WARN started without the OAuth callback ports (Windows reserved them): " + $r.OAuthError) }
+      $deadline = (Get-Date).AddSeconds(120)
+      while (-not ($localOk = Test-Http200 'http://127.0.0.1:8317/healthz')) {
+        if ((Get-Date) -gt $deadline) { Write-Log 'FAIL cpa did not answer /healthz within 120s (see docker logs cpa).'; exit 1 }
+        Start-Sleep -Seconds 2
+      }
     }
     Write-Log 'cpa is up: http://127.0.0.1:8317/healthz is 200.'
   }

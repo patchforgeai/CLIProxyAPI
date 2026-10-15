@@ -22,8 +22,8 @@ services:
       WRITABLE_PATH: /data                 # logs -> /data/logs, panel -> /data/static
     ports:
       - "127.0.0.1:8317:8317"     # API + panel (tailscale serve fronts this)
-      - "127.0.0.1:54545:54545"   # Claude OAuth callback for panel logins from this PC
-      - "127.0.0.1:1455:1455"     # Codex OAuth callback (optional)
+      # The OAuth callback ports (54545, 1455) live in docker-compose.oauth.yml so that a Windows
+      # port reservation on them can never keep 8317 down; the scripts add that file when they can.
     volumes:
       - ${CPA_HOME:?set CPA_HOME in .env}:/data
     logging:                      # keep docker logs bounded on an always-on box

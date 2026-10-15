@@ -28,7 +28,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `devyre/clients/t3-code.md` | Click-by-click T3 Code setup: hub, pooled Claude instance, Claude Direct |
 | `devyre/deploy/.env.example` | Compose variables; copy it to the gitignored `.env` |
 | `devyre/deploy/config.template.yaml` | Runtime config template (v8 layout) that `new-secrets.ps1` renders; `management.tailnet-auth` is on with empty, fail-closed lists |
-| `devyre/deploy/docker-compose.yml` | Builds `cpa-devyre:current`; publishes 8317, 54545 and 1455 on 127.0.0.1 only; mounts `CPA_HOME` at `/data` |
+| `devyre/deploy/docker-compose.yml` | Builds `cpa-devyre:current`; publishes 8317 on 127.0.0.1 only; mounts `CPA_HOME` at `/data` |
+| `devyre/deploy/docker-compose.oauth.yml` | Overlay with the OAuth callback ports 54545 and 1455 (127.0.0.1); the scripts drop it when Windows has reserved them |
 | `devyre/scripts/backup.ps1` | Archives `config.yaml`, `auths\` and `secrets\` |
 | `devyre/scripts/cpa-common.ps1` | Helpers the scripts dot-source: native-command runner, tailscale and docker readers, HTTP and management API clients |
 | `devyre/scripts/exposure-check.ps1` | PASS/FAIL report: loopback-only publishing, no LAN or Funnel exposure, the serve mapping and the passwordless policy; exits 1 on any FAIL |
@@ -174,7 +175,7 @@ Day to day:
 
 - **Start now:** double-click `devyre\start-cpa.cmd`. It runs `devyre\scripts\ensure-running.ps1`, which checks the chain and fixes only what is down:
   1. If the Docker engine is unreachable, it starts Docker Desktop and waits up to 5 minutes for the engine.
-  2. If `cpa` is not answering `http://127.0.0.1:8317/healthz`, it runs `docker compose up -d` and waits for health.
+  2. If `cpa` is not answering `http://127.0.0.1:8317/healthz`, it runs `docker compose up -d` and waits for health. If the container is "Up" but still unreachable (no port published), it recreates it.
   3. If the tailnet URL is down, for example after a tailnet rename, it runs `tailscale-serve.ps1 -Http`, at most once an hour.
   It is safe to run any time.
 - **Autostart:** run `powershell -ExecutionPolicy Bypass -File devyre\scripts\install-autostart.ps1` once.
@@ -184,12 +185,13 @@ Day to day:
   - No admin rights are needed. Docker Desktop runs only inside a signed-in session, so CPA comes up when you sign in, not at the login screen.
   - Remove it with `install-autostart.ps1 -Remove`.
 - **Log:** `%USERPROFILE%\.cli-proxy-api\logs\ensure-running.log`. A healthy check writes nothing.
+- **OAuth callback ports are optional.** 54545 (Claude) and 1455 (Codex) live in `devyre/deploy/docker-compose.oauth.yml`. At boot Windows reserves random blocks of the dynamic port range (49152-65535) for Hyper-V (`netsh interface ipv4 show excludedportrange protocol=tcp`). When a block covers 54545, Docker cannot publish it. That used to keep the whole container down, 8317 included. Now `up.ps1` and `ensure-running.ps1` start without the overlay and log a WARN. Logins still work: paste the callback URL into the panel's "Submit Callback URL". To get the ports back after a reboot that frees them, run `up.ps1 -NoBuild`.
 
 ## Tailnet-only and passwordless
 
 CPA is reachable only from this PC and from your tailnet, never from the LAN or the internet:
 
-- The container publishes 8317, 54545 and 1455 on 127.0.0.1 only. `up.ps1` refuses to start a compose file that publishes a port anywhere else, and stops a running container that does.
+- The container publishes 8317, and 54545 and 1455 when the OAuth overlay is in effect, on 127.0.0.1 only. `up.ps1` refuses to start a compose file that publishes a port anywhere else, and stops a running container that does.
 - `tailscale serve` publishes `http(s)://<machine>.<tailnet>.ts.net:8318` to the tailnet only. Funnel stays off.
 
 On top of that, `management.tailnet-auth` lets chosen tailnet devices, and this PC, use CPA without a key. The panel opens straight into the dashboard, the management API needs no key, and with `proxy-api: true` the proxy API needs no API key either. Everything else still needs the key, exactly as before.

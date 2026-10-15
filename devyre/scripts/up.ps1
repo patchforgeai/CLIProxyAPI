@@ -38,7 +38,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw 'docker is 
 $docker = Get-CpaDockerExe
 
 # Refuse to start anything that publishes CPA beyond this PC's loopback.
-$composeProblems = @(Get-CpaComposePublishProblems -Docker $docker -Compose $compose -EnvFile $envFile)
+$composeProblems = @(Get-CpaComposePublishProblems -Docker $docker -Compose (Get-CpaComposeFiles $compose) -EnvFile $envFile)
 if ($composeProblems.Count -gt 0) {
   throw ("Refusing to start: $compose publishes ports beyond 127.0.0.1:`n  " + ($composeProblems -join "`n  ") +
     "`nBind every port to 127.0.0.1 (for example ""127.0.0.1:8317:8317""). tailscale serve is the only way in from the tailnet, " +
@@ -67,8 +67,13 @@ if (-not $NoBuild) {
 
 # --force-recreate: compose leaves a running container alone when nothing in its definition
 # changed, and the server would keep the config it loaded at start.
-& docker compose -f $compose --env-file $envFile up -d --force-recreate
-if ($LASTEXITCODE -ne 0) { throw 'docker compose up failed.' }
+# The OAuth callback ports are dropped when Windows has reserved them (see cpa-common.ps1).
+$up = Invoke-CpaComposeUp -Docker $docker -Compose $compose -EnvFile $envFile -UpArguments @('--force-recreate')
+if ($up.ExitCode -ne 0) { throw ("docker compose up failed:`n" + $up.Output) }
+if (-not $up.OAuthPorts -and $up.OAuthError) {
+  Write-Warning ('Started without the OAuth callback ports (' + $up.OAuthError + '). Panel logins still work: paste the ' +
+    'callback URL into "Submit Callback URL". After a reboot that frees the ports, run up.ps1 -NoBuild to get them back.')
+}
 
 # The running container is what counts: stop it when any published port is not on 127.0.0.1.
 $info = Get-CpaContainerInfo -Docker $docker -Name 'cpa'

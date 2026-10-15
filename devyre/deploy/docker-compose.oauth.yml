@@ -1,0 +1,11 @@
+# Optional overlay for devyre/deploy/docker-compose.yml: the OAuth callback ports, so a panel
+# login from this PC completes by itself. The devyre scripts add this file to every
+# "docker compose up" and drop it when Docker cannot publish these ports: at boot Windows
+# reserves random blocks of the dynamic port range (49152-65535) for Hyper-V, and 54545 is in
+# that range. Without it, logins still work: paste the callback URL into the panel's
+# "Submit Callback URL". Loopback only, like the base file.
+services:
+  cpa:
+    ports:
+      - "127.0.0.1:54545:54545"   # Claude OAuth callback for panel logins from this PC
+      - "127.0.0.1:1455:1455"     # Codex OAuth callback (optional)
