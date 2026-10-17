@@ -25,14 +25,14 @@ Established from the reference frame and the source code:
 
 ### What we build
 
-1. **Panel fork** (`Devyre/Cli-Proxy-API-Management-Center`): upstream v1.25.3 plus chhoumann's ledger, pinned. Our changes on top:
+1. **Panel fork** ([Cli-Proxy-API-Management-Center](https://github.com/Devyre/Cli-Proxy-API-Management-Center)): upstream v1.25.3 plus chhoumann's ledger, pinned. Our changes on top:
    - The Claude headline is the account-wide **7-day limit**, which Opus 5.5 consumes.
    - The secondary pool is the **5-hour** window.
    - **Fable is hidden** in the ledger but stays in Cards.
    - Dark theme is the default.
    - Adds an `expiring-first` routing option, a cache-aware refresh and an optional "next up" hint.
-2. **Server fork** (`Devyre/CLIProxyAPI`): upstream v8.0.13 plus:
-   - The panel is served from our fork's releases.
+2. **Server fork** ([CLIProxyAPI](https://github.com/patchforgeai/CLIProxyAPI)): upstream v8.0.13 plus:
+   - The panel is served from our fork's releases, built into the binary since section 17.
    - Contract tests pin the `/v0` endpoints T3's hub calls.
    - A usage cache in `api-call`.
    - Quota readings and an idle-credential usage poller.
@@ -78,7 +78,7 @@ Pause and ask at each of these:
 | F9 | Scheduler plugins can't see quota data or affinity bindings, can't stack, and are skipped in Home mode. Expiring-first therefore belongs in a core selector | bandoyer/CLIProxyAPI #4, #10; `sdk/pluginapi/types.go:486-543` |
 | F10 | Theo routes "expiring first", keeps threads on one account (the prompt cache is per account), uses WebSockets for Codex and runs at home behind Tailscale. He warns against serving public traffic | video "If you have a Claude sub, watch this" (summary) |
 | F11 | Claude's `/api/oauth/usage` is tightly rate-limited: 429s reported at 30-60 s and sometimes at 10 min, with `retry-after` missing. Its `utilization` is a **percent** (0..100), unlike the header fraction. Codex `/wham/usage` tolerates 60 s | anthropics/claude-code#30930, #31637 via bandoyer #13 |
-| F12 | Panel download: `management.panel-github-repository` points at GitHub `releases/latest`, the asset is `management.html` and its digest is verified. It is checked at start and every 3 h. The fallback `https://cpamc.router-for.me/` is used **only when the local file is missing**. `MANAGEMENT_STATIC_PATH` or `WRITABLE_PATH` relocate it | `internal/managementasset/updater.go` |
+| F12 | Panel download: `management.panel-github-repository` points at GitHub `releases/latest`, the asset is `management.html` and its digest is verified. It is checked at start and every 3 h. The fallback `https://cpamc.router-for.me/` is used **only when the local file is missing**. `MANAGEMENT_STATIC_PATH` or `WRITABLE_PATH` relocate it. **Superseded in this fork by section 17:** the panel is built into the binary and none of this runs | `internal/managementasset/updater.go` |
 | F13 | Management auth: <br>• A plaintext `secret-key` is hashed in place on first start. <br>• 5 failures from one client IP ban that IP for 30 min. <br>• Any non-loopback client needs `allow-remote: true`. <br>• `MANAGEMENT_PASSWORD` silently forces remote access on, so don't use it | `internal/api/handlers/management/handler.go:263-340`, bandoyer #7 |
 | F14 | OAuth callbacks: Claude redirects to `http://localhost:54545/callback`. The panel starts a forwarder on `0.0.0.0:54545` that 302s to the management callback. Codex uses 1455. A browser on another device uses "Submit Callback URL" | `auth_files_oauth_callback.go:18,40-75` |
 | F15 | Claude Code through a proxy: <br>• Set `ANTHROPIC_BASE_URL` (no `/v1`) and `ANTHROPIC_AUTH_TOKEN`. Don't use `ANTHROPIC_API_KEY`, which prompts. <br>• Token auth turns off claude.ai-only features: Remote Control, claude.ai MCP connectors and `/usage`. <br>• Token auth drops the prompt-cache TTL to 5 min unless `ENABLE_PROMPT_CACHING_1H=1`. <br>• It also turns tool search off unless `ENABLE_TOOL_SEARCH=true`. This last point was read from the Claude Code 2.1.287 binary by bandoyer, so **verify**. <br>• T3 docs: put router env in the instance's Environment variables, mark the token Sensitive and set `ANTHROPIC_API_KEY` explicitly empty | bandoyer #15, #18; T3 `docs/user/providers-claude.md` |
@@ -91,7 +91,7 @@ Pause and ask at each of these:
 
 | # | Decision | Why |
 |---|---|---|
-| D1 | Two forks shaped like upstream: the server, and the panel shipped as a GitHub Release `management.html`. The server pulls the panel from **our** release | Upstream syncs stay cheap, and it's the mechanism the server already has |
+| D1 | Two forks shaped like upstream: the server, and the panel shipped as a GitHub Release `management.html`. The server pulled the panel from **our** release; since section 17 it builds that release into the binary instead | Upstream syncs stay cheap, and it's the mechanism the server already had |
 | D2 | Panel = upstream `main` merged with `chhoumann/dev@24633a8` as a real merge, so authorship is kept. Credit it in README | MIT, already calibrated against Theo's frame, 1500+ tests. Don't rebuild it |
 | D3 | **Claude ledger, per the user:** <br>• Headline = `seven-day` ("7-day limit"). <br>• Secondary pooled line = `five-hour`. <br>• Row columns = 7-day, 5-hour, then any other reported model windows. <br>• `seven-day-fable` is **hidden in Ledger**, still visible in Cards, and shown only if it is an account's only window | "Opus 5.5 is great, we don't really use Fable right now" |
 | D4 | Default theme `dark`. Everything else in the shell stays upstream | That *is* Theo's look (F1) |
@@ -112,8 +112,8 @@ Pause and ask at each of these:
  tailnet devices (this PC, laptop, phone)
    │  https://<machine>.<tailnet>.ts.net:8318      tailscale serve (TLS; adds X-Forwarded-For)
    ▼
- Windows host 127.0.0.1:8317 ── Docker Desktop publish ──▶ container "cpa" (Devyre/CLIProxyAPI)
-                                                          ├─ /management.html            ← Devyre panel release (verified digest)
+ Windows host 127.0.0.1:8317 ── Docker Desktop publish ──▶ container "cpa" (server fork)
+                                                          ├─ /management.html            ← panel fork release, built into the image (section 17)
                                                           ├─ /v1/messages, /v1/responses, /v1/chat/completions, /v1/models
                                                           ├─ /v8/management/*            ← panel
                                                           ├─ /v0/management/{auth-files,api-call,reset-quota}  ← T3 Code hub
@@ -132,7 +132,7 @@ Pause and ask at each of these:
 
 ```
 Z:\Code\repos\Devyre\
-  CLIProxyAPI\                          server fork (origin = Devyre/CLIProxyAPI, upstream = router-for-me/CLIProxyAPI)
+  CLIProxyAPI\                          server fork (origin = patchforgeai/CLIProxyAPI, upstream = router-for-me/CLIProxyAPI)
     devyre\                             every fork-only file (never ignored by upstream rules)
       PLAN.md                           this plan (moved here in P0-2)
       README.md                         fork notes: what differs, run, sync, conflict hotspots
@@ -142,7 +142,7 @@ Z:\Code\repos\Devyre\
       scripts\new-secrets.ps1  up.ps1  tailscale-serve.ps1  backup.ps1  sync-upstream.ps1
       clients\powershell-profile.ps1    clients\t3-code.md    clients\codex-config.toml
     .reference\theo-quota-frame.png     local only (.git/info/exclude)
-  Cli-Proxy-API-Management-Center\      panel fork (origin = Devyre/…, upstream = router-for-me/…, chhoumann = ledger source)
+  Cli-Proxy-API-Management-Center\      panel fork (origin = patchforgeai/…, upstream = router-for-me/…, chhoumann = ledger source)
 %USERPROFILE%\.cli-proxy-api\           runtime, never in git → mounted at /data in the container
   config.yaml  auths\  logs\  static\  plugins\  secrets\
 ```
@@ -164,7 +164,7 @@ If upstream moved past the pins when you start, use the new HEADs. The ledger me
 
 ## 5. Rules of engagement for implementers
 
-1. **Never** push, open PRs or issues, or comment against `router-for-me/*` or `chhoumann/*`. In each clone run `gh repo set-default Devyre/<repo>`, and always pass `--repo Devyre/<repo>` to `gh pr create`. A fork's `gh pr create` defaults to the *parent*.
+1. **Never** push, open PRs or issues, or comment against `router-for-me/*` or `chhoumann/*`. In each clone run `gh repo set-default patchforgeai/<repo>`, and always pass `--repo patchforgeai/<repo>` to `gh pr create`. A fork's `gh pr create` defaults to the *parent*.
 2. Never commit secrets, auth files, `config.yaml`, real emails, the tailnet hostname, or unmasked screenshots.
 3. Follow each repo's `AGENTS.md`.
    - **Server:** gofmt; `go build ./cmd/server` after every change; English comments; no `log.Fatal`; controllable clocks in TTL and ordering tests; no new timeouts after an upstream connection is established (the APICall timeout is the allowed exception).
@@ -173,7 +173,7 @@ If upstream moved past the pins when you start, use the new HEADs. The ledger me
    - New Go files are named `devyre_*.go` or live in new packages.
    - Edits to upstream files are minimal hunks, with a `// devyre:` comment where the reason isn't obvious.
 5. Don't touch `/v0/management` handlers except the shared `APICall` internals.
-6. Branches are `devyre/<topic>`. Open a PR into the fork's `main` (`gh pr create --repo Devyre/… --base main`), self-merge once tests pass, and use Conventional Commits.
+6. Branches are `devyre/<topic>`. Open a PR into the fork's `main` (`gh pr create --repo patchforgeai/… --base main`), self-merge once tests pass, and use Conventional Commits.
 7. Clone with `core.autocrlf=false` and `core.eol=lf` (F16). Otherwise gofmt and Prettier flag every file.
 8. At every HITL step, stop and ask the user with a concrete instruction, then continue.
 
@@ -215,7 +215,7 @@ If upstream moved past the pins when you start, use the new HEADs. The ledger me
 ```powershell
 gh repo fork router-for-me/CLIProxyAPI --clone=false --default-branch-only
 gh repo fork router-for-me/Cli-Proxy-API-Management-Center --clone=false --default-branch-only
-gh repo view Devyre/CLIProxyAPI --json parent --jq .parent.nameWithOwner                       # router-for-me/CLIProxyAPI
+gh repo view patchforgeai/CLIProxyAPI --json parent --jq .parent.nameWithOwner                       # router-for-me/CLIProxyAPI
 gh repo view Devyre/Cli-Proxy-API-Management-Center --json parent --jq .parent.nameWithOwner   # router-for-me/Cli-Proxy-API-Management-Center
 ```
 
@@ -225,7 +225,7 @@ gh repo view Devyre/Cli-Proxy-API-Management-Center --json parent --jq .parent.n
 Set-Location Z:\Code\repos\Devyre\CLIProxyAPI
 git init -b main
 git config core.autocrlf false; git config core.eol lf; git config core.longpaths true
-git remote add origin   https://github.com/Devyre/CLIProxyAPI.git
+git remote add origin   https://github.com/patchforgeai/CLIProxyAPI.git
 git remote add upstream https://github.com/router-for-me/CLIProxyAPI.git
 git fetch origin; git fetch upstream --tags
 git checkout -B main origin/main
@@ -235,7 +235,7 @@ New-Item -ItemType Directory devyre | Out-Null
 Move-Item PLAN.md devyre\PLAN.md
 git add devyre/PLAN.md; git commit -m "docs(devyre): add implementation plan"
 git push origin main
-gh repo set-default Devyre/CLIProxyAPI
+gh repo set-default patchforgeai/CLIProxyAPI
 ```
 
 **P0-3, panel fork.**
@@ -254,7 +254,7 @@ gh repo set-default Devyre/Cli-Proxy-API-Management-Center
 - Enable Actions on the panel fork; its `release.yml` builds `management.html` when a `v*` tag is pushed:
   `gh api -X PUT repos/Devyre/Cli-Proxy-API-Management-Center/actions/permissions -F enabled=true -f allowed_actions=all`.
 - Leave Actions **disabled** on the server fork. Its workflows push to Docker Hub and upstream release channels:
-  `gh api -X PUT repos/Devyre/CLIProxyAPI/actions/permissions -F enabled=false`.
+  `gh api -X PUT repos/patchforgeai/CLIProxyAPI/actions/permissions -F enabled=false`.
 
 **P0-5, toolchains (HITL: approve installs).**
 
@@ -396,13 +396,15 @@ In `src/stores/useThemeStore.ts`, change the persisted initial `theme: 'auto'` t
    ```
 3. Check that `gh release view v1.25.3-devyre.1 --repo Devyre/Cli-Proxy-API-Management-Center --json assets --jq '.assets[].name'` lists `management.html`.
 
-Release `-devyre.1` at M1 after UI-1…UI-4, and `-devyre.2` at M2 after UI-5. The server picks up a new release at its next start or within 3 h. Upstream's `release.yml` publishes non-prerelease, which "latest" requires.
+Release `-devyre.1` at M1 after UI-1…UI-4, and `-devyre.2` at M2 after UI-5. Since section 17, `devyre\scripts\update-panel.ps1 -Tag <tag>` embeds a release in the server, which ships it with its next build. Upstream's `release.yml` publishes non-prerelease, which "latest" requires.
 
 ---
 
 ## 9. SRV track — server fork basics (`Z:\Code\repos\Devyre\CLIProxyAPI`)
 
 ### SRV-1 Serve the panel from our fork
+
+Superseded by section 17: the server builds the panel into the binary and never downloads it. The constants below still point at the panel fork, so the dormant downloader never fetches the stock panel.
 
 - In `internal/managementasset/updater.go`:
   ```go
@@ -720,20 +722,20 @@ Use the same steps with the ts.net URL and the `other-devices` key, or a dedicat
 
 1. Run `devyre\scripts\sync-upstream.ps1`. It creates `sync/upstream-YYYYMMDD` from `main` and merges `upstream/main`.
 2. Resolve conflicts at the hotspots listed in `devyre/README.md`, keeping upstream behavior plus our hunks.
-3. `gofmt -l .` (empty), then `go build ./cmd/server`, then `go test ./...`.
-4. Open a PR into the fork (`--repo Devyre/CLIProxyAPI`), merge it, tag `v<upstream>-devyre.<n>`, then run `up.ps1`.
+3. `gofmt -l .` (empty), then `go build ./cmd/server`, then `go test ./...`, plus the `devyre_nopanel` build and panel tests (`devyre/README.md`, "Sync with upstream").
+4. Open a PR into the fork (`--repo patchforgeai/CLIProxyAPI`), merge it, tag `v<upstream>-devyre.<n>`, then run `up.ps1`.
 
 ### Sync the panel fork
 
 1. `git fetch --multiple upstream chhoumann`.
 2. Branch, `git merge upstream/main`, and check `git log main..chhoumann/dev` for ledger updates worth merging.
 3. `bun run verify`, then rerun the visual harness (UI-4).
-4. PR, tag `v<upstream>-devyre.<n>` and push; the release workflow publishes. The server picks it up within 3 h or on restart.
+4. PR, tag `v<upstream>-devyre.<n>` and push; the release workflow publishes. Then embed it in the server with `devyre\scripts\update-panel.ps1 -Tag <tag>`, commit, and run `up.ps1` (section 17).
 
 ### Roll back
 
 - **Server:** `docker tag cpa-devyre:<previous-sha> cpa-devyre:current; docker compose -f devyre\deploy\docker-compose.yml --env-file devyre\deploy\.env up -d`.
-- **Panel:** mark the previous release as latest with `gh release edit <tag> --repo Devyre/Cli-Proxy-API-Management-Center --latest`, delete `%USERPROFILE%\.cli-proxy-api\static\management.html`, then restart the container.
+- **Panel:** run `devyre\scripts\update-panel.ps1 -Tag <previous tag>` or `git revert` the commit that embedded the panel, commit, then run `up.ps1`. Rolling the server image back also rolls back the panel built into it.
 
 ### Back up
 
@@ -744,7 +746,7 @@ Run `devyre\scripts\backup.ps1`. It writes `config.yaml`, `auths\` and `secrets\
 | Symptom | Fix |
 |---|---|
 | `IP banned …` | Wait 30 min or restart the container; check that client keys and the T3 hub key are correct (F13) |
-| Panel shows the stock UI | `panel-github-repository` is wrong, or the static file was missing and the fallback fired. Fix the config, delete `static\management.html`, restart |
+| Panel shows an old version | The panel is the one built into the running image; the start-up log line `management panel: ...` names it. Run `update-panel.ps1`, commit, then `up.ps1`. A `MANAGEMENT_STATIC_PATH` that names a file wins over the built-in panel |
 | T3 hub "could not list accounts" | Check the URL has no path, the key is plaintext, `allow-remote: true`, and T3's machine can reach the ts.net URL |
 | Claude usage 429s | Raise `claude-usage-ttl` and `claude-min-gap`; avoid spamming manual refresh |
 | Clients fail while the PC sleeps | Use `claude-direct`. Long term, move the same compose file to an always-on Linux box (D9) |
@@ -787,7 +789,7 @@ Run `devyre\scripts\backup.ps1`. It writes `config.yaml`, `auths\` and `secrets\
 
 ### Config (`management.tailnet-auth`)
 
-Code defaults are all off or empty; the deploy template switches `enabled`, `allow-local` and `proxy-api` on and leaves the lists empty for `devyre/scripts/tailnet-trust.ps1` to fill.
+Code defaults are all off or empty; the deploy template switches `enabled` and `proxy-api` on, keeps `allow-local` off (other containers on this PC reach the loopback publish through `host.docker.internal`) and leaves the lists empty for `devyre/scripts/tailnet-trust.ps1` to fill.
 
 ```yaml
 management:
@@ -858,6 +860,25 @@ management:
 
 ---
 
+## 17. Addendum: Embedded panel (2026-10-13)
+
+**Request:** the panel fork is becoming private, so anonymous release downloads stop working, and nobody should have to configure a token. The deployment must be contained and fire-and-forget. User-facing documentation: `devyre/README.md`, "Embedded panel".
+
+The server fork moved the same day, to https://github.com/patchforgeai/CLIProxyAPI; the panel fork stays at https://github.com/Devyre/Cli-Proxy-API-Management-Center. This plan's commands use those addresses.
+
+### Decisions (do not relitigate)
+
+| # | Decision | Why |
+|---|---|---|
+| E1 | The panel fork's release asset is vendored as `internal/managementasset/devyre_panel/management.html`, byte for byte, with `panel.json` (version, source, sha256) next to it, and embedded with `go:embed` | Nothing to fetch, no token and no access to a private repository at run time. The panel is pinned per server commit and changes only through a reviewed commit |
+| E2 | The server never downloads or updates the panel. `serveManagementControlPanel` answers through `devyreServePanel`, `StartAutoUpdater` starts no updater, and `EnsureLatestManagementHTML` returns before any request. Upstream's downloader stays in place, still pointed at the panel fork | Small hunks keep syncs cheap, and the guard at the downloader's entry also covers callers upstream may add |
+| E3 | Upstream's `MANAGEMENT_STATIC_PATH`, when it names an existing file, is served instead of the built-in panel, and is never downloaded | An explicit operator choice that is handy for trying a panel build; upstream's own tests use it |
+| E4 | `-tags devyre_nopanel` leaves the panel out, and `/management.html` then answers 404 | Embedders that disable the control panel, such as a desktop app's sidecar, ship about 3 MB less |
+| E5 | `devyre/scripts/update-panel.ps1` refreshes the panel from a release, through the developer's own `gh` login and checked against the release's sha256 digest, or from a clean local build of a clone | One reviewed way to change the panel, and the record says where the bytes came from |
+| E6 | `TestDevyrePanel_*` check the record against the file and the embedded bytes against the file, that the nopanel build embeds nothing, and that serving makes no request and writes no file | A hand-edited file, or a sync that restores downloading, fails the tests |
+
+---
+
 ## Appendix A — `devyre/deploy/config.template.yaml`
 
 ```yaml
@@ -878,9 +899,7 @@ server:
 management:
   allow-remote: true                 # the container never sees loopback; panel and T3 hub arrive via tailscale
   secret-key: "__MANAGEMENT_KEY__"   # plaintext here; hashed in place on first start
-  disable-control-panel: false
-  disable-auto-update-panel: false   # verified-digest updates from our fork at start and every 3h
-  panel-github-repository: "https://github.com/Devyre/Cli-Proxy-API-Management-Center"
+  disable-control-panel: false       # the panel is built into the image; nothing is downloaded or auto-updated
 
 access:
   api-keys:
@@ -950,7 +969,7 @@ services:
     command: ["./CLIProxyAPI", "--config", "/data/config.yaml"]
     environment:
       TZ: ${CPA_TZ:-America/Los_Angeles}   # Go honors TZ at runtime (tzdata is in the image)
-      WRITABLE_PATH: /data                 # logs -> /data/logs, panel -> /data/static
+      WRITABLE_PATH: /data                 # logs -> /data/logs (the panel is built into the image)
     ports:
       - "127.0.0.1:8317:8317"     # API + panel (tailscale serve fronts this)
       - "127.0.0.1:54545:54545"   # Claude OAuth callback for panel logins from this PC
@@ -1096,7 +1115,7 @@ try {
   Remove-Item "$env:TEMP\cpa-build-check.exe" -ErrorAction SilentlyContinue
   go test ./...; if ($LASTEXITCODE) { throw 'tests failed' }
 } finally { Pop-Location }
-Write-Host "Green. Push $branch and open: gh pr create --repo Devyre/CLIProxyAPI --base main --head $branch"
+Write-Host "Green. Push $branch and open: gh pr create --repo patchforgeai/CLIProxyAPI --base main --head $branch"
 ```
 
 ## Appendix E — `devyre/clients/powershell-profile.ps1`

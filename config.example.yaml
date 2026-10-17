@@ -68,6 +68,8 @@ management:
   secret-key: ""
 
   # Disable the bundled management control panel asset download and HTTP route when true.
+  # devyre: this fork builds the panel into the binary and never downloads or updates it, so
+  # disable-auto-update-panel and panel-github-repository have no effect (devyre/README.md).
   disable-control-panel: false
 
   # Disable automatic periodic background updates of the management panel from GitHub (default: false).

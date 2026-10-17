@@ -7,7 +7,8 @@
 .DESCRIPTION
   Guided and stop-on-failure: requires a clean working tree, fast-forwards main from origin,
   creates sync/upstream-YYYYMMDD, merges upstream/main with --no-ff, then runs gofmt,
-  go build ./cmd/server and go test ./... . On merge conflicts it stops; resolve them per
+  go build ./cmd/server and go test ./..., then builds and tests the panel-less variant
+  (-tags devyre_nopanel) that embedders use. On merge conflicts it stops; resolve them per
   devyre/README.md ("Conflict hotspots"), commit, and run the checks by hand.
 #>
 [CmdletBinding()]
@@ -53,7 +54,7 @@ $upstreamSha = "$(Invoke-Git rev-parse --short upstream/main)".Trim()
 & git -C $repo merge --no-ff upstream/main -m "merge: upstream/main $upstreamSha"
 if ($LASTEXITCODE -ne 0) {
   throw ("Merge conflicts on $branch. Resolve them per devyre/README.md 'Conflict hotspots', commit, " +
-    'then run gofmt -l, go build ./cmd/server and go test ./... by hand.')
+    'then run the checks in devyre/README.md ("Sync with upstream") by hand.')
 }
 
 Push-Location $repo
@@ -68,14 +69,18 @@ try {
   $buildOutput = Join-Path $env:TEMP "cpa-build-check-$PID.exe"
   & go build -o $buildOutput ./cmd/server
   if ($LASTEXITCODE -ne 0) { throw 'go build ./cmd/server failed.' }
+  & go build -tags devyre_nopanel -o $buildOutput ./cmd/server
+  if ($LASTEXITCODE -ne 0) { throw 'go build -tags devyre_nopanel ./cmd/server failed.' }
   Remove-Item -LiteralPath $buildOutput -ErrorAction SilentlyContinue
 
   & go test ./...
   if ($LASTEXITCODE -ne 0) { throw 'go test ./... failed.' }
+  & go test -tags devyre_nopanel ./internal/managementasset/ ./internal/api/ -run DevyrePanel
+  if ($LASTEXITCODE -ne 0) { throw 'go test -tags devyre_nopanel -run DevyrePanel failed.' }
 } finally {
   Pop-Location
 }
 
 Write-Host "Green. Push $branch and open the PR against the fork, never upstream:"
 Write-Host "  git push -u origin $branch"
-Write-Host "  gh pr create --repo Devyre/CLIProxyAPI --base main --head $branch"
+Write-Host "  gh pr create --repo patchforgeai/CLIProxyAPI --base main --head $branch"

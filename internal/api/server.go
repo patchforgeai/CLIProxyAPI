@@ -254,6 +254,9 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if optionState.keepAliveEnabled {
 		s.enableKeepAlive(optionState.keepAliveTimeout, optionState.keepAliveOnTimeout)
 	}
+	if optionState.devyreKeepAliveProbe {
+		s.devyreEnableKeepAliveProbe() // devyre: the stdin lifeline's /keep-alive (devyre_lifeline.go)
+	}
 
 	// Create HTTP server
 	s.server = &http.Server{

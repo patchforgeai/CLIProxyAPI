@@ -13,8 +13,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
-// The Devyre fork serves the management panel from its own GitHub releases.
-// These tests fail if an upstream sync silently restores the stock panel source.
+// The Devyre fork builds its panel into the binary and never runs upstream's
+// downloader (devyre_panel.go). That code stays in place for clean syncs, still
+// pointed at the panel fork: these tests fail if an upstream sync silently
+// restores the stock panel source.
 
 const (
 	devyrePanelRepository = "https://github.com/Devyre/Cli-Proxy-API-Management-Center"
@@ -55,7 +57,7 @@ func TestDevyrePanelSource_FallbackNeverUsesStockPanel(t *testing.T) {
 		t.Fatalf("fallback URL %q must be an https github.com release download", defaultManagementFallbackURL)
 	}
 	if !strings.HasPrefix(parsed.Path, "/Devyre/Cli-Proxy-API-Management-Center/releases/") || !strings.HasSuffix(parsed.Path, "/"+managementAssetName) {
-		t.Fatalf("fallback URL %q must download %s from the Devyre panel releases", defaultManagementFallbackURL, managementAssetName)
+		t.Fatalf("fallback URL %q must download %s from the panel fork's releases", defaultManagementFallbackURL, managementAssetName)
 	}
 	for _, stock := range []string{"router-for", "cpamc."} {
 		if strings.Contains(strings.ToLower(defaultManagementFallbackURL), stock) {

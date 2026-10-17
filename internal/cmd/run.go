@@ -46,7 +46,10 @@ func StartServiceWithPluginHost(cfg *config.Config, configPath string, localPass
 	defer cancel()
 
 	runCtx := ctxSignal
-	if localPassword != "" {
+	if lifelineInput != nil {
+		// devyre: a supervisor's stdin lifeline replaces the keep-alive idle limit (devyre_lifeline.go).
+		runCtx, builder = devyreWithLifeline(ctxSignal, builder, lifelineInput, localPassword)
+	} else if localPassword != "" {
 		var keepAliveCancel context.CancelFunc
 		runCtx, keepAliveCancel = context.WithCancel(ctxSignal)
 		builder = builder.WithServerOptions(api.WithKeepAliveEndpoint(10*time.Second, func() {

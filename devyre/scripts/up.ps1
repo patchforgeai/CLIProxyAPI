@@ -103,13 +103,13 @@ while (-not (Test-CpaUrl 'http://127.0.0.1:8317/healthz')) {
   Start-Sleep -Seconds 2
 }
 
-# The first request downloads the panel from the Devyre panel fork's latest release.
-$deadline = (Get-Date).AddSeconds(90)
+# The panel is built into the image (internal/managementasset/devyre_panel); nothing is downloaded.
+$deadline = (Get-Date).AddSeconds(30)
 while (-not (Test-CpaUrl 'http://127.0.0.1:8317/management.html')) {
   if ((Get-Date) -gt $deadline) {
     & docker logs --tail 80 cpa
-    throw ('CPA is up but did not serve management.html within 90s (logs above). Check ' +
-      'management.panel-github-repository and that the panel fork has a release with management.html.')
+    throw ('CPA is up but did not serve management.html within 30s (logs above). Check that ' +
+      'management.disable-control-panel is false in config.yaml.')
   }
   Start-Sleep -Seconds 3
 }

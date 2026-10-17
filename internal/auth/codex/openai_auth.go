@@ -65,6 +65,11 @@ func NewCodexAuthWithProxyURL(cfg *config.Config, proxyURL string) *CodexAuth {
 // It constructs the URL with the necessary parameters, including the client ID,
 // response type, redirect URI, scopes, and PKCE challenge.
 func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string, error) {
+	// devyre: GenerateAuthURLWithRedirect (devyre_redirect.go) passes another loopback redirect.
+	return o.generateAuthURL(state, pkceCodes, RedirectURI)
+}
+
+func (o *CodexAuth) generateAuthURL(state string, pkceCodes *PKCECodes, redirectURI string) (string, error) {
 	if pkceCodes == nil {
 		return "", fmt.Errorf("PKCE codes are required")
 	}
@@ -72,7 +77,7 @@ func (o *CodexAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string,
 	params := url.Values{
 		"client_id":                  {ClientID},
 		"response_type":              {"code"},
-		"redirect_uri":               {RedirectURI},
+		"redirect_uri":               {redirectURI},
 		"scope":                      {"openid email profile offline_access"},
 		"state":                      {state},
 		"code_challenge":             {pkceCodes.CodeChallenge},
