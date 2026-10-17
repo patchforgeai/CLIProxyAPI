@@ -558,8 +558,8 @@ foreach ($name in $flagKeys) {
     $policy[$name] = Get-BlockFlag $liveBlock $name
     $notes[$name] = 'kept from the live config'
   } else {
-    # allow-local starts off: containers on this PC reach the loopback publish through
-    # host.docker.internal and would count as local. This PC uses the tailnet URL instead.
+    # allow-local starts off: in the container every request comes through the Docker
+    # gateway, which hides who sent it, so it would trust nothing. This PC uses the tailnet URL.
     $policy[$name] = ($name -ne 'allow-local')
     $notes[$name] = 'deploy-template default for a new block'
   }

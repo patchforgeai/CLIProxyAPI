@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -109,15 +110,27 @@ func tailnetTrusted(path string) tailnetTestRequest {
 	}
 }
 
-// tailnetLocal is a direct request from this PC to the published loopback port.
+// tailnetLocal is a direct request to the loopback port from a program of this server's own OS
+// user (CPA running natively). It travels over a real loopback connection from this test's
+// process (an empty peer), so the server can ask the OS who sent it.
 func tailnetLocal(path string) tailnetTestRequest {
 	return tailnetTestRequest{
 		method: http.MethodGet,
 		path:   path,
-		peer:   tailnetTestGateway,
 		host:   "127.0.0.1:8317",
 		header: map[string]string{"X-CPA-Keyless": "1"},
 	}
+}
+
+// tailnetGatewayLocal is the local request through the Docker gateway (CPA in a container,
+// reached on its loopback publish): any program on the PC, or a container, could have sent it.
+func tailnetGatewayLocal(path string) tailnetTestRequest {
+	return tailnetLocal(path).withPeer(tailnetTestGateway)
+}
+
+// localTrustSupported: where the OS says which user owns a loopback connection.
+func localTrustSupported() bool {
+	return runtime.GOOS == "windows" || runtime.GOOS == "linux"
 }
 
 func (r tailnetTestRequest) with(name, value string) tailnetTestRequest {
@@ -140,6 +153,9 @@ func (r tailnetTestRequest) withPeer(peer string) tailnetTestRequest {
 }
 
 func (r tailnetTestRequest) serve(router *gin.Engine) *httptest.ResponseRecorder {
+	if r.peer == "" {
+		return r.serveDirect(router)
+	}
 	req := httptest.NewRequest(r.method, r.path, nil)
 	req.RemoteAddr = r.peer
 	req.Host = r.host
@@ -148,6 +164,36 @@ func (r tailnetTestRequest) serve(router *gin.Engine) *httptest.ResponseRecorder
 	}
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
+	return rec
+}
+
+// serveDirect sends the request to router over a real loopback connection from this process.
+func (r tailnetTestRequest) serveDirect(router *gin.Engine) *httptest.ResponseRecorder {
+	server := httptest.NewServer(router)
+	defer server.Close()
+	rec := httptest.NewRecorder()
+	req, errRequest := http.NewRequest(r.method, server.URL+r.path, nil)
+	if errRequest != nil {
+		rec.WriteHeader(http.StatusTeapot)
+		_, _ = rec.WriteString(errRequest.Error())
+		return rec
+	}
+	req.Host = r.host
+	for name, value := range r.header {
+		req.Header.Set(name, value)
+	}
+	response, errDo := http.DefaultTransport.RoundTrip(req)
+	if errDo != nil {
+		rec.WriteHeader(http.StatusTeapot)
+		_, _ = rec.WriteString(errDo.Error())
+		return rec
+	}
+	defer func() { _ = response.Body.Close() }()
+	for name, values := range response.Header {
+		rec.Header()[name] = values
+	}
+	rec.WriteHeader(response.StatusCode)
+	_, _ = io.Copy(rec, response.Body)
 	return rec
 }
 
@@ -168,15 +214,20 @@ func TestTailnetAuthMiddleware_TrustedRequestsSkipTheKey(t *testing.T) {
 	h := newTailnetTestHandler(t, nil)
 	router := newTailnetTestRouter(t, h)
 
-	for _, request := range []tailnetTestRequest{
+	trusted := []tailnetTestRequest{
 		tailnetTrusted("/v0/management/auth-files"),
 		tailnetTrusted("/v8/management/config"),
-		tailnetLocal("/v0/management/auth-files"),
-		tailnetLocal("/v8/management/config"),
 		// T3 Code's hub keeps sending whatever key it has; trust wins.
 		tailnetTrusted("/v0/management/auth-files").with("X-CPA-Keyless", "").with("Authorization", "Bearer stale-or-wrong-key"),
-		tailnetLocal("/v8/management/config").with("X-CPA-Keyless", "").with("Authorization", "Bearer "+tailnetTestKey),
-	} {
+	}
+	if localTrustSupported() {
+		trusted = append(trusted,
+			tailnetLocal("/v0/management/auth-files"),
+			tailnetLocal("/v8/management/config"),
+			tailnetLocal("/v8/management/config").with("X-CPA-Keyless", "").with("Authorization", "Bearer stale-or-wrong-key"),
+		)
+	}
+	for _, request := range trusted {
 		rec := request.serve(router)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s from %s: status = %d, want 200; body = %s", request.path, request.host, rec.Code, rec.Body.String())
@@ -192,6 +243,22 @@ func TestTailnetAuthMiddleware_TrustedRequestsSkipTheKey(t *testing.T) {
 	}
 	if failures := h.tailnetTestFailures(); failures != 0 {
 		t.Fatalf("trusted requests touched the failure counter: %d", failures)
+	}
+}
+
+// Through the Docker gateway every program on the PC and every container look the same, so a
+// loopback Host there never earns local trust, with allow-local on and the request well formed.
+func TestTailnetAuthMiddleware_LocalTrustNeverComesThroughAProxy(t *testing.T) {
+	h := newTailnetTestHandler(t, nil)
+	router := newTailnetTestRouter(t, h)
+	for _, path := range []string{"/v0/management/auth-files", "/v8/management/config", "/v8/management/auth/session"} {
+		rec := tailnetGatewayLocal(path).serve(router)
+		if rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "missing management key") {
+			t.Fatalf("%s through the gateway: status = %d body = %s, want 401", path, rec.Code, rec.Body.String())
+		}
+		if rec = tailnetGatewayLocal(path).with("X-CPA-Keyless", "").with("X-Management-Key", tailnetTestKey).serve(router); rec.Code != http.StatusOK {
+			t.Fatalf("%s through the gateway with the key: status = %d, want 200", path, rec.Code)
+		}
 	}
 }
 
@@ -262,7 +329,10 @@ func TestTailnetAuthMiddleware_AllowRemoteOffLimitsTrustToLoopbackClients(t *tes
 	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "remote management disabled") {
 		t.Fatalf("tailnet request with allow-remote off: status = %d body = %s, want 403 remote management disabled", rec.Code, rec.Body.String())
 	}
-	native := tailnetLocal("/v8/management/config").withPeer("127.0.0.1:50000") // CPA running natively, not in Docker
+	if !localTrustSupported() {
+		return
+	}
+	native := tailnetLocal("/v8/management/config") // CPA running natively, not in Docker
 	if rec := native.serve(router); rec.Code != http.StatusOK {
 		t.Fatalf("loopback client with allow-remote off: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
@@ -349,15 +419,18 @@ func TestGetAuthSession_ReportsHowTheRequestAuthenticated(t *testing.T) {
 	router := newTailnetTestRouter(t, h)
 	const path = "/v8/management/auth/session"
 
-	cases := []struct {
+	type sessionCase struct {
 		name    string
 		request tailnetTestRequest
 		want    authSessionResponse
-	}{
+	}
+	cases := []sessionCase{
 		{"tailnet", tailnetTrusted(path), authSessionResponse{Authenticated: true, Method: "tailnet", Login: tailnetTestLogin, Device: tailnetTestDevice}},
 		{"tagged device", tailnetTrusted(path).with("Tailscale-User-Login", "").with("Tailscale-User-Name", ""), authSessionResponse{Authenticated: true, Method: "tailnet", Device: tailnetTestDevice}},
-		{"local", tailnetLocal(path), authSessionResponse{Authenticated: true, Method: "local"}},
 		{"key", tailnetTrusted(path).with("X-Forwarded-For", tailnetTestUnlisted).with("Authorization", "Bearer "+tailnetTestKey), authSessionResponse{Authenticated: true, Method: "key"}},
+	}
+	if localTrustSupported() {
+		cases = append(cases, sessionCase{"local", tailnetLocal(path), authSessionResponse{Authenticated: true, Method: "local"}})
 	}
 	for _, tc := range cases {
 		rec := tc.request.serve(router)
@@ -562,8 +635,12 @@ func TestTailnetAuthMiddleware_DebugLogsShowTheDecision(t *testing.T) {
 	expect("tailnet", router, tailnetTrusted("/v8/management/config").with("Authorization", "Bearer stale-or-wrong-key"), http.StatusOK,
 		"[debug]", `tailnet-auth: management GET "/v8/management/config" trusted without a key`,
 		`via=tailnet login="`+tailnetTestLogin+`" device=`+tailnetTestDevice, `reason="allowed tailnet device"`)
-	expect("local", router, tailnetLocal("/v0/management/auth-files"), http.StatusOK,
-		`management GET "/v0/management/auth-files" trusted without a key, via=local`, `reason="direct request from this PC"`)
+	if localTrustSupported() {
+		expect("local", router, tailnetLocal("/v0/management/auth-files"), http.StatusOK,
+			`management GET "/v0/management/auth-files" trusted without a key, via=local`, `reason="direct request from this server's user"`)
+	}
+	expect("local through the gateway", router, tailnetGatewayLocal("/v0/management/auth-files"), http.StatusUnauthorized,
+		`management GET "/v0/management/auth-files" needs the key`, `came through a proxy`)
 	expect("unlisted device", router, tailnetTrusted("/v8/management/config").with("X-Forwarded-For", tailnetTestUnlisted), http.StatusUnauthorized,
 		`management GET "/v8/management/config" needs the key`, `reason="device not in allowed-devices"`)
 	expect("control characters in the path", router, tailnetTrusted("/v8/management/files/a%0Aforged"), http.StatusOK,

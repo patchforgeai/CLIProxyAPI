@@ -20,7 +20,11 @@
 //   - Inside the container every request, from serve, from a browser on this PC or
 //     from another container, arrives from the Docker bridge gateway. Anything that
 //     reaches 127.0.0.1:8317 can therefore forge every header above; the decision
-//     narrows that (loopback Hosts never accept proxy headers) but cannot remove it.
+//     narrows that (loopback Hosts never accept proxy headers) but cannot remove it:
+//     the tailnet path trusts every local process that learns the right headers.
+//   - Only a direct loopback connection can be traced to a process, and the OS says
+//     which user runs it (peer.go). The local path is therefore bound to a direct
+//     peer of this server's own OS user, and a proxied request is never local.
 //   - A browser cannot set Host: it always names the port the browser connected
 //     to. The tailnet path is therefore bound to serve's port. A page that gets
 //     the tailnet name resolved to 127.0.0.1 (DNS rebinding while Tailscale's DNS
@@ -34,6 +38,7 @@
 package tailnetauth
 
 import (
+	"errors"
 	"mime"
 	"net/http"
 	"net/netip"
@@ -125,6 +130,10 @@ type Request struct {
 	Host string
 	// Header holds the request headers.
 	Header http.Header
+	// PeerIsThisUser reports whether the direct peer's process runs as this server's OS user
+	// (PeerRunsAsThisUser). Decide calls it only when the local path would otherwise trust the
+	// request. Nil means unknown, which never earns local trust.
+	PeerIsThisUser func() (bool, error)
 }
 
 // FromHTTP builds a Request from r and its direct TCP peer IP.
@@ -132,7 +141,7 @@ func FromHTTP(peerIP string, r *http.Request) Request {
 	if r == nil {
 		return Request{PeerIP: peerIP}
 	}
-	return Request{PeerIP: peerIP, Host: r.Host, Header: r.Header}
+	return Request{PeerIP: peerIP, Host: r.Host, Header: r.Header, PeerIsThisUser: peerCheck(r)}
 }
 
 // Decision is the outcome of Decide. Login and Device are set only for a trusted
@@ -226,13 +235,16 @@ func Decide(p Policy, r Request) Decision {
 	// AM4: the Host class picks the only path that can apply. Loopback names may
 	// be listed without a port; the local path does not look at it.
 	if isLoopbackHost(host.name) {
-		return decideLocal(p, header)
+		return decideLocal(p, peer, r.PeerIsThisUser, header)
 	}
 	return decideTailnet(p, host, header)
 }
 
-// decideLocal is rule R7 for a loopback Host.
-func decideLocal(p Policy, header http.Header) Decision {
+// decideLocal is rule R7 for a loopback Host: a direct request from a process of this server's
+// own OS user. Through a proxy (the Docker gateway) every program on the machine and every
+// container look the same, and so do other users' programs on a direct connection unless the OS
+// says otherwise, so neither is ever trusted as local.
+func decideLocal(p Policy, peer netip.Addr, peerIsThisUser func() (bool, error), header http.Header) Decision {
 	for _, name := range proxyHeaders {
 		if len(header.Values(name)) > 0 {
 			return deny(textproto.CanonicalMIMEHeaderKey(name) + " on a loopback Host")
@@ -246,7 +258,22 @@ func decideLocal(p Policy, header http.Header) Decision {
 	if !p.AllowLocal {
 		return deny("allow-local is off")
 	}
-	return Decision{Trusted: true, Method: MethodLocal, Reason: "direct request from this PC"}
+	if !peer.IsLoopback() {
+		return deny("local trust needs a direct loopback connection, and this one came through a proxy")
+	}
+	if peerIsThisUser == nil {
+		return deny("the local peer's process is unknown")
+	}
+	same, err := peerIsThisUser()
+	switch {
+	case errors.Is(err, errors.ErrUnsupported):
+		return deny("this system does not say which user a local connection belongs to")
+	case err != nil:
+		return deny("the local peer's user is unknown: " + err.Error())
+	case !same:
+		return deny("the local peer is another OS user's process")
+	}
+	return Decision{Trusted: true, Method: MethodLocal, Reason: "direct request from this server's user"}
 }
 
 // decideTailnet is rule R6 for a tailnet Host.

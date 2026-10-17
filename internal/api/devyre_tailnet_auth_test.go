@@ -3,8 +3,10 @@ package api
 // Full-stack tests for management.tailnet-auth: the real NewServer, a config file
 // loaded by the real loader, and requests shaped exactly like tailscale serve
 // forwards them (Docker gateway peer, X-Forwarded-For, X-Forwarded-Host and
-// Tailscale-User-* headers) or like a direct request on this PC. Every value is
-// fake: a CGNAT tailnet range, an example.com login and an example tailnet name.
+// Tailscale-User-* headers) or like a direct request on this PC, which travels
+// over a real loopback connection from this test's process so the server can ask
+// the OS which user sent it. Every value is fake: a CGNAT tailnet range, an
+// example.com login and an example tailnet name.
 
 import (
 	"context"
@@ -15,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -58,9 +61,31 @@ const tailnetSrvBlock = `  tailnet-auth:
 `
 
 type tailnetSrvFixture struct {
+	t          *testing.T
 	server     *Server
 	configPath string
 	authDir    string
+	// direct serves the same engine on a real loopback listener, for "local" requests.
+	direct *httptest.Server
+}
+
+// directPeer marks a request that goes over a real loopback connection from this process: a
+// program of the server's own OS user on the same machine, the only peer the local path trusts.
+const directPeer = "direct"
+
+// localTrustSupported: where the OS says which user owns a loopback connection
+// (tailnetauth.PeerRunsAsThisUser), so a direct request of this user can be trusted as local.
+func localTrustSupported() bool {
+	return runtime.GOOS == "windows" || runtime.GOOS == "linux"
+}
+
+// trustedShapes are the request shapes trusted without a key here: the tailnet one, and the
+// direct local one where local trust exists.
+func trustedShapes() []string {
+	if localTrustSupported() {
+		return []string{"tailnet", "local"}
+	}
+	return []string{"tailnet"}
 }
 
 // newTailnetSrvFixture writes a v8 config with the given tailnet-auth block (two
@@ -112,17 +137,20 @@ oauth:
 		mutate(cfg)
 	}
 	server := NewServer(cfg, auth.NewManager(nil, nil, nil), sdkaccess.NewManager(), configPath, opts...)
-	return &tailnetSrvFixture{server: server, configPath: configPath, authDir: authDir}
+	return &tailnetSrvFixture{t: t, server: server, configPath: configPath, authDir: authDir}
 }
 
 // tailnetSrvRequest builds a request of one of these shapes:
 //
-//	tailnet  - an allowed device of the owner through tailscale serve, with X-CPA-Keyless
-//	local    - a direct request on this PC to 127.0.0.1:8317, with X-CPA-Keyless
-//	origin   - the tailnet shape sent cross-origin (Origin: http://evil.example)
-//	device   - the tailnet shape from a device that is not in allowed-devices
-//	signal   - the tailnet shape without Origin and without any non-browser signal
-//	plain    - no proxy headers, no signal, Host 127.0.0.1:8317 (curl without a key)
+//	tailnet       - an allowed device of the owner through tailscale serve, with X-CPA-Keyless
+//	local         - a direct request to 127.0.0.1:8317 from a program of this user, with
+//	                X-CPA-Keyless (CPA running natively, not in a container)
+//	gateway-local - the local shape through the Docker gateway (CPA in a container, reached on
+//	                its loopback publish): any program on the PC, or a container, could send it
+//	origin        - the tailnet shape sent cross-origin (Origin: http://evil.example)
+//	device        - the tailnet shape from a device that is not in allowed-devices
+//	signal        - the tailnet shape without Origin and without any non-browser signal
+//	plain         - no proxy headers, no signal, Host 127.0.0.1:8317 (curl without a key)
 func tailnetSrvRequest(t *testing.T, shape, method, path, body string) *http.Request {
 	t.Helper()
 	var reader io.Reader
@@ -146,6 +174,10 @@ func tailnetSrvRequest(t *testing.T, shape, method, path, body string) *http.Req
 	case "tailnet":
 		tailnet()
 	case "local":
+		req.RemoteAddr = directPeer
+		req.Host = "127.0.0.1:8317"
+		req.Header.Set("X-CPA-Keyless", "1")
+	case "gateway-local":
 		req.Host = "127.0.0.1:8317"
 		req.Header.Set("X-CPA-Keyless", "1")
 	case "origin":
@@ -166,8 +198,42 @@ func tailnetSrvRequest(t *testing.T, shape, method, path, body string) *http.Req
 }
 
 func (f *tailnetSrvFixture) serve(req *http.Request) *httptest.ResponseRecorder {
+	if req.RemoteAddr == directPeer {
+		return f.serveDirect(req)
+	}
 	rec := httptest.NewRecorder()
 	f.server.engine.ServeHTTP(rec, req)
+	return rec
+}
+
+// serveDirect sends req over a real loopback connection to the same engine, and records the
+// answer as serve does.
+func (f *tailnetSrvFixture) serveDirect(req *http.Request) *httptest.ResponseRecorder {
+	t := f.t
+	t.Helper()
+	if f.direct == nil {
+		f.direct = httptest.NewServer(f.server.engine)
+		t.Cleanup(f.direct.Close)
+	}
+	out, errRequest := http.NewRequest(req.Method, f.direct.URL+req.URL.RequestURI(), req.Body)
+	if errRequest != nil {
+		t.Fatalf("direct request: %v", errRequest)
+	}
+	out.Host = req.Host
+	out.Header = req.Header.Clone()
+	response, errDo := http.DefaultTransport.RoundTrip(out)
+	if errDo != nil {
+		t.Fatalf("direct request: %v", errDo)
+	}
+	defer func() { _ = response.Body.Close() }()
+	rec := httptest.NewRecorder()
+	for name, values := range response.Header {
+		rec.Header()[name] = values
+	}
+	rec.WriteHeader(response.StatusCode)
+	if _, errCopy := io.Copy(rec, response.Body); errCopy != nil {
+		t.Fatalf("direct response: %v", errCopy)
+	}
 	return rec
 }
 
@@ -217,13 +283,13 @@ func TestTailnetAuthServer_TokenBearingRoutes(t *testing.T) {
 		{http.MethodGet, "/v0/management/auth-files", "", nil},
 	}
 	for _, route := range routes {
-		for _, shape := range []string{"origin", "device", "signal", "plain"} {
+		for _, shape := range []string{"origin", "device", "signal", "plain", "gateway-local"} {
 			rec := f.serve(tailnetSrvRequest(t, shape, route.method, route.path, route.body))
 			if rec.Code != http.StatusUnauthorized {
 				t.Fatalf("%s %s (%s, no key): status = %d, want 401; body = %s", route.method, route.path, shape, rec.Code, rec.Body.String())
 			}
 		}
-		for _, shape := range []string{"tailnet", "local"} {
+		for _, shape := range trustedShapes() {
 			rec := f.serve(tailnetSrvRequest(t, shape, route.method, route.path, route.body))
 			if rec.Code != http.StatusOK {
 				t.Fatalf("%s %s (%s, no key): status = %d, want 200; body = %s", route.method, route.path, shape, rec.Code, rec.Body.String())
@@ -297,7 +363,7 @@ func TestTailnetAuthServer_TailnetNameOnTheAPIPortIsNotTrusted(t *testing.T) {
 // source the request is trusted and the key is ignored.
 func TestTailnetAuthServer_T3HubAnyKeyFromTrustedSources(t *testing.T) {
 	f := newTailnetSrvFixture(t, tailnetSrvBlock, nil)
-	for _, shape := range []string{"tailnet", "local"} {
+	for _, shape := range trustedShapes() {
 		for _, key := range []string{tailnetSrvKey, "stale-hub-key"} {
 			req := tailnetSrvRequest(t, shape, http.MethodGet, "/v0/management/auth-files", "")
 			req.Header.Del("X-CPA-Keyless")
@@ -329,9 +395,15 @@ func TestTailnetAuthServer_SessionEndpoint(t *testing.T) {
 	if status != http.StatusOK || body["authenticated"] != true || body["method"] != "tailnet" || body["login"] != tailnetSrvLogin || body["device"] != tailnetSrvDevice {
 		t.Fatalf("tailnet session: %d %v", status, body)
 	}
-	status, body = session(tailnetSrvRequest(t, "local", http.MethodGet, path, ""))
-	if status != http.StatusOK || body["method"] != "local" || body["login"] != "" || body["device"] != "" {
-		t.Fatalf("local session: %d %v", status, body)
+	if localTrustSupported() {
+		status, body = session(tailnetSrvRequest(t, "local", http.MethodGet, path, ""))
+		if status != http.StatusOK || body["method"] != "local" || body["login"] != "" || body["device"] != "" {
+			t.Fatalf("local session: %d %v", status, body)
+		}
+	}
+	// Through the Docker gateway any program on the PC, or a container, could have sent it.
+	if status, _ = session(tailnetSrvRequest(t, "gateway-local", http.MethodGet, path, "")); status != http.StatusUnauthorized {
+		t.Fatalf("local session through the gateway: status = %d, want 401", status)
 	}
 	keyed := tailnetSrvRequest(t, "device", http.MethodGet, path, "")
 	keyed.Header.Set("X-Management-Key", tailnetSrvKey)
@@ -486,10 +558,12 @@ func TestTailnetAuthServer_ProxyAPIPrincipal(t *testing.T) {
 	if status, got = call(ipv6); status != http.StatusOK || got.Principal != "tailnet:"+tailnetSrvLogin+"@fd7a:115c:a1e0::10" {
 		t.Fatalf("IPv6 device: %d %+v", status, got)
 	}
-	if status, got = call(request("local", "")); status != http.StatusOK || got.Principal != "local" || got.Provider != "tailnet-auth" || got.Metadata["source"] != "local" {
-		t.Fatalf("local: %d %+v", status, got)
+	if localTrustSupported() {
+		if status, got = call(request("local", "")); status != http.StatusOK || got.Principal != "local" || got.Provider != "tailnet-auth" || got.Metadata["source"] != "local" {
+			t.Fatalf("local: %d %+v", status, got)
+		}
 	}
-	for _, shape := range []string{"origin", "device", "signal", "plain"} {
+	for _, shape := range []string{"origin", "device", "signal", "plain", "gateway-local"} {
 		if status, _ = call(request(shape, "")); status != http.StatusUnauthorized {
 			t.Fatalf("untrusted %s without a key: status = %d, want 401", shape, status)
 		}
@@ -505,8 +579,13 @@ func TestTailnetAuthServer_ProxyAPIPrincipal(t *testing.T) {
 	if rec := f.serve(tailnetSrvRequest(t, "device", http.MethodGet, "/v1/models", "")); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("GET /v1/models untrusted without a key: status = %d, want 401", rec.Code)
 	}
-	if rec := f.serve(tailnetSrvRequest(t, "local", http.MethodGet, "/v1beta/models", "")); rec.Code != http.StatusOK {
-		t.Fatalf("GET /v1beta/models local without a key: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	if localTrustSupported() {
+		if rec := f.serve(tailnetSrvRequest(t, "local", http.MethodGet, "/v1beta/models", "")); rec.Code != http.StatusOK {
+			t.Fatalf("GET /v1beta/models local without a key: status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+		}
+	}
+	if rec := f.serve(tailnetSrvRequest(t, "gateway-local", http.MethodGet, "/v1beta/models", "")); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /v1beta/models through the gateway without a key: status = %d, want 401", rec.Code)
 	}
 }
 
@@ -585,7 +664,7 @@ func TestDevyreKeylessProxyAccess_RequiresA401(t *testing.T) {
 func TestTailnetAuthServer_ProxyAPIOffKeepsKeysRequired(t *testing.T) {
 	block := strings.Replace(tailnetSrvBlock, "proxy-api: true", "proxy-api: false", 1)
 	f := newTailnetSrvFixture(t, block, nil)
-	for _, shape := range []string{"tailnet", "local"} {
+	for _, shape := range trustedShapes() {
 		if rec := f.serve(tailnetSrvRequest(t, shape, http.MethodGet, "/v1/models", "")); rec.Code != http.StatusUnauthorized {
 			t.Fatalf("%s /v1/models with proxy-api off: status = %d, want 401", shape, rec.Code)
 		}
@@ -797,6 +876,9 @@ func TestTailnetAuthServer_ProxyDebugLogsShowTheDecision(t *testing.T) {
 	expect("tailnet", http.StatusOK, "[debug]",
 		`tailnet-auth: proxy GET "/v1/models" trusted without an API key, via=tailnet login="`+tailnetSrvLogin+`" device=`+tailnetSrvDevice,
 		`reason="allowed tailnet device"`)
-	expect("local", http.StatusOK, `proxy GET "/v1/models" trusted without an API key, via=local`, `reason="direct request from this PC"`)
+	if localTrustSupported() {
+		expect("local", http.StatusOK, `proxy GET "/v1/models" trusted without an API key, via=local`, `reason="direct request from this server's user"`)
+	}
+	expect("gateway-local", http.StatusUnauthorized, `proxy GET "/v1/models" needs an API key`, `came through a proxy`)
 	expect("device", http.StatusUnauthorized, `proxy GET "/v1/models" needs an API key`, `reason="device not in allowed-devices"`)
 }

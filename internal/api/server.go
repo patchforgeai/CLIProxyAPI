@@ -105,6 +105,8 @@ type Server struct {
 
 	exampleAPIKeySafeModeEnabled bool
 	exampleAPIKeySafeModeActive  atomic.Bool
+
+	devyre devyreServerState // devyre: the fork's own server settings (devyre_lifeline.go)
 }
 
 // NewServer creates and initializes a new API server instance.
@@ -257,6 +259,7 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	if optionState.devyreKeepAliveProbe {
 		s.devyreEnableKeepAliveProbe() // devyre: the stdin lifeline's /keep-alive (devyre_lifeline.go)
 	}
+	s.devyre.listenReport = optionState.devyreListenReport // devyre: the lifeline's listening line
 
 	// Create HTTP server
 	s.server = &http.Server{
@@ -297,6 +300,7 @@ func (s *Server) Start() error {
 	addr := s.server.Addr
 	listener, errListen := net.Listen("tcp", addr)
 	if errListen != nil {
+		s.devyreReportListen(addr, errListen) // devyre: the lifeline's listening line (devyre_lifeline.go)
 		return fmt.Errorf("failed to start HTTP server: %v", errListen)
 	}
 
@@ -333,6 +337,8 @@ func (s *Server) Start() error {
 		log.Debugf("Starting API server on %s", addr)
 	}
 
+	// devyre: the lifeline's listening line, before the first connection is accepted.
+	s.devyreReportListen(listener.Addr().String(), nil)
 	httpListener := newMuxListener(listener.Addr(), 1024)
 	s.listenerMu.Lock()
 	s.muxBaseListener = listener

@@ -23,13 +23,14 @@
       (SKIP when none of this PC's Tailscale IPs is in allowed-devices)
     - the same request without Origin and without a keyless signal is 401
     - the same request with Origin: http://evil.example is 401 or 403
-    - direct http://127.0.0.1:8317 behaves as allow-local says, and forged tailnet headers or a
-      foreign Origin on it are refused
+    - direct http://127.0.0.1:8317 without a key is refused whatever allow-local says (it reaches
+      the container through the Docker gateway, which hides which program sent it; allow-local on
+      is a WARN), and so are forged tailnet headers or a foreign Origin on it
     - a direct request to http://127.0.0.1:8317 with this PC's tailnet name as Host (on 8317, or
       without a port), a listed X-Forwarded-For and X-CPA-Keyless is refused: that is what a web
       page sends after getting the tailnet name resolved to 127.0.0.1
-    - WARN only: whether a throwaway container from the local image, reaching
-      host.docker.internal:8317, is trusted as local
+    - with allow-local on: a throwaway container from the local image, reaching
+      host.docker.internal:8317, is not trusted as local
   A failed keyless probe lists its preconditions, including management.allow-remote: the server
   trusts a management request without a key only when allow-remote is on or the client is
   loopback, and inside the container no client is loopback.
@@ -440,8 +441,10 @@ if ($sessionMissing) {
     Report-Refusal 'cross-site' "over the tailnet, Origin $evilOrigin with X-CPA-Keyless" (Invoke-CpaHttp -Uri "$tailnetBase$sessionPath" -Headers @{ 'X-CPA-Keyless' = '1'; 'Origin' = $evilOrigin })
   }
 
-  # Direct requests on this PC: allow-local decides, and proxy markers on a loopback Host are
-  # forged by definition (tailscale serve only forwards the tailnet names).
+  # Direct requests on this PC reach the container through the Docker gateway, which hides
+  # which program (or container) sent them, so the server never trusts them as local, whatever
+  # allow-local says. Proxy markers on a loopback Host are forged by definition (tailscale serve
+  # only forwards the tailnet names).
   $apiHost = ''
   $apiPort = 0
   try {
@@ -451,21 +454,15 @@ if ($sessionMissing) {
   } catch {
     $apiHost = ''
   }
-  if (-not $configOk) {
-    Report 'SKIP' 'keyless-local' "the live config is unavailable, so the expected answer is unknown ($(Get-SessionText $localProbe))."
-  } elseif ($enabled -and $allowLocal -and (Test-CpaHostListed $allowedHosts $apiHost $apiPort)) {
-    if ($localProbe.Status -eq 200 -and (Get-SessionMethod $localProbe) -eq 'local') {
-      Report 'PASS' 'keyless-local' "direct $ApiBase with X-CPA-Keyless and no key: $(Get-SessionText $localProbe) (allow-local is on)"
-    } else {
-      Report 'FAIL' 'keyless-local' "direct $ApiBase with X-CPA-Keyless and no key: $(Get-SessionText $localProbe); allow-local is on, so 200 with method local was expected."
-      Write-Host '        Preconditions for keyless access from this PC:'
-      Write-Host "        (a) Docker gateway inside server.trusted-proxies: $gatewayText"
-      Write-Host "        (d) management.allow-remote is true (inside the container no client is loopback): $allowRemoteText"
-    }
-  } elseif ($localProbe.Status -eq 200) {
-    Report 'FAIL' 'keyless-local' "direct $ApiBase answered without a key although allow-local does not apply: $(Get-SessionText $localProbe)"
+  if ($localProbe.Status -eq 200) {
+    Report 'FAIL' 'keyless-local' ("direct $ApiBase answered without a key: $(Get-SessionText $localProbe). A request through the " +
+      'Docker gateway may never be trusted as local; the server predates that rule, so run up.ps1.')
   } else {
-    Report-Refusal 'keyless-local' "with allow-local off (or $apiHost not in allowed-hosts), the direct keyless probe" $localProbe
+    Report-Refusal 'keyless-local' 'the direct keyless probe' $localProbe
+  }
+  if ($configOk -and $enabled -and $allowLocal) {
+    Report 'WARN' 'allow-local' ('allow-local is on but trusts nothing here: every request reaches the container through the Docker ' +
+      'gateway. Turn it off in the panel''s config editor and use the tailnet URL on this PC (devyre/README.md, Tailnet-only and passwordless).')
   }
   $forgedHeaders = @{ 'X-CPA-Keyless' = '1'; 'X-Forwarded-For' = '100.64.0.1'; 'Tailscale-User-Login' = 'probe@example.invalid' }
   if ($null -ne $self) {
@@ -509,8 +506,8 @@ if ($SkipContainerProbe) {
     $code = 0
     if ($statusLine -and $statusLine -match '^HTTP/\S+\s+(\d{3})') { $code = [int]$Matches[1] }
     if ($code -eq 200) {
-      Report 'WARN' 'containers' ('a throwaway container reached host.docker.internal:8317 and was trusted as local: every container on this PC ' +
-        'gets keyless admin access while allow-local is on (devyre/README.md, Tailnet-only and passwordless).')
+      Report 'FAIL' 'containers' ('a throwaway container reached host.docker.internal:8317 and was trusted as local: the server predates ' +
+        'the rule that nothing through the Docker gateway is local, so every container gets keyless admin access. Run up.ps1.')
     } elseif ($code -eq 401 -or $code -eq 403) {
       Report 'PASS' 'containers' "a container reaching host.docker.internal:8317 is not trusted (HTTP $code)"
     } else {

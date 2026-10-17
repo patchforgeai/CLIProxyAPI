@@ -93,7 +93,7 @@ management:
   #   allowed-logins: []      # Tailscale-User-Login values allowed without a key; empty = no tailnet trust at all.
   #   allowed-devices: []     # Tailnet IPs allowed without a key; empty = no tailnet device is keyless.
   #   allowed-hosts: []       # Request Hosts keyless requests may target; empty = none. List a tailnet name with serve's port (name:8318).
-  #   allow-local: false      # Trust direct requests from this PC whose Host is localhost, 127.0.0.1 or ::1.
+  #   allow-local: false      # Trust direct loopback requests (Host localhost, 127.0.0.1 or ::1) from the server's own OS user; never through a proxy (Windows and Linux only).
   #   proxy-api: false        # Also accept trusted requests on the proxy API without an API key.
 
 # Client authentication for the proxy API. These are not upstream provider keys.

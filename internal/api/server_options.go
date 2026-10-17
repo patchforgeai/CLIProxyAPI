@@ -23,6 +23,7 @@ type serverOptionConfig struct {
 	keepAliveTimeout      time.Duration
 	keepAliveOnTimeout    func()
 	devyreKeepAliveProbe  bool // devyre: /keep-alive without the idle limit (devyre_lifeline.go)
+	devyreListenReport    func(address string, err error)
 	postAuthHook          auth.PostAuthHook
 	postAuthPersistHook   auth.PostAuthHook
 	pluginHost            *pluginhost.Host

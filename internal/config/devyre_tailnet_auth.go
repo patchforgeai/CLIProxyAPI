@@ -32,9 +32,12 @@ type TailnetAuthConfig struct {
 	// without one. An empty list disables all keyless trust (fail closed).
 	AllowedHosts []string `yaml:"allowed-hosts" json:"allowed-hosts"`
 
-	// AllowLocal trusts direct requests from this PC: no X-Forwarded-For, no
-	// Tailscale-* headers, and a loopback Host (localhost, 127.0.0.1, ::1) that is
-	// also listed in AllowedHosts. Default: false.
+	// AllowLocal trusts direct requests from programs of this server's own OS
+	// user: no X-Forwarded-For, no Tailscale-* headers, a loopback Host (localhost,
+	// 127.0.0.1, ::1) that is also listed in AllowedHosts, a direct loopback TCP
+	// peer (never a trusted proxy such as the Docker gateway, which hides who sent
+	// the request), and a peer process the OS says runs as this server's user
+	// (Windows and Linux; elsewhere nothing is trusted as local). Default: false.
 	AllowLocal bool `yaml:"allow-local" json:"allow-local"`
 
 	// ProxyAPI also accepts trusted requests on the proxy API without an API key.

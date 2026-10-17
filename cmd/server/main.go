@@ -198,6 +198,11 @@ func main() {
 
 	// Parse the command-line flags.
 	flag.Parse()
+	// devyre: -password-stdin keeps the local password off the command line (devyre_lifeline.go).
+	if errPassword := devyreApplyPasswordStdin(&password); errPassword != nil {
+		log.Errorf("-password-stdin: %v", errPassword)
+		os.Exit(1)
+	}
 
 	if discoverGateways || discoverJSON {
 		cfgInclude, cfgExclude := cmd.LoadDiscoveryScanFilters(configPath)
@@ -970,7 +975,7 @@ func argvFlagConsumesValue(name string) bool {
 	case "codex-login", "codex-device-login", "claude-login", "no-browser",
 		"antigravity-login", "kimi-login", "kimi-ai-login", "xai-login", "devin-login", "meta-login",
 		"discover", "discover-json", "home-disable-cluster-discovery",
-		"tui", "standalone", "local-model", "lifeline-stdin":
+		"tui", "standalone", "local-model", "lifeline-stdin", "password-stdin":
 		return false
 	default:
 		return name != ""

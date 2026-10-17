@@ -375,7 +375,9 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 	}
 
 	if provided == "" {
-		// devyre: a missing key is not a guess, so it never counts toward the ban.
+		// devyre: a missing key is not a guess, so it never counts toward the ban: the panel's
+		// session probe, keyless clients and RESP's commands before AUTH (which ask with an
+		// empty key only to learn whether the IP is banned) never lock a client out.
 		return false, http.StatusUnauthorized, "missing management key"
 	}
 

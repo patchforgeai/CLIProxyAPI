@@ -1,6 +1,7 @@
 package tailnetauth
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,11 +47,16 @@ func tailnetRequest() Request {
 	return Request{PeerIP: testGateway, Host: testTailnetURL, Header: header}
 }
 
-// localRequest is a direct request from this PC to the published loopback port.
+// localRequest is a direct request to the loopback port from a process of this server's own OS
+// user (a server running natively, not in a container).
 func localRequest() Request {
 	header := http.Header{}
 	header.Set(KeylessHeader, "1")
-	return Request{PeerIP: testGateway, Host: "127.0.0.1:8317", Header: header}
+	return Request{PeerIP: "127.0.0.1", Host: "127.0.0.1:8317", Header: header, PeerIsThisUser: peerIs(true, nil)}
+}
+
+func peerIs(same bool, err error) func() (bool, error) {
+	return func() (bool, error) { return same, err }
 }
 
 type decideCase struct {
@@ -169,7 +175,40 @@ func TestDecide_R2_DirectPeer(t *testing.T) {
 		{name: "unmasked CIDR entry", policy: func(p *Policy) { p.TrustedProxies = []string{"172.19.0.9/16"} }, trusted: true, method: MethodTailnet, login: testLogin, device: testDevice},
 		{name: "IPv4-mapped CIDR entry", policy: func(p *Policy) { p.TrustedProxies = []string{"::ffff:172.16.0.0/108"} }, trusted: true, method: MethodTailnet, login: testLogin, device: testDevice},
 		{name: "local request from loopback peer", base: localRequest, request: peer("127.0.0.1"), trusted: true, method: MethodLocal},
+		{name: "local request from IPv6 loopback peer", base: localRequest, request: peer("::1"), trusted: true, method: MethodLocal},
 		{name: "local request from LAN peer", base: localRequest, request: peer("192.168.1.20"), reason: "trusted proxy"},
+	})
+}
+
+// R7: local trust is a direct loopback connection from a process of this server's own OS user.
+// Through a proxy (the Docker gateway) every program and container on the machine looks the
+// same, and another user's program is not this user's.
+func TestDecide_R7_LocalTrustIsThisServersUser(t *testing.T) {
+	peer := func(ip string) func(*Request) { return func(r *Request) { r.PeerIP = ip } }
+	failIfAsked := func(t *testing.T) func(*Request) {
+		return func(r *Request) {
+			r.PeerIsThisUser = func() (bool, error) {
+				t.Error("the peer's user was looked up for a request that was refused anyway")
+				return true, nil
+			}
+		}
+	}
+	runDecideCases(t, []decideCase{
+		{name: "through the Docker gateway", base: localRequest, request: peer(testGateway), reason: "came through a proxy"},
+		{name: "through the Docker Desktop VM network", base: localRequest, request: peer("192.168.65.1"), reason: "came through a proxy"},
+		{name: "another user's process", base: localRequest, request: func(r *Request) { r.PeerIsThisUser = peerIs(false, nil) }, reason: "another OS user's process"},
+		{name: "a process the server cannot place", base: localRequest, request: func(r *Request) { r.PeerIsThisUser = nil }, reason: "unknown"},
+		{name: "a system that does not say", base: localRequest, request: func(r *Request) { r.PeerIsThisUser = peerIs(true, errors.ErrUnsupported) }, reason: "does not say which user"},
+		{name: "a failed lookup", base: localRequest, request: func(r *Request) { r.PeerIsThisUser = peerIs(true, errors.New("table unreadable")) }, reason: "table unreadable"},
+	})
+	t.Run("asked only when it decides", func(t *testing.T) {
+		runDecideCases(t, []decideCase{
+			{name: "allow-local off", base: localRequest, policy: func(p *Policy) { p.AllowLocal = false }, request: failIfAsked(t), reason: "allow-local is off"},
+			{name: "through a proxy", base: localRequest, request: chain(peer(testGateway), failIfAsked(t)), reason: "came through a proxy"},
+			{name: "forged proxy header", base: localRequest, request: chain(setHeader("X-Forwarded-For", testDevice), failIfAsked(t)), reason: "on a loopback Host"},
+			{name: "cross-site", base: localRequest, request: chain(setHeader("Origin", "http://evil.example"), failIfAsked(t)), reason: "Origin"},
+			{name: "the tailnet path", request: failIfAsked(t), trusted: true, method: MethodTailnet, login: testLogin, device: testDevice},
+		})
 	})
 }
 
