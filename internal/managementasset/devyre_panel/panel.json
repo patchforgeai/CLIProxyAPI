@@ -1,5 +1,5 @@
 {
-  "version": "v1.25.3-devyre.2",
-  "source": "https://github.com/Devyre/Cli-Proxy-API-Management-Center/releases/tag/v1.25.3-devyre.2",
-  "sha256": "71a9e04b612f883c0f5a2360c8c87a58e13fe71ec6a8266e6f01132e8aea23f2"
+  "version": "v1.25.3-devyre.2-2-g192a12f",
+  "source": "local build of 192a12f790223740e790353296a2102c8eec070e",
+  "sha256": "6d2aeffc7421d1f7b8fa5ca827b871c3a51f808ff5e53c6e4b93d1620dd64c85"
 }
