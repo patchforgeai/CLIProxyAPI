@@ -28,6 +28,10 @@ const (
 	expiringFirstReasonLowHeadroom = "low-headroom"
 	expiringFirstReasonAllGated    = "all-gated"
 	expiringFirstReasonFocus       = "focus"
+	// A failover ranks both headroom pools by stay power.
+	expiringFirstReasonFailoverStayPower   = "failover-stay-power"
+	expiringFirstReasonFailoverLowHeadroom = "failover-low-headroom"
+	expiringFirstReasonFailoverAllGated    = "failover-all-gated"
 )
 
 // expiringFirstMaxRotationKeys bounds the round-robin cursors, like RoundRobinSelector.
@@ -59,13 +63,18 @@ const expiringFirstMaxRotationKeys = 4096
 // Candidates are first narrowed to the highest available priority tier, so
 // priority tiers keep their meaning. Wrapped by SessionAffinitySelector, a
 // bound session keeps its credential while it stays available; this selector
-// only places new and failed-over sessions.
+// only places new and failed-over sessions. A failover (placementFailover)
+// ranks the two headroom pools by stay power first: the lowest remaining
+// percent of the candidate's short windows divided by one plus its active
+// bindings, so sessions that leave one credential together spread over the
+// credentials that can carry them instead of all landing on the most urgent.
 //
 // A focused credential (routingfocus) overrides all of this: while it is among
 // the candidates and usable for the request's model, every pick is the focus,
-// whatever the urgencies, and SessionAffinitySelector moves bound sessions to
-// it (devyreFocusTakesOver). A gated focus, or one outside the candidates'
-// priority tier, is ignored and the pick proceeds as above.
+// whatever the urgencies, headroom or stay power, failovers included, and
+// SessionAffinitySelector moves bound sessions to it (devyreFocusTakesOver).
+// A gated focus, or one outside the candidates' priority tier, is ignored and
+// the pick proceeds as above.
 type ExpiringFirstSelector struct {
 	// GateRemainingPercent is the remaining percent at or below which a short,
 	// long or matching model-scoped window gates the credential. The routing
@@ -96,6 +105,10 @@ type expiringFirstCandidate struct {
 	auth     *Auth
 	eval     quotareading.Evaluation
 	headroom quotareading.Headroom
+	// bindings and stayPower are set for failovers: the credential's active
+	// bindings, and headroom.ShortRemaining / (1 + bindings).
+	bindings  int
+	stayPower float64
 }
 
 // expiringFirstTier is the pool a candidate is placed from; lower tiers come first.
@@ -125,13 +138,19 @@ func (c expiringFirstCandidate) tier() expiringFirstTier {
 // quota-readings endpoint (CompareExpiringFirstPlacement): negative when a is
 // placed before b, positive after, zero when they tie and picks take turns.
 // Tiers come first (expiringFirstTier); inside a tier, a higher known urgency
-// comes first, except among gated candidates, where the earlier gate reset does.
-func compareExpiringFirst(a, b expiringFirstCandidate) int {
+// comes first, except among gated candidates, where the earlier gate reset
+// does. A failover ranks the two headroom tiers by stay power before urgency.
+func compareExpiringFirst(a, b expiringFirstCandidate, failover bool) int {
 	if tierA, tierB := a.tier(), b.tier(); tierA != tierB {
 		return cmp.Compare(tierA, tierB)
 	}
-	if a.tier() == expiringFirstTierGated {
+	switch a.tier() {
+	case expiringFirstTierGated:
 		return a.eval.GateResetsAt.Compare(b.eval.GateResetsAt)
+	case expiringFirstTierUrgent, expiringFirstTierNoData:
+		if failover && a.stayPower != b.stayPower {
+			return cmp.Compare(b.stayPower, a.stayPower)
+		}
 	}
 	if a.eval.UrgencyKnown != b.eval.UrgencyKnown {
 		if a.eval.UrgencyKnown {
@@ -146,13 +165,19 @@ func compareExpiringFirst(a, b expiringFirstCandidate) int {
 }
 
 // expiringFirstTierReason is the logged reason of a pick from tier.
-func expiringFirstTierReason(tier expiringFirstTier) string {
-	switch tier {
-	case expiringFirstTierUrgent:
+func expiringFirstTierReason(tier expiringFirstTier, failover bool) string {
+	switch {
+	case failover && (tier == expiringFirstTierUrgent || tier == expiringFirstTierNoData):
+		return expiringFirstReasonFailoverStayPower
+	case failover && tier == expiringFirstTierLowHeadroom:
+		return expiringFirstReasonFailoverLowHeadroom
+	case failover:
+		return expiringFirstReasonFailoverAllGated
+	case tier == expiringFirstTierUrgent:
 		return expiringFirstReasonMostUrgent
-	case expiringFirstTierNoData:
+	case tier == expiringFirstTierNoData:
 		return expiringFirstReasonNoData
-	case expiringFirstTierLowHeadroom:
+	case tier == expiringFirstTierLowHeadroom:
 		return expiringFirstReasonLowHeadroom
 	default:
 		return expiringFirstReasonAllGated
@@ -194,6 +219,13 @@ func (s *ExpiringFirstSelector) pick(ctx context.Context, provider, model string
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 
+	place := placementFrom(ctx)
+	failover := place.failover()
+	var bindings map[string]int
+	if failover && place.bindings != nil {
+		bindings = place.bindings()
+	}
+
 	store := quotareading.Default()
 	thresholds := s.thresholds()
 	candidates := make([]expiringFirstCandidate, 0, len(available))
@@ -202,7 +234,12 @@ func (s *ExpiringFirstSelector) pick(ctx context.Context, provider, model string
 			continue
 		}
 		view := viewExpiringFirst(auth, model, store, now, thresholds)
-		candidates = append(candidates, expiringFirstCandidate{auth: auth, eval: view.Evaluation, headroom: view.Headroom})
+		candidate := expiringFirstCandidate{auth: auth, eval: view.Evaluation, headroom: view.Headroom}
+		if failover {
+			candidate.bindings = bindings[auth.ID]
+			candidate.stayPower = view.Headroom.ShortRemaining / float64(1+candidate.bindings)
+		}
+		candidates = append(candidates, candidate)
 	}
 	if len(candidates) == 0 {
 		return expiringFirstCandidate{}, "", &Error{Code: "auth_not_found", Message: "no auth candidates"}
@@ -213,14 +250,17 @@ func (s *ExpiringFirstSelector) pick(ctx context.Context, provider, model string
 	reason := expiringFirstReasonFocus
 	pool := s.focusPool(candidates, now)
 	if len(pool) == 0 {
-		pool, reason = expiringFirstPool(candidates)
+		pool, reason = expiringFirstPool(candidates, failover)
 	}
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	picked := s.rotateLocked(key, pool)
 	s.mu.Unlock()
 
-	s.logPick(ctx, provider, model, picked, reason)
+	if place != nil {
+		place.reason = reason
+	}
+	s.logPick(ctx, provider, model, picked, reason, failover)
 	return picked, reason, nil
 }
 
@@ -288,14 +328,14 @@ func (s *ExpiringFirstSelector) usableFocus(ctx context.Context, provider, model
 // expiringFirstPool returns the candidates the pick rotates among, in candidate
 // order, and why: the candidates that tie for the first place in
 // compareExpiringFirst's order, and the reason their tier is logged with.
-func expiringFirstPool(candidates []expiringFirstCandidate) ([]expiringFirstCandidate, string) {
+func expiringFirstPool(candidates []expiringFirstCandidate, failover bool) ([]expiringFirstCandidate, string) {
 	var pool []expiringFirstCandidate
 	for _, candidate := range candidates {
 		if len(pool) == 0 {
 			pool = append(pool, candidate)
 			continue
 		}
-		switch order := compareExpiringFirst(candidate, pool[0]); {
+		switch order := compareExpiringFirst(candidate, pool[0], failover); {
 		case order < 0:
 			pool = append(pool[:0], candidate)
 		case order == 0:
@@ -305,7 +345,7 @@ func expiringFirstPool(candidates []expiringFirstCandidate) ([]expiringFirstCand
 	if len(pool) == 0 {
 		return nil, ""
 	}
-	return pool, expiringFirstTierReason(pool[0].tier())
+	return pool, expiringFirstTierReason(pool[0].tier(), failover)
 }
 
 // rotateLocked picks from a non-empty pool sorted by ID, round-robin: it
@@ -335,7 +375,7 @@ func (s *ExpiringFirstSelector) rotateLocked(key string, pool []expiringFirstCan
 // debug. Only identifiers and quota figures are logged, never credentials.
 // auth and urgency are repeated in the message because the console formatter
 // prints only a fixed set of fields.
-func (s *ExpiringFirstSelector) logPick(ctx context.Context, provider, model string, picked expiringFirstCandidate, reason string) {
+func (s *ExpiringFirstSelector) logPick(ctx context.Context, provider, model string, picked expiringFirstCandidate, reason string, failover bool) {
 	level := log.DebugLevel
 	if s.LogPicks {
 		level = log.InfoLevel
@@ -357,6 +397,10 @@ func (s *ExpiringFirstSelector) logPick(ctx context.Context, provider, model str
 	}
 	if picked.eval.Usable && !picked.headroom.Has {
 		fmt.Fprintf(&message, " headroom=%q", picked.headroom.Reason)
+	}
+	if failover && picked.eval.Usable && picked.headroom.Has {
+		stayPower := strconv.FormatFloat(math.Round(picked.stayPower*1000)/1000, 'f', -1, 64)
+		fmt.Fprintf(&message, " stay_power=%s bindings=%d", stayPower, picked.bindings)
 	}
 	if !picked.eval.Usable {
 		fmt.Fprintf(&message, " gate=%q gate_resets_at=%s", picked.eval.GateReason, picked.eval.GateResetsAt.UTC().Format(time.RFC3339))

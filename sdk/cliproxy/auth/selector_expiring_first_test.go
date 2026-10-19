@@ -744,16 +744,17 @@ func TestExpiringFirstSelectorUnderSessionAffinity(t *testing.T) {
 	if got := pick("second session", other); got != "auth-b" {
 		t.Fatalf("second session bound to %s, want auth-b", got)
 	}
-	// When the bound credential becomes unavailable, failover picks the most
-	// urgent of the rest (B over C) and the session stays there afterwards.
+	// When the bound credential becomes unavailable, the session fails over by
+	// stay power before urgency: B already carries the second session and C
+	// none, so it goes to C, and stays there afterwards.
 	a.Unavailable = true
-	if got := pick("failover", session); got != "auth-b" {
-		t.Fatalf("failover picked %s, want auth-b", got)
+	if got := pick("failover", session); got != "auth-c" {
+		t.Fatalf("failover picked %s, want auth-c", got)
 	}
 	a.Unavailable = false
 	a.Quota.Signals = efClaudeSignals(efWindow{"7d", 100, efHour})
-	if got := pick("after recovery", session); got != "auth-b" {
-		t.Fatalf("session moved back to %s after recovery, want auth-b", got)
+	if got := pick("after recovery", session); got != "auth-c" {
+		t.Fatalf("session moved back to %s after recovery, want auth-c", got)
 	}
 }
 

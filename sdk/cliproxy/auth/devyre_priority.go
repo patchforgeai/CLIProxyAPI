@@ -67,5 +67,6 @@ func CompareExpiringFirstPlacement(a, b ExpiringFirstView) int {
 	return compareExpiringFirst(
 		expiringFirstCandidate{eval: a.Evaluation, headroom: a.Headroom},
 		expiringFirstCandidate{eval: b.Evaluation, headroom: b.Headroom},
+		false,
 	)
 }

@@ -914,6 +914,7 @@ type SessionAffinitySelector struct {
 	cache            *SessionCache
 	matcher          *cliproxysession.MerklePrefixMatcher
 	subagentAffinity bool
+	devyre           devyreAffinityState // devyre: failover state (devyre_placement.go)
 }
 
 // SessionAffinityConfig configures the session affinity selector.
@@ -1049,6 +1050,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		fallbackKey = provider + "::" + fallbackID + "::" + modelKey
 	}
 	bind := func(authID string) {
+		s.devyre.forget(cacheKey) // devyre: a binding ends a suspended one
 		if fallbackKey != "" && !isSubagent && !isFork {
 			s.cache.SetAliases(authID, cacheKey, fallbackKey)
 		} else {
@@ -1066,7 +1068,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			}
 		}
 		// Cached auth not available, reselect via fallback selector for even distribution
-		auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+		failover := s.devyreFailover(cachedAuthID, provider, model) // devyre: ranks by stay power
+		auth, err := s.fallback.Pick(withPlacement(ctx, failover), provider, model, opts, fallbackAuths)
 		if err != nil {
 			return nil, err
 		}
@@ -1074,7 +1077,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			return nil, nil
 		}
 		bind(auth.ID)
-		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+		entry.Infof("session-affinity: cache hit but auth unavailable, reselected | session=%s from=%s auth=%s provider=%s model=%s%s", truncateSessionID(primaryID), cachedAuthID, auth.ID, provider, model, failover.logSuffix())
 		return auth, nil
 	}
 
@@ -1097,7 +1100,10 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		}
 	}
 
-	auth, err := s.fallback.Pick(ctx, provider, model, opts, fallbackAuths)
+	// devyre: after a credential failure removed the binding (a 429 before the
+	// retry), this is the session's failover (devyre_placement.go).
+	placed := s.devyrePlacementFor(cacheKey, provider, model, now)
+	auth, err := s.fallback.Pick(withPlacement(ctx, placed), provider, model, opts, fallbackAuths)
 	if err != nil {
 		return nil, err
 	}
@@ -1105,7 +1111,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 		return nil, nil
 	}
 	bind(auth.ID)
-	if isFork && fallbackID != "" {
+	if placed.failover() { // devyre
+		entry.Infof("session-affinity: bound auth failed, reselected | session=%s from=%s auth=%s provider=%s model=%s%s", truncateSessionID(primaryID), placed.from, auth.ID, provider, model, placed.logSuffix())
+	} else if isFork && fallbackID != "" {
 		entry.Infof("session-affinity: fork bound to new auth | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 	} else {
 		entry.Infof("session-affinity: cache miss, new binding | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
@@ -1350,6 +1358,7 @@ func (s *SessionAffinitySelector) InvalidateAuth(authID string) {
 		return
 	}
 	if s.cache != nil {
+		s.devyreSuspendAuth(authID) // devyre: those sessions fail over
 		s.cache.InvalidateAuth(authID)
 	}
 	if s.matcher != nil {
@@ -1548,7 +1557,9 @@ func (s *SessionAffinitySelector) OnResult(res Result) {
 		return
 	}
 
-	s.cache.CompareAndDelete(cacheKey, res.AuthID)
+	if s.cache.CompareAndDelete(cacheKey, res.AuthID) {
+		s.devyreSuspend(cacheKey, res.AuthID) // devyre: its next pick is a failover
+	}
 	if fallbackKey != "" {
 		s.cache.CompareAndDelete(fallbackKey, res.AuthID)
 	}
