@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"math"
@@ -20,12 +21,13 @@ import (
 // devyre: the expiring-first strategy. It lives in its own file so the fork
 // diff stays isolated; the routing wiring is in sdk/cliproxy/service_config.go.
 
-// Reasons logged with every expiring-first pick.
+// Reasons logged with every expiring-first pick: the pool the pick came from.
 const (
-	expiringFirstReasonMostUrgent = "most-urgent"
-	expiringFirstReasonNoData     = "no-data"
-	expiringFirstReasonAllGated   = "all-gated"
-	expiringFirstReasonFocus      = "focus"
+	expiringFirstReasonMostUrgent  = "most-urgent"
+	expiringFirstReasonNoData      = "no-data"
+	expiringFirstReasonLowHeadroom = "low-headroom"
+	expiringFirstReasonAllGated    = "all-gated"
+	expiringFirstReasonFocus       = "focus"
 )
 
 // expiringFirstMaxRotationKeys bounds the round-robin cursors, like RoundRobinSelector.
@@ -41,14 +43,19 @@ const expiringFirstMaxRotationKeys = 4096
 // has at most GateRemainingPercent left and has not reset yet: its short
 // windows (24 hours or less), its long windows, and the windows scoped to the
 // requested model family. Short and scoped windows only gate; they never rank
-// while a long window is known. Readings come from quotareading.Default()
-// merged with the credential's response-header signals.
+// while a long window is known. A usable credential has headroom while each of
+// those windows has more left than its headroom threshold
+// (quotareading.EvaluateHeadroom): a long session placed there does not run it
+// out soon after. Readings come from quotareading.Default() merged with the
+// credential's response-header signals.
 //
-// Picks are deterministic given the readings and the clock: usable credentials
-// with a known urgency come first, highest urgency wins; then usable
-// credentials without readings; and only when every candidate is gated, the
-// gated ones whose gates reset first, so upstream 429s and cooldowns take over.
-// Equal urgencies, unknowns and equal gate resets rotate round-robin by ID.
+// Picks are deterministic given the readings and the clock. They come from the
+// first of these pools that is not empty (compareExpiringFirst): usable
+// credentials with a known urgency and headroom, highest urgency first; usable
+// credentials without readings, which count as having headroom; usable
+// credentials without headroom, highest urgency first and unknowns last; and
+// only when every candidate is gated, the gated ones whose gates reset first,
+// so upstream 429s and cooldowns take over. Ties rotate round-robin by ID.
 // Candidates are first narrowed to the highest available priority tier, so
 // priority tiers keep their meaning. Wrapped by SessionAffinitySelector, a
 // bound session keeps its credential while it stays available; this selector
@@ -64,6 +71,14 @@ type ExpiringFirstSelector struct {
 	// long or matching model-scoped window gates the credential. The routing
 	// config defaults it to 2 (routing.expiring-first.gate-remaining-percent).
 	GateRemainingPercent float64
+	// HeadroomShortPercent and HeadroomLongPercent are the headroom thresholds
+	// of short windows and of long and matching model-scoped windows. The
+	// routing config defaults them to 20 and 5
+	// (routing.expiring-first.headroom-short-percent and headroom-long-percent).
+	// A threshold at or below GateRemainingPercent, such as the zero value,
+	// turns its check off.
+	HeadroomShortPercent float64
+	HeadroomLongPercent  float64
 	// LogPicks logs every pick at info level instead of debug.
 	LogPicks bool
 	// Now is a test hook; nil means time.Now.
@@ -75,10 +90,89 @@ type ExpiringFirstSelector struct {
 	rr map[string]string // provider:model -> last picked ID among ties and unknowns
 }
 
-// expiringFirstCandidate pairs an available credential with its quota evaluation.
+// expiringFirstCandidate pairs an available credential with its quota
+// evaluation and headroom.
 type expiringFirstCandidate struct {
-	auth *Auth
-	eval quotareading.Evaluation
+	auth     *Auth
+	eval     quotareading.Evaluation
+	headroom quotareading.Headroom
+}
+
+// expiringFirstTier is the pool a candidate is placed from; lower tiers come first.
+type expiringFirstTier int
+
+const (
+	expiringFirstTierUrgent      expiringFirstTier = iota // usable, known urgency, headroom
+	expiringFirstTierNoData                               // usable, unknown urgency, headroom
+	expiringFirstTierLowHeadroom                          // usable without headroom
+	expiringFirstTierGated                                // gated
+)
+
+func (c expiringFirstCandidate) tier() expiringFirstTier {
+	switch {
+	case !c.eval.Usable:
+		return expiringFirstTierGated
+	case !c.headroom.Has:
+		return expiringFirstTierLowHeadroom
+	case c.eval.UrgencyKnown:
+		return expiringFirstTierUrgent
+	default:
+		return expiringFirstTierNoData
+	}
+}
+
+// compareExpiringFirst is the placement order of the selector and of the
+// quota-readings endpoint (CompareExpiringFirstPlacement): negative when a is
+// placed before b, positive after, zero when they tie and picks take turns.
+// Tiers come first (expiringFirstTier); inside a tier, a higher known urgency
+// comes first, except among gated candidates, where the earlier gate reset does.
+func compareExpiringFirst(a, b expiringFirstCandidate) int {
+	if tierA, tierB := a.tier(), b.tier(); tierA != tierB {
+		return cmp.Compare(tierA, tierB)
+	}
+	if a.tier() == expiringFirstTierGated {
+		return a.eval.GateResetsAt.Compare(b.eval.GateResetsAt)
+	}
+	if a.eval.UrgencyKnown != b.eval.UrgencyKnown {
+		if a.eval.UrgencyKnown {
+			return -1
+		}
+		return 1
+	}
+	if !a.eval.UrgencyKnown {
+		return 0
+	}
+	return cmp.Compare(b.eval.Urgency, a.eval.Urgency)
+}
+
+// expiringFirstTierReason is the logged reason of a pick from tier.
+func expiringFirstTierReason(tier expiringFirstTier) string {
+	switch tier {
+	case expiringFirstTierUrgent:
+		return expiringFirstReasonMostUrgent
+	case expiringFirstTierNoData:
+		return expiringFirstReasonNoData
+	case expiringFirstTierLowHeadroom:
+		return expiringFirstReasonLowHeadroom
+	default:
+		return expiringFirstReasonAllGated
+	}
+}
+
+// thresholds returns the selector's quota thresholds.
+func (s *ExpiringFirstSelector) thresholds() quotareading.Thresholds {
+	return quotareading.Thresholds{Gate: s.GateRemainingPercent, HeadroomShort: s.HeadroomShortPercent, HeadroomLong: s.HeadroomLongPercent}
+}
+
+// viewExpiringFirst evaluates auth for model at now: its effective reading
+// (store merged with its header signals), gates, urgency and headroom.
+func viewExpiringFirst(auth *Auth, model string, store *quotareading.Store, now time.Time, thresholds quotareading.Thresholds) ExpiringFirstView {
+	reading := quotareading.Effective(store, auth.ID, auth.Provider, auth.Quota.Signals, auth.Quota.ObservedAt, now)
+	return ExpiringFirstView{
+		Reading:    reading,
+		Evaluation: quotareading.Evaluate(reading, model, now, thresholds.Gate),
+		Headroom:   quotareading.EvaluateHeadroom(reading, model, now, thresholds),
+	}
 }
 
 // Pick selects the available credential whose quota would be lost soonest.
@@ -101,12 +195,14 @@ func (s *ExpiringFirstSelector) pick(ctx context.Context, provider, model string
 	available = preferCodexWebsocketAuths(ctx, provider, available)
 
 	store := quotareading.Default()
+	thresholds := s.thresholds()
 	candidates := make([]expiringFirstCandidate, 0, len(available))
 	for _, auth := range available {
 		if auth == nil {
 			continue
 		}
-		candidates = append(candidates, expiringFirstCandidate{auth: auth, eval: s.evaluate(store, auth, model, now)})
+		view := viewExpiringFirst(auth, model, store, now, thresholds)
+		candidates = append(candidates, expiringFirstCandidate{auth: auth, eval: view.Evaluation, headroom: view.Headroom})
 	}
 	if len(candidates) == 0 {
 		return expiringFirstCandidate{}, "", &Error{Code: "auth_not_found", Message: "no auth candidates"}
@@ -190,44 +286,26 @@ func (s *ExpiringFirstSelector) usableFocus(ctx context.Context, provider, model
 }
 
 // expiringFirstPool returns the candidates the pick rotates among, in candidate
-// order, and why: the usable candidates sharing the highest known urgency; else
-// every usable candidate, none of which has an urgency; else the gated
-// candidates whose gates reset first.
+// order, and why: the candidates that tie for the first place in
+// compareExpiringFirst's order, and the reason their tier is logged with.
 func expiringFirstPool(candidates []expiringFirstCandidate) ([]expiringFirstCandidate, string) {
 	var pool []expiringFirstCandidate
 	for _, candidate := range candidates {
-		if !candidate.eval.Usable || !candidate.eval.UrgencyKnown {
+		if len(pool) == 0 {
+			pool = append(pool, candidate)
 			continue
 		}
-		switch {
-		case len(pool) == 0 || candidate.eval.Urgency > pool[0].eval.Urgency:
+		switch order := compareExpiringFirst(candidate, pool[0]); {
+		case order < 0:
 			pool = append(pool[:0], candidate)
-		case candidate.eval.Urgency == pool[0].eval.Urgency:
+		case order == 0:
 			pool = append(pool, candidate)
 		}
 	}
-	if len(pool) > 0 {
-		return pool, expiringFirstReasonMostUrgent
+	if len(pool) == 0 {
+		return nil, ""
 	}
-
-	for _, candidate := range candidates {
-		if candidate.eval.Usable {
-			pool = append(pool, candidate)
-		}
-	}
-	if len(pool) > 0 {
-		return pool, expiringFirstReasonNoData
-	}
-
-	for _, candidate := range candidates {
-		switch {
-		case len(pool) == 0 || candidate.eval.GateResetsAt.Before(pool[0].eval.GateResetsAt):
-			pool = append(pool[:0], candidate)
-		case candidate.eval.GateResetsAt.Equal(pool[0].eval.GateResetsAt):
-			pool = append(pool, candidate)
-		}
-	}
-	return pool, expiringFirstReasonAllGated
+	return pool, expiringFirstTierReason(pool[0].tier())
 }
 
 // rotateLocked picks from a non-empty pool sorted by ID, round-robin: it
@@ -276,6 +354,9 @@ func (s *ExpiringFirstSelector) logPick(ctx context.Context, provider, model str
 	fmt.Fprintf(&message, "expiring-first: pick | auth=%s urgency=%s", picked.auth.ID, urgency)
 	if picked.eval.RankWindowID != "" {
 		fmt.Fprintf(&message, " window=%s", picked.eval.RankWindowID)
+	}
+	if picked.eval.Usable && !picked.headroom.Has {
+		fmt.Fprintf(&message, " headroom=%q", picked.headroom.Reason)
 	}
 	if !picked.eval.Usable {
 		fmt.Fprintf(&message, " gate=%q gate_resets_at=%s", picked.eval.GateReason, picked.eval.GateResetsAt.UTC().Format(time.RFC3339))

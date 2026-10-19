@@ -148,7 +148,8 @@ routing:
   # expiring-first (aliases: expiringfirst, ef, soonest-reset) burns the credential whose quota
   # would be lost soonest: the remaining percent of its longest window divided by the hours until
   # that window resets. Short windows (24h or less) and model-scoped windows only gate; any window,
-  # the longest included, gates once exhausted. Credentials without quota readings rank last, and
+  # the longest included, gates once exhausted. New sessions go to credentials with headroom
+  # first; credentials without quota readings come after the ones with readings and headroom, and
   # priority tiers keep their meaning. With session-affinity, a bound session never moves for
   # urgency, only when its credential becomes unavailable or the binding expires.
   # Tune it with the expiring-first and quota-observation blocks at the end of this section.
@@ -217,6 +218,14 @@ routing:
   #   # (such as the 7-day limit), or the model-scoped window of the requested model family has
   #   # at most this percent left. Range 0-100. Default: 2.
   #   gate-remaining-percent: 2
+  #   # Headroom: a new session, or one that has to leave its credential, goes to a credential
+  #   # whose short windows have more than headroom-short-percent left and whose long and
+  #   # matching model-scoped windows have more than headroom-long-percent left. A credential
+  #   # without headroom is used only when none has it, so a long session never starts on an
+  #   # account that is about to run out. A value at or below gate-remaining-percent turns that
+  #   # part off. Range 0-100. Defaults: 20 and 5.
+  #   headroom-short-percent: 20
+  #   headroom-long-percent: 5
   #   # Log every pick at info level instead of debug. Default: false.
   #   log-picks: false
 

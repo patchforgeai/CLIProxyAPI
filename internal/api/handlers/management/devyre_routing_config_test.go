@@ -52,6 +52,9 @@ func TestExpiringFirstRoutingConfigSurvivesV8ManagementAPI(t *testing.T) {
 		}
 		routing := loaded.Routing
 		cache, poller := routing.QuotaObservation.UsageCache, routing.QuotaObservation.Poller
+		if ef := routing.ExpiringFirst; ef.HeadroomShortPercent == nil || ef.HeadroomShort() != 0 || ef.HeadroomLongPercent == nil || ef.HeadroomLong() != 7.5 {
+			t.Fatalf("%s: headroom = %+v", stage, ef)
+		}
 		if routing.ExpiringFirst.GateRemainingPercent == nil || routing.ExpiringFirst.GatePercent() != 0 || !routing.ExpiringFirst.LogPicks ||
 			cache.Enabled == nil || cache.IsEnabled() || cache.ClaudeUsageTTLDuration() != 7*time.Minute ||
 			poller.Enabled == nil || routing.QuotaPollerEnabled() || poller.ClaudeMinGapDuration() != 15*time.Minute || poller.CodexIntervalDuration() != 6*time.Minute {
@@ -68,9 +71,10 @@ func TestExpiringFirstRoutingConfigSurvivesV8ManagementAPI(t *testing.T) {
 	}
 
 	request(http.MethodPatch, "/v8/management/config", `{"routing":{"strategy":"expiring-first",
-		"expiring-first":{"gate-remaining-percent":0,"log-picks":true},
+		"expiring-first":{"gate-remaining-percent":0,"headroom-short-percent":0,"log-picks":true},
 		"quota-observation":{"usage-cache":{"enabled":false,"claude-usage-ttl":"7m"},"poller":{"enabled":false,"claude-min-gap":"15m"}}}}`, http.StatusOK)
 	request(http.MethodPut, "/v8/management/config/routing/quota-observation/poller/codex-interval", `"6m"`, http.StatusOK)
+	request(http.MethodPut, "/v8/management/config/routing/expiring-first/headroom-long-percent", `7.5`, http.StatusOK)
 	if loaded := assertBlocks("v8 write"); !config.IsExpiringFirstStrategy(loaded.Routing.Strategy) {
 		t.Fatalf("strategy = %q", loaded.Routing.Strategy)
 	}
@@ -79,7 +83,7 @@ func TestExpiringFirstRoutingConfigSurvivesV8ManagementAPI(t *testing.T) {
 	if err = json.Unmarshal([]byte(request(http.MethodGet, "/v8/management/config/routing/expiring-first", "", http.StatusOK)), &view); err != nil {
 		t.Fatal(err)
 	}
-	if view["gate-remaining-percent"] != float64(0) || view["log-picks"] != true {
+	if view["gate-remaining-percent"] != float64(0) || view["headroom-short-percent"] != float64(0) || view["headroom-long-percent"] != 7.5 || view["log-picks"] != true {
 		t.Fatalf("GET expiring-first = %v", view)
 	}
 

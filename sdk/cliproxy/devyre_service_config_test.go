@@ -18,12 +18,14 @@ func expiringFirstRoutingConfig(strategy string, gatePercent *float64, logPicks 
 func TestExpiringFirstRoutingStrategyAliases(t *testing.T) {
 	for _, alias := range []string{"expiring-first", "expiringfirst", "ef", "soonest-reset", " Expiring-First ", "EF", "Soonest-Reset"} {
 		state := normalizedRoutingRuntimeState(expiringFirstRoutingConfig(alias, nil, false))
-		if state.strategy != "expiring-first" || state.expiringFirstGatePercent != 2 || state.expiringFirstLogPicks {
-			t.Fatalf("normalizedRoutingRuntimeState(%q) = %+v, want expiring-first with the default gate", alias, state)
+		if state.strategy != "expiring-first" || state.expiringFirstGatePercent != 2 || state.expiringFirstLogPicks ||
+			state.expiringFirstHeadroomShort != 20 || state.expiringFirstHeadroomLong != 5 {
+			t.Fatalf("normalizedRoutingRuntimeState(%q) = %+v, want expiring-first with the default gate and headroom", alias, state)
 		}
 		selector, ok := newRoutingSelector(state).(*coreauth.ExpiringFirstSelector)
-		if !ok || selector.GateRemainingPercent != 2 || selector.LogPicks || selector.Now != nil {
-			t.Fatalf("newRoutingSelector(%q) = %#v, want *auth.ExpiringFirstSelector with gate 2", alias, newRoutingSelector(state))
+		if !ok || selector.GateRemainingPercent != 2 || selector.HeadroomShortPercent != 20 || selector.HeadroomLongPercent != 5 ||
+			selector.LogPicks || selector.Now != nil {
+			t.Fatalf("newRoutingSelector(%q) = %#v, want *auth.ExpiringFirstSelector with gate 2 and headroom 20/5", alias, newRoutingSelector(state))
 		}
 	}
 }
@@ -79,5 +81,12 @@ func TestExpiringFirstRoutingHotReload(t *testing.T) {
 	tuned, ok := apply(4, expiringFirstRoutingConfig("expiring-first", &five, true)).(*coreauth.ExpiringFirstSelector)
 	if !ok || tuned == first || tuned.GateRemainingPercent != 5 || !tuned.LogPicks {
 		t.Fatalf("selector after tuning = %#v, want a new selector with gate 5 and log-picks", service.coreManager.Selector())
+	}
+	headroom := expiringFirstRoutingConfig("expiring-first", &five, true)
+	short, long := 30.0, 0.0
+	headroom.Routing.ExpiringFirst.HeadroomShortPercent, headroom.Routing.ExpiringFirst.HeadroomLongPercent = &short, &long
+	retuned, ok := apply(5, headroom).(*coreauth.ExpiringFirstSelector)
+	if !ok || retuned == tuned || retuned.HeadroomShortPercent != 30 || retuned.HeadroomLongPercent != 0 {
+		t.Fatalf("selector after a headroom change = %#v, want a new selector with headroom 30/0", service.coreManager.Selector())
 	}
 }

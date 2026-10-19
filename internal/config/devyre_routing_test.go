@@ -16,6 +16,8 @@ import (
 // These assignments fail to compile if it drifts.
 var (
 	_ func(ExpiringFirstConfig) float64     = ExpiringFirstConfig.GatePercent
+	_ func(ExpiringFirstConfig) float64     = ExpiringFirstConfig.HeadroomShort
+	_ func(ExpiringFirstConfig) float64     = ExpiringFirstConfig.HeadroomLong
 	_ func(UsageCacheConfig) bool           = UsageCacheConfig.IsEnabled
 	_ func(UsageCacheConfig) time.Duration  = UsageCacheConfig.ClaudeUsageTTLDuration
 	_ func(UsageCacheConfig) time.Duration  = UsageCacheConfig.CodexUsageTTLDuration
@@ -28,7 +30,7 @@ var (
 )
 
 var _ = RoutingConfig{
-	ExpiringFirst: ExpiringFirstConfig{GateRemainingPercent: (*float64)(nil), LogPicks: false},
+	ExpiringFirst: ExpiringFirstConfig{GateRemainingPercent: (*float64)(nil), HeadroomShortPercent: (*float64)(nil), HeadroomLongPercent: (*float64)(nil), LogPicks: false},
 	QuotaObservation: QuotaObservationConfig{
 		UsageCache: UsageCacheConfig{Enabled: (*bool)(nil), ClaudeUsageTTL: "", CodexUsageTTL: "", RefreshFloor: ""},
 		Poller:     QuotaPollerConfig{Enabled: (*bool)(nil), ClaudeInterval: "", ClaudeMinGap: "", CodexInterval: ""},
@@ -37,7 +39,7 @@ var _ = RoutingConfig{
 
 func TestExpiringFirstRoutingConfigTags(t *testing.T) {
 	want := map[reflect.Type][]string{
-		reflect.TypeOf(ExpiringFirstConfig{}):    {"gate-remaining-percent,omitempty", "log-picks,omitempty"},
+		reflect.TypeOf(ExpiringFirstConfig{}):    {"gate-remaining-percent,omitempty", "headroom-short-percent,omitempty", "headroom-long-percent,omitempty", "log-picks,omitempty"},
 		reflect.TypeOf(UsageCacheConfig{}):       {"enabled,omitempty", "claude-usage-ttl,omitempty", "codex-usage-ttl,omitempty", "refresh-floor,omitempty"},
 		reflect.TypeOf(QuotaPollerConfig{}):      {"enabled,omitempty", "claude-interval,omitempty", "claude-min-gap,omitempty", "codex-interval,omitempty"},
 		reflect.TypeOf(QuotaObservationConfig{}): {"usage-cache,omitempty", "poller,omitempty"},
@@ -67,6 +69,9 @@ func TestExpiringFirstRoutingConfigDefaults(t *testing.T) {
 	if got := routing.ExpiringFirst.GatePercent(); got != 2 {
 		t.Fatalf("default gate = %v, want 2", got)
 	}
+	if short, long := routing.ExpiringFirst.HeadroomShort(), routing.ExpiringFirst.HeadroomLong(); short != 20 || long != 5 {
+		t.Fatalf("default headroom = %v/%v, want 20/5", short, long)
+	}
 	cache := routing.QuotaObservation.UsageCache
 	if !cache.IsEnabled() || cache.ClaudeUsageTTLDuration() != 5*time.Minute ||
 		cache.CodexUsageTTLDuration() != 60*time.Second || cache.RefreshFloorDuration() != 30*time.Second {
@@ -91,6 +96,24 @@ func TestExpiringFirstRoutingConfigDefaults(t *testing.T) {
 	} {
 		if got := (ExpiringFirstConfig{GateRemainingPercent: tc.value}).GatePercent(); got != tc.want {
 			t.Fatalf("GatePercent(%v) = %v, want %v", *tc.value, got, tc.want)
+		}
+	}
+	// The headroom thresholds default, clamp and treat NaN the same way.
+	for _, tc := range []struct {
+		value     *float64
+		wantShort float64
+		wantLong  float64
+	}{
+		{value: gate(0), wantShort: 0, wantLong: 0},
+		{value: gate(12.5), wantShort: 12.5, wantLong: 12.5},
+		{value: gate(-5), wantShort: 0, wantLong: 0},
+		{value: gate(150), wantShort: 100, wantLong: 100},
+		{value: gate(math.NaN()), wantShort: 20, wantLong: 5},
+		{value: gate(math.Inf(-1)), wantShort: 0, wantLong: 0},
+	} {
+		ef := ExpiringFirstConfig{HeadroomShortPercent: tc.value, HeadroomLongPercent: tc.value}
+		if short, long := ef.HeadroomShort(), ef.HeadroomLong(); short != tc.wantShort || long != tc.wantLong {
+			t.Fatalf("headroom(%v) = %v/%v, want %v/%v", *tc.value, short, long, tc.wantShort, tc.wantLong)
 		}
 	}
 
@@ -158,6 +181,8 @@ func TestExpiringFirstStrategyAliases(t *testing.T) {
 // pointer distinguishes them from unset.
 const routingBlocksYAML = `  expiring-first:
     gate-remaining-percent: 0
+    headroom-short-percent: 0
+    headroom-long-percent: 7.5
     log-picks: true
   quota-observation:
     usage-cache:
@@ -175,7 +200,9 @@ const routingBlocksYAML = `  expiring-first:
 func assertRoutingBlocks(t *testing.T, stage string, routing RoutingConfig) {
 	t.Helper()
 	ef := routing.ExpiringFirst
-	if ef.GateRemainingPercent == nil || *ef.GateRemainingPercent != 0 || ef.GatePercent() != 0 || !ef.LogPicks {
+	if ef.GateRemainingPercent == nil || *ef.GateRemainingPercent != 0 || ef.GatePercent() != 0 || !ef.LogPicks ||
+		ef.HeadroomShortPercent == nil || *ef.HeadroomShortPercent != 0 || ef.HeadroomShort() != 0 ||
+		ef.HeadroomLongPercent == nil || ef.HeadroomLong() != 7.5 {
 		t.Fatalf("%s: expiring-first = %+v", stage, ef)
 	}
 	cache := routing.QuotaObservation.UsageCache
@@ -210,6 +237,8 @@ func assertSavedV8Routing(t *testing.T, stage, path string) {
 	}
 	for _, key := range []string{
 		"routing.expiring-first.gate-remaining-percent",
+		"routing.expiring-first.headroom-short-percent",
+		"routing.expiring-first.headroom-long-percent",
 		"routing.expiring-first.log-picks",
 		"routing.quota-observation.usage-cache.enabled",
 		"routing.quota-observation.usage-cache.refresh-floor",
@@ -409,7 +438,8 @@ func TestExpiringFirstRoutingConfigSaveAddsExplicitValues(t *testing.T) {
 	if reloaded.Routing.QuotaObservation.Poller.Enabled == nil || *reloaded.Routing.QuotaObservation.Poller.Enabled {
 		t.Fatal("explicit poller.enabled: false was dropped by the save")
 	}
-	if reloaded.Routing.ExpiringFirst.GateRemainingPercent != nil || reloaded.Routing.QuotaObservation.UsageCache.Enabled != nil {
+	if ef := reloaded.Routing.ExpiringFirst; ef.GateRemainingPercent != nil || ef.HeadroomShortPercent != nil || ef.HeadroomLongPercent != nil ||
+		reloaded.Routing.QuotaObservation.UsageCache.Enabled != nil {
 		t.Fatal("the save invented settings that were never set")
 	}
 }
@@ -486,7 +516,9 @@ func TestExpiringFirstRoutingConfigExampleIsValid(t *testing.T) {
 	}
 	routing := cfg.Routing
 	cache, poller := routing.QuotaObservation.UsageCache, routing.QuotaObservation.Poller
-	if routing.ExpiringFirst.GateRemainingPercent == nil || routing.ExpiringFirst.GatePercent() != 2 ||
+	ef := routing.ExpiringFirst
+	if ef.GateRemainingPercent == nil || ef.GatePercent() != 2 ||
+		ef.HeadroomShortPercent == nil || ef.HeadroomShort() != 20 || ef.HeadroomLongPercent == nil || ef.HeadroomLong() != 5 ||
 		cache.Enabled == nil || !cache.IsEnabled() || cache.ClaudeUsageTTL != "5m" || cache.CodexUsageTTL != "60s" || cache.RefreshFloor != "30s" ||
 		poller.Enabled == nil || poller.ClaudeInterval != "30m" || poller.ClaudeMinGap != "10m" || poller.CodexInterval != "5m" {
 		t.Fatalf("uncommented example does not show the defaults: %+v", routing)

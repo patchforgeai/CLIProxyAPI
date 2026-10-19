@@ -25,6 +25,7 @@ var (
 	_ func(*Store, string, string, map[string]string, time.Time, time.Time) Reading = Effective
 	_ func(string) string                                                           = ModelFamily
 	_ func(Reading, string, time.Time, float64) Evaluation                          = Evaluate
+	_ func(Reading, string, time.Time, Thresholds) Headroom                         = EvaluateHeadroom
 	_ func(Window) float64                                                          = Window.RemainingPercent
 	_ func(Kind) string                                                             = Kind.String
 )
@@ -33,6 +34,8 @@ var (
 	_ = Window{ID: "", Kind: KindShort, UsedPercent: 0, ResetsAt: time.Time{}, Length: time.Duration(0), Model: "", ObservedAt: time.Time{}, Source: SourceHeader}
 	_ = Reading{AuthID: "", Provider: "", Windows: []Window(nil)}
 	_ = Evaluation{Usable: false, GateReason: "", GateResetsAt: time.Time{}, UrgencyKnown: false, Urgency: float64(0), RankWindowID: ""}
+	_ = Thresholds{Gate: float64(0), HeadroomShort: float64(0), HeadroomLong: float64(0)}
+	_ = Headroom{Has: false, Reason: "", ShortRemaining: float64(0)}
 )
 
 func TestQuotaReadingAPIContractValues(t *testing.T) {

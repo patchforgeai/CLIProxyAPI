@@ -1,7 +1,9 @@
 package quotareading
 
 import (
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -47,10 +49,8 @@ func Evaluate(r Reading, model string, now time.Time, gateRemainingPercent float
 
 	var gating []string
 	for _, window := range r.Windows {
-		applies := window.Kind == KindShort || window.Kind == KindLong ||
-			(window.Kind == KindScoped && window.Model != "" && window.Model == family)
 		exhausted := window.RemainingPercent() <= gateRemainingPercent
-		if !applies || !exhausted || !window.ResetsAt.After(now) {
+		if !appliesTo(window, family) || !exhausted || !window.ResetsAt.After(now) {
 			continue
 		}
 		gating = append(gating, window.ID+" exhausted")
@@ -79,6 +79,77 @@ func Evaluate(r Reading, model string, now time.Time, gateRemainingPercent float
 	evaluation.Urgency = rank.RemainingPercent() / hours
 	evaluation.UrgencyKnown = true
 	return evaluation
+}
+
+// appliesTo reports whether window limits a request for the model family:
+// short and long windows always do, a scoped window only for its own family.
+func appliesTo(window Window, family string) bool {
+	return window.Kind == KindShort || window.Kind == KindLong ||
+		(window.Kind == KindScoped && window.Model != "" && window.Model == family)
+}
+
+// Thresholds are the remaining-percent limits of expiring-first routing.
+type Thresholds struct {
+	// Gate gates a credential: a window that applies to the request has at
+	// most this much left and has not reset yet (see Evaluate).
+	Gate float64
+	// HeadroomShort is what short windows (24 hours or less) need to keep:
+	// more than this percent left.
+	HeadroomShort float64
+	// HeadroomLong is what long windows and the scoped window of the requested
+	// family need to keep: more than this percent left.
+	HeadroomLong float64
+}
+
+// Headroom tells whether a credential's windows leave room for one more
+// session.
+type Headroom struct {
+	// Has is false when a window that applies to the request is at or below
+	// its headroom threshold.
+	Has bool
+	// Reason names the windows without headroom, such as "5h at 14% left";
+	// empty when Has.
+	Reason string
+	// ShortRemaining is the lowest remaining percent among the short windows
+	// that count, 100 when none does: what a session placed on the credential
+	// can still spend before its short window runs out.
+	ShortRemaining float64
+}
+
+// EvaluateHeadroom reports whether r leaves room for a request for model at
+// now. Pass a reading already normalized by Effective.
+//
+// A window that applies to the request (the same rule as Evaluate's gates)
+// needs more than its threshold left: t.HeadroomShort for a short window,
+// t.HeadroomLong for a long window or a scoped window of the requested family.
+// A threshold at or below t.Gate (or NaN) turns its check off, so the gate
+// alone applies. A window whose reset is unknown or already passed does not
+// count, and a reading without windows has headroom.
+func EvaluateHeadroom(r Reading, model string, now time.Time, t Thresholds) Headroom {
+	family := ModelFamily(model)
+	headroom := Headroom{Has: true, ShortRemaining: 100}
+	var lacking []string
+	for _, window := range r.Windows {
+		if !appliesTo(window, family) || window.ResetsAt.IsZero() || !window.ResetsAt.After(now) {
+			continue
+		}
+		remaining := window.RemainingPercent()
+		threshold := t.HeadroomLong
+		if window.Kind == KindShort {
+			threshold = t.HeadroomShort
+			headroom.ShortRemaining = math.Min(headroom.ShortRemaining, remaining)
+		}
+		if !(threshold > t.Gate) || remaining > threshold {
+			continue
+		}
+		lacking = append(lacking, window.ID+" at "+strconv.FormatFloat(math.Round(remaining*10)/10, 'f', -1, 64)+"% left")
+	}
+	if len(lacking) > 0 {
+		sort.Strings(lacking)
+		headroom.Has = false
+		headroom.Reason = strings.Join(lacking, ", ")
+	}
+	return headroom
 }
 
 // rankingWindow picks the window whose remaining quota is ranked for family.

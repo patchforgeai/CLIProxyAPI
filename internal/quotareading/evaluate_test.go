@@ -317,6 +317,79 @@ func TestQuotaReadingEvaluateRankingWindow(t *testing.T) {
 	}
 }
 
+func TestQuotaReadingEvaluateHeadroom(t *testing.T) {
+	defaults := Thresholds{Gate: defaultGate, HeadroomShort: 20, HeadroomLong: 5}
+	week := longWindow(60, 3*24*time.Hour)
+	tests := []struct {
+		name          string
+		windows       []Window
+		model         string
+		thresholds    Thresholds
+		wantHas       bool
+		wantReason    string
+		wantShortLeft float64
+	}{
+		{name: "no readings have headroom", thresholds: defaults, wantHas: true, wantShortLeft: 100},
+		{name: "5h above the short threshold", windows: []Window{shortWindow(21, time.Hour), week}, thresholds: defaults, wantHas: true, wantShortLeft: 21},
+		{name: "5h at the short threshold", windows: []Window{shortWindow(20, time.Hour), week}, thresholds: defaults, wantReason: "5h at 20% left", wantShortLeft: 20},
+		{name: "5h just below the short threshold", windows: []Window{shortWindow(19.5, time.Hour), week}, thresholds: defaults, wantReason: "5h at 19.5% left", wantShortLeft: 19.5},
+		{name: "7d at the long threshold", windows: []Window{shortWindow(90, time.Hour), longWindow(5, 24*time.Hour)}, thresholds: defaults, wantReason: "7d at 5% left", wantShortLeft: 90},
+		{name: "7d above the long threshold", windows: []Window{shortWindow(90, time.Hour), longWindow(5.5, 24*time.Hour)}, thresholds: defaults, wantHas: true, wantShortLeft: 90},
+		{
+			name:       "every window without headroom is named, sorted",
+			windows:    []Window{longWindow(3, 24*time.Hour), shortWindow(10.04, time.Hour)},
+			thresholds: defaults, wantReason: "5h at 10% left, 7d at 3% left", wantShortLeft: 10.04,
+		},
+		{name: "a scoped window of the requested family counts as long", windows: []Window{scopedWindow("fable", 3, 2*24*time.Hour), week}, model: "claude-fable-5", thresholds: defaults, wantReason: "7d:fable at 3% left", wantShortLeft: 100},
+		{name: "a scoped window of another family does not count", windows: []Window{scopedWindow("fable", 3, 2*24*time.Hour), week}, model: "claude-opus-5-5", thresholds: defaults, wantHas: true, wantShortLeft: 100},
+		{name: "a scoped window does not count for a model-agnostic view", windows: []Window{scopedWindow("opus", 3, 2*24*time.Hour), week}, thresholds: defaults, wantHas: true, wantShortLeft: 100},
+		{
+			name:       "an unknown reset does not count",
+			windows:    []Window{{ID: "5h", Kind: KindShort, UsedPercent: 99, Length: 5 * time.Hour}, week},
+			thresholds: defaults, wantHas: true, wantShortLeft: 100,
+		},
+		{name: "a passed reset does not count", windows: []Window{shortWindow(1, -time.Minute), week}, thresholds: defaults, wantHas: true, wantShortLeft: 100},
+		{
+			name:       "a codex primary window is short",
+			windows:    []Window{{ID: "primary", Kind: KindShort, UsedPercent: 85, ResetsAt: testNow.Add(time.Hour), Length: 5 * time.Hour}},
+			thresholds: defaults, wantReason: "primary at 15% left", wantShortLeft: 15,
+		},
+		{
+			name:       "a short threshold at the gate turns the short check off",
+			windows:    []Window{shortWindow(10, time.Hour), longWindow(3, 24*time.Hour)},
+			thresholds: Thresholds{Gate: 2, HeadroomShort: 2, HeadroomLong: 5}, wantReason: "7d at 3% left", wantShortLeft: 10,
+		},
+		{
+			name:       "a long threshold below the gate turns the long check off",
+			windows:    []Window{shortWindow(10, time.Hour), longWindow(3, 24*time.Hour)},
+			thresholds: Thresholds{Gate: 2, HeadroomShort: 20, HeadroomLong: 1}, wantReason: "5h at 10% left", wantShortLeft: 10,
+		},
+		{
+			name:       "both thresholds off leaves only the gate",
+			windows:    []Window{shortWindow(3, time.Hour), longWindow(3, 24*time.Hour)},
+			thresholds: Thresholds{Gate: 2}, wantHas: true, wantShortLeft: 3,
+		},
+		{
+			name:       "NaN thresholds are off",
+			windows:    []Window{shortWindow(3, time.Hour)},
+			thresholds: Thresholds{Gate: 2, HeadroomShort: math.NaN(), HeadroomLong: math.NaN()}, wantHas: true, wantShortLeft: 3,
+		},
+		{
+			name:       "a NaN gate turns headroom off",
+			windows:    []Window{shortWindow(3, time.Hour)},
+			thresholds: Thresholds{Gate: math.NaN(), HeadroomShort: 20, HeadroomLong: 5}, wantHas: true, wantShortLeft: 3,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EvaluateHeadroom(Reading{AuthID: "auth-a", Provider: "claude", Windows: tc.windows}, tc.model, testNow, tc.thresholds)
+			if got.Has != tc.wantHas || got.Reason != tc.wantReason || !approxEqual(got.ShortRemaining, tc.wantShortLeft) {
+				t.Fatalf("EvaluateHeadroom = %+v, want has %v reason %q short %v", got, tc.wantHas, tc.wantReason, tc.wantShortLeft)
+			}
+		})
+	}
+}
+
 func TestQuotaReadingKindAndModelFamily(t *testing.T) {
 	for kind, want := range map[Kind]string{KindShort: "short", KindLong: "long", KindScoped: "scoped", Kind(42): "unknown"} {
 		if got := kind.String(); got != want {

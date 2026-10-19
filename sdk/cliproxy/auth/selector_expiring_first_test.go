@@ -16,6 +16,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/routingfocus"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -335,6 +336,228 @@ func TestExpiringFirstSelectorPick(t *testing.T) {
 				t.Fatalf("Pick() = %+v, %v; want %s", got, errPick, tc.wantID)
 			}
 		})
+	}
+}
+
+// newHeadroomTestSelector uses the routing config defaults: gate 2, headroom 20 and 5.
+func newHeadroomTestSelector() *ExpiringFirstSelector {
+	selector := newTestExpiringFirstSelector()
+	selector.HeadroomShortPercent, selector.HeadroomLongPercent = 20, 5
+	return selector
+}
+
+// efStoreReading records windows for id in the default store, relative to
+// efTestNow; a zero resetsIn leaves the reset unknown.
+func efStoreReading(t *testing.T, id string, windows ...quotareading.Window) {
+	t.Helper()
+	for i := range windows {
+		windows[i].ObservedAt = efTestNow.Add(-time.Minute)
+		windows[i].Source = quotareading.SourceUsage
+	}
+	quotareading.Default().Put(id, "claude", windows)
+	t.Cleanup(func() { quotareading.Default().Forget(id) })
+}
+
+func TestExpiringFirstSelectorHeadroomPools(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		model        string
+		short, long  *float64 // nil keeps the defaults of 20 and 5
+		auths        []*Auth
+		wantID       string
+		wantReason   string
+		wantHeadroom string // the picked credential's headroom reason; empty with headroom
+	}{
+		{
+			// A is far more urgent, but its 5h window is about to run out: a new
+			// session goes to B, which can carry it.
+			name:  "headroom outranks urgency",
+			model: "claude-opus-5-5",
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"5h", 15, efHour}, efWindow{"7d", 50, 5 * efHour}),
+				efClaudeAuth("b", efWindow{"5h", 80, 3 * efHour}, efWindow{"7d", 60, 2 * efDay}),
+			},
+			wantID: "b", wantReason: expiringFirstReasonMostUrgent,
+		},
+		{
+			name:  "the most urgent credential with headroom wins",
+			model: "claude-opus-5-5",
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"5h", 21, efHour}, efWindow{"7d", 50, 5 * efHour}),
+				efClaudeAuth("b", efWindow{"5h", 80, 3 * efHour}, efWindow{"7d", 60, 2 * efDay}),
+			},
+			wantID: "a", wantReason: expiringFirstReasonMostUrgent,
+		},
+		{
+			name:  "a credential without readings has headroom",
+			model: "claude-opus-5-5",
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"5h", 10, efHour}, efWindow{"7d", 50, 5 * efHour}),
+				efClaudeAuth("u"),
+			},
+			wantID: "u", wantReason: expiringFirstReasonNoData,
+		},
+		{
+			name:  "without headroom anywhere the most urgent wins",
+			model: "claude-opus-5-5",
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"5h", 15, efHour}, efWindow{"7d", 90, 6 * efDay}),
+				efClaudeAuth("b", efWindow{"5h", 20, efHour}, efWindow{"7d", 50, 5 * efHour}),
+				efClaudeAuth("gated", efWindow{"5h", 1, efHour}, efWindow{"7d", 90, efHour}),
+			},
+			wantID: "b", wantReason: expiringFirstReasonLowHeadroom, wantHeadroom: "5h at 20% left",
+		},
+		{
+			name:  "a long window at the long threshold has no headroom",
+			model: "claude-opus-5-5",
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"5h", 90, efHour}, efWindow{"7d", 5, efHour}),
+				efClaudeAuth("b", efWindow{"7d", 20, 6 * efDay}),
+			},
+			wantID: "b", wantReason: expiringFirstReasonMostUrgent,
+		},
+		{
+			name:  "a long window above the long threshold has headroom",
+			model: "claude-opus-5-5",
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"5h", 90, efHour}, efWindow{"7d", 5.5, efHour}),
+				efClaudeAuth("b", efWindow{"7d", 20, 6 * efDay}),
+			},
+			wantID: "a", wantReason: expiringFirstReasonMostUrgent,
+		},
+		{
+			name:  "the Fable window counts for Fable models",
+			model: "claude-fable-5",
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"7d", 50, efDay}, efWindow{"7d_oi", 4, 2 * efDay}),
+				efClaudeAuth("b", efWindow{"7d", 20, 6 * efDay}),
+			},
+			wantID: "b", wantReason: expiringFirstReasonMostUrgent,
+		},
+		{
+			name:  "the Fable window does not count for other models",
+			model: "claude-opus-5-5",
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"7d", 50, efDay}, efWindow{"7d_oi", 4, 2 * efDay}),
+				efClaudeAuth("b", efWindow{"7d", 20, 6 * efDay}),
+			},
+			wantID: "a", wantReason: expiringFirstReasonMostUrgent,
+		},
+		{
+			name:  "a short threshold at the gate turns the short check off",
+			model: "claude-opus-5-5",
+			short: new(2.0),
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"5h", 3, efHour}, efWindow{"7d", 50, 5 * efHour}),
+				efClaudeAuth("b", efWindow{"5h", 80, 3 * efHour}, efWindow{"7d", 60, 2 * efDay}),
+			},
+			wantID: "a", wantReason: expiringFirstReasonMostUrgent,
+		},
+		{
+			name:  "a long threshold below the gate turns the long check off",
+			model: "claude-opus-5-5",
+			long:  new(1.0),
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"5h", 90, efHour}, efWindow{"7d", 4, efHour}),
+				efClaudeAuth("b", efWindow{"7d", 20, 6 * efDay}),
+			},
+			wantID: "a", wantReason: expiringFirstReasonMostUrgent,
+		},
+		{
+			name:  "gated credentials stay last",
+			model: "claude-opus-5-5",
+			auths: []*Auth{
+				efClaudeAuth("gated", efWindow{"5h", 2, efHour}, efWindow{"7d", 90, efHour}),
+				efClaudeAuth("low", efWindow{"5h", 3, efHour}, efWindow{"7d", 10, 6 * efDay}),
+			},
+			wantID: "low", wantReason: expiringFirstReasonLowHeadroom, wantHeadroom: "5h at 3% left",
+		},
+		{
+			name:  "every candidate gated still falls back to the earliest gate reset",
+			model: "claude-opus-5-5",
+			auths: []*Auth{
+				efClaudeAuth("a", efWindow{"5h", 0, 2 * efHour}, efWindow{"7d", 90, 6 * efDay}),
+				efClaudeAuth("b", efWindow{"5h", 1, 30 * time.Minute}, efWindow{"7d", 10, 6 * efDay}),
+			},
+			wantID: "b", wantReason: expiringFirstReasonAllGated, wantHeadroom: "5h at 1% left",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			selector := newHeadroomTestSelector()
+			if tc.short != nil {
+				selector.HeadroomShortPercent = *tc.short
+			}
+			if tc.long != nil {
+				selector.HeadroomLongPercent = *tc.long
+			}
+			picked, reason, err := selector.pick(context.Background(), "claude", tc.model, tc.auths)
+			if err != nil {
+				t.Fatalf("pick() error = %v", err)
+			}
+			if picked.auth.ID != tc.wantID || reason != tc.wantReason || picked.headroom.Reason != tc.wantHeadroom {
+				t.Fatalf("pick() = %s reason %q headroom %q, want %s reason %q headroom %q", picked.auth.ID, reason, picked.headroom.Reason, tc.wantID, tc.wantReason, tc.wantHeadroom)
+			}
+		})
+	}
+}
+
+func TestExpiringFirstSelectorHeadroomIgnoresUnknownResets(t *testing.T) {
+	t.Parallel()
+
+	// The 5h window of A is nearly spent but its reset is unknown, so it does
+	// not count against headroom; B's weekly window is unknown too. Without
+	// headroom, low-headroom candidates rank known urgencies before unknown ones.
+	const unknownShort, unknownWeek = "ef-headroom-unknown-short", "ef-headroom-unknown-week"
+	efStoreReading(t, unknownShort,
+		quotareading.Window{ID: "5h", Kind: quotareading.KindShort, UsedPercent: 95, Length: 5 * efHour},
+		quotareading.Window{ID: "7d", Kind: quotareading.KindLong, UsedPercent: 50, ResetsAt: efTestNow.Add(efDay), Length: 7 * efDay},
+	)
+	efStoreReading(t, unknownWeek,
+		quotareading.Window{ID: "5h", Kind: quotareading.KindShort, UsedPercent: 90, ResetsAt: efTestNow.Add(efHour), Length: 5 * efHour},
+		quotareading.Window{ID: "7d", Kind: quotareading.KindLong, UsedPercent: 10, Length: 7 * efDay},
+	)
+	selector := newHeadroomTestSelector()
+	picked, reason, err := selector.pick(context.Background(), "claude", "claude-opus-5-5", []*Auth{
+		efClaudeAuth(unknownWeek),
+		efClaudeAuth("low-known", efWindow{"5h", 15, efHour}, efWindow{"7d", 90, 6 * efDay}),
+		efClaudeAuth(unknownShort),
+	})
+	if err != nil || picked.auth.ID != unknownShort || reason != expiringFirstReasonMostUrgent || !picked.headroom.Has {
+		t.Fatalf("pick() = %+v %q %v, want %s with headroom", picked, reason, err, unknownShort)
+	}
+
+	picked, reason, err = selector.pick(context.Background(), "claude", "claude-opus-5-5", []*Auth{
+		efClaudeAuth(unknownWeek),
+		efClaudeAuth("low-known", efWindow{"5h", 15, efHour}, efWindow{"7d", 90, 6 * efDay}),
+	})
+	if err != nil || picked.auth.ID != "low-known" || reason != expiringFirstReasonLowHeadroom {
+		t.Fatalf("pick() = %+v %q %v, want low-known: a known urgency before an unknown one", picked, reason, err)
+	}
+}
+
+func TestExpiringFirstSelectorRotatesLowHeadroomTies(t *testing.T) {
+	t.Parallel()
+
+	selector := newHeadroomTestSelector()
+	auths := []*Auth{
+		efClaudeAuth("t2", efWindow{"5h", 10, efHour}, efWindow{"7d", 50, efDay}),
+		efClaudeAuth("t1", efWindow{"5h", 12, efHour}, efWindow{"7d", 50, efDay}),
+		efClaudeAuth("slow", efWindow{"5h", 10, efHour}, efWindow{"7d", 50, 2 * efDay}),
+	}
+	var picks []string
+	for index := 0; index < 4; index++ {
+		got, err := selector.Pick(context.Background(), "claude", "claude-opus-5-5", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatal(err)
+		}
+		picks = append(picks, got.ID)
+	}
+	if got := strings.Join(picks, ","); got != "t1,t2,t1,t2" {
+		t.Fatalf("picks = %s, want t1,t2,t1,t2", got)
 	}
 }
 
@@ -692,6 +915,21 @@ func TestExpiringFirstSelectorLogsPicks(t *testing.T) {
 		}
 	})
 
+	t.Run("low-headroom pick names the windows", func(t *testing.T) {
+		hook := efLogHook(t, log.InfoLevel)
+		selector := newHeadroomTestSelector()
+		selector.LogPicks = true
+		low := efClaudeAuth("auth-low", efWindow{"5h", 15, efHour}, efWindow{"7d", 50, 5 * efHour})
+		if _, err := selector.Pick(context.Background(), "claude", "claude-opus-5-5", cliproxyexecutor.Options{}, []*Auth{low, gated}); err != nil {
+			t.Fatal(err)
+		}
+		entries := efPickEntries(hook)
+		if len(entries) != 1 || entries[0].Data["reason"] != "low-headroom" ||
+			entries[0].Message != `expiring-first: pick | auth=auth-low urgency=10 window=7d headroom="5h at 15% left"` {
+			t.Fatalf("pick log entries = %+v", entries)
+		}
+	})
+
 	t.Run("default logs at debug", func(t *testing.T) {
 		hook := efLogHook(t, log.InfoLevel)
 		selector := newTestExpiringFirstSelector()
@@ -711,4 +949,32 @@ func TestExpiringFirstSelectorLogsPicks(t *testing.T) {
 			t.Fatalf("debug pick log entries = %+v", entries)
 		}
 	})
+}
+
+// A usable focus takes the request whatever its headroom: the headroom pools
+// order only the credentials outside a focus.
+func TestExpiringFirstSelectorFocusOutranksHeadroom(t *testing.T) {
+	t.Parallel()
+
+	low := efClaudeAuth("a-low", efWindow{"5h", 15, efHour}, efWindow{"7d", 50, 5 * efHour})
+	roomy := efClaudeAuth("b-roomy", efWindow{"5h", 80, 3 * efHour}, efWindow{"7d", 60, 2 * efDay})
+	selector := newTestFocusSelector(efFocusStore(t, low))
+	selector.HeadroomShortPercent, selector.HeadroomLongPercent = 20, 5
+	picked, reason, err := selector.pick(context.Background(), "claude", "claude-opus-5-5", []*Auth{low, roomy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if picked.auth.ID != "a-low" || reason != expiringFirstReasonFocus {
+		t.Fatalf("pick = %s (%s), want a-low (focus)", picked.auth.ID, reason)
+	}
+
+	// Without the focus, the credential with headroom gets the new session.
+	selector.Focus = routingfocus.NewStore()
+	picked, reason, err = selector.pick(context.Background(), "claude", "claude-opus-5-5", []*Auth{low, roomy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if picked.auth.ID != "b-roomy" || reason != expiringFirstReasonMostUrgent {
+		t.Fatalf("pick = %s (%s), want b-roomy (most-urgent)", picked.auth.ID, reason)
+	}
 }

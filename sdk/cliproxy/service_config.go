@@ -31,8 +31,10 @@ type routingRuntimeState struct {
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
 	// devyre: expiring-first settings, plain values so the state stays comparable.
-	expiringFirstGatePercent float64
-	expiringFirstLogPicks    bool
+	expiringFirstGatePercent   float64
+	expiringFirstHeadroomShort float64
+	expiringFirstHeadroomLong  float64
+	expiringFirstLogPicks      bool
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -56,6 +58,8 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	if internalconfig.IsExpiringFirstStrategy(cfg.Routing.Strategy) {
 		state.strategy = "expiring-first"
 		state.expiringFirstGatePercent = cfg.Routing.ExpiringFirst.GatePercent()
+		state.expiringFirstHeadroomShort = cfg.Routing.ExpiringFirst.HeadroomShort()
+		state.expiringFirstHeadroomLong = cfg.Routing.ExpiringFirst.HeadroomLong()
 		state.expiringFirstLogPicks = cfg.Routing.ExpiringFirst.LogPicks
 	}
 	state.sessionAffinity = cfg.Routing.SessionAffinity
@@ -83,6 +87,8 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	case "expiring-first": // devyre
 		selector = &coreauth.ExpiringFirstSelector{
 			GateRemainingPercent: state.expiringFirstGatePercent,
+			HeadroomShortPercent: state.expiringFirstHeadroomShort,
+			HeadroomLongPercent:  state.expiringFirstHeadroomLong,
 			LogPicks:             state.expiringFirstLogPicks,
 		}
 	default:

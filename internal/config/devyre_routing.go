@@ -13,13 +13,15 @@ import (
 // strategy settings and are kept in this file so the fork diff stays isolated.
 
 const (
-	defaultExpiringFirstGatePercent = 2.0
-	defaultClaudeUsageCacheTTL      = 5 * time.Minute
-	defaultCodexUsageCacheTTL       = 60 * time.Second
-	defaultUsageCacheRefreshFloor   = 30 * time.Second
-	defaultQuotaPollClaudeInterval  = 30 * time.Minute
-	defaultQuotaPollClaudeMinGap    = 10 * time.Minute
-	defaultQuotaPollCodexInterval   = 5 * time.Minute
+	defaultExpiringFirstGatePercent          = 2.0
+	defaultExpiringFirstHeadroomShortPercent = 20.0
+	defaultExpiringFirstHeadroomLongPercent  = 5.0
+	defaultClaudeUsageCacheTTL               = 5 * time.Minute
+	defaultCodexUsageCacheTTL                = 60 * time.Second
+	defaultUsageCacheRefreshFloor            = 30 * time.Second
+	defaultQuotaPollClaudeInterval           = 30 * time.Minute
+	defaultQuotaPollClaudeMinGap             = 10 * time.Minute
+	defaultQuotaPollCodexInterval            = 5 * time.Minute
 )
 
 // ExpiringFirstConfig tunes the expiring-first credential selector.
@@ -28,16 +30,43 @@ type ExpiringFirstConfig struct {
 	// model-scoped window has at most this much quota left. Default: 2.
 	GateRemainingPercent *float64 `yaml:"gate-remaining-percent,omitempty" json:"gate-remaining-percent,omitempty"`
 
+	// HeadroomShortPercent is the headroom a new or failed-over session needs
+	// in short windows (24 hours or less, such as Claude's 5-hour limit): more
+	// than this percent left. Credentials without headroom are used only when
+	// none has it. At or below the gate it is off. Default: 20.
+	HeadroomShortPercent *float64 `yaml:"headroom-short-percent,omitempty" json:"headroom-short-percent,omitempty"`
+
+	// HeadroomLongPercent is the same for long windows (the 7-day limit) and
+	// the model-scoped window of the requested family. Default: 5.
+	HeadroomLongPercent *float64 `yaml:"headroom-long-percent,omitempty" json:"headroom-long-percent,omitempty"`
+
 	// LogPicks logs every pick at info level instead of debug.
 	LogPicks bool `yaml:"log-picks,omitempty" json:"log-picks,omitempty"`
 }
 
 // GatePercent returns the gate threshold: 2 when unset or NaN, clamped to 0..100.
 func (c ExpiringFirstConfig) GatePercent() float64 {
-	if c.GateRemainingPercent == nil || math.IsNaN(*c.GateRemainingPercent) {
-		return defaultExpiringFirstGatePercent
+	return devyrePercent(c.GateRemainingPercent, defaultExpiringFirstGatePercent)
+}
+
+// HeadroomShort returns the short-window headroom threshold: 20 when unset or
+// NaN, clamped to 0..100.
+func (c ExpiringFirstConfig) HeadroomShort() float64 {
+	return devyrePercent(c.HeadroomShortPercent, defaultExpiringFirstHeadroomShortPercent)
+}
+
+// HeadroomLong returns the long-window headroom threshold: 5 when unset or
+// NaN, clamped to 0..100.
+func (c ExpiringFirstConfig) HeadroomLong() float64 {
+	return devyrePercent(c.HeadroomLongPercent, defaultExpiringFirstHeadroomLongPercent)
+}
+
+// devyrePercent returns *value clamped to 0..100, or def when value is unset or NaN.
+func devyrePercent(value *float64, def float64) float64 {
+	if value == nil || math.IsNaN(*value) {
+		return def
 	}
-	return math.Min(math.Max(*c.GateRemainingPercent, 0), 100)
+	return math.Min(math.Max(*value, 0), 100)
 }
 
 // UsageCacheConfig tunes the management api-call cache for provider usage endpoints.
@@ -151,6 +180,8 @@ func devyreParseDuration(raw string, def time.Duration) time.Duration {
 // zero value (0 or false) differs from leaving them unset.
 var devyrePointerSettings = []string{
 	"routing.expiring-first.gate-remaining-percent",
+	"routing.expiring-first.headroom-short-percent",
+	"routing.expiring-first.headroom-long-percent",
 	"routing.quota-observation.usage-cache.enabled",
 	"routing.quota-observation.poller.enabled",
 }
