@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // devyre: what SessionAffinitySelector tells its fallback selector about a
@@ -97,6 +99,31 @@ func (s *SessionAffinitySelector) devyrePlacementFor(key, provider, model string
 		return s.devyreFailover(from, provider, model)
 	}
 	return &placement{kind: placementNew}
+}
+
+// headroomJudge is a fallback selector that knows whether a credential has
+// headroom for a request: ExpiringFirstSelector.
+type headroomJudge interface {
+	headroomFor(auth *Auth, model string) (bool, string)
+}
+
+// devyreJoinsParent reports whether a session may take its parent's binding to
+// auth. A fork reads its parent's cached prefix, so staying is what makes its
+// cache hit; other aliases of one session stay together too. A non-fork
+// subagent starts a fresh context with nothing of its parent's cache to reuse,
+// so it takes the parent's credential only while that credential has headroom
+// for the request. Otherwise it is placed like a new session, and an info line
+// says why. Without a fallback that knows headroom, nothing changes.
+func (s *SessionAffinitySelector) devyreJoinsParent(entry *log.Entry, isSubagent bool, auth *Auth, provider, model, sessionID, parentID string) bool {
+	judge, ok := s.fallback.(headroomJudge)
+	if !isSubagent || !ok {
+		return true
+	}
+	has, reason := judge.headroomFor(auth, model)
+	if !has {
+		entry.Infof("session-affinity: subagent left its parent's auth without headroom | session=%s parent=%s auth=%s provider=%s model=%s headroom=%q", truncateSessionID(sessionID), truncateSessionID(parentID), auth.ID, provider, model, reason)
+	}
+	return has
 }
 
 // devyreAffinityState is the fork's own state of a SessionAffinitySelector.

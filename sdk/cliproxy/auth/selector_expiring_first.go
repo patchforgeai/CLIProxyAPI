@@ -200,6 +200,13 @@ func viewExpiringFirst(auth *Auth, model string, store *quotareading.Store, now 
 	}
 }
 
+// headroomFor reports whether auth has headroom for a request for model now,
+// usable included, and why not (headroomJudge, for subagents joining a parent).
+func (s *ExpiringFirstSelector) headroomFor(auth *Auth, model string) (bool, string) {
+	view := viewExpiringFirst(auth, model, quotareading.Default(), s.now(), s.thresholds())
+	return view.HasHeadroom(), view.HeadroomReason()
+}
+
 // Pick selects the available credential whose quota would be lost soonest.
 func (s *ExpiringFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts

@@ -1086,7 +1086,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			for _, auth := range available {
 				// devyre: a usable focus takes the session over (devyre_focus.go).
 				if auth.ID == cachedAuthID && !s.devyreFocusTakesOver(ctx, provider, model, primaryID, auth.ID, available) {
-					if !isSubagent || s.subagentAffinity {
+					// devyre: a non-fork subagent joins only with headroom (devyre_placement.go).
+					if (!isSubagent || s.subagentAffinity) && s.devyreJoinsParent(entry, isSubagent, auth, provider, model, primaryID, fallbackID) {
 						bind(auth.ID)
 						if isFork {
 							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
