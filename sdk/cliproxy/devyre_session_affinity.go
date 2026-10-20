@@ -5,21 +5,26 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
 
-// devyre: session bindings across routing reloads and restarts.
+// devyre: session bindings across routing reloads and restarts, and the
+// continuity of the cloaked Claude conversations across restarts.
 
-// devyreSessionState holds the persistence of the session bindings.
+// devyreSessionState holds the persistence of the session bindings and of the
+// conversations' continuity (helps.ClaudeContinuityPersistence), which run
+// together.
 type devyreSessionState struct {
 	mu sync.Mutex
 	// started is set once Run restored the bindings; config applies before
 	// that change nothing here.
 	started     bool
 	persistence *coreauth.SessionPersistence
+	continuity  *helps.ClaudeContinuityPersistence
 }
 
 // devyreRoutingSelector builds the selector for state, as newRoutingSelector
@@ -50,8 +55,9 @@ func devyreSessionAffinityPath(configPath string) string {
 }
 
 // devyreStartSessionPersistence restores the saved session bindings into the
-// selector and starts saving them, when routing.session-affinity-persist and
-// session affinity are on. Run calls it once, before the server takes requests.
+// selector and the conversations' continuity, and starts saving both, when
+// routing.session-affinity-persist and session affinity are on. Run calls it
+// once, before the server takes requests.
 func (s *Service) devyreStartSessionPersistence() {
 	s.cfgMu.RLock()
 	cfg := s.cfg
@@ -76,17 +82,28 @@ func (s *Service) devyreApplySessionPersistence(cfg *config.Config) {
 	}
 }
 
-// devyreStopSessionPersistence saves the session bindings once more and stops
-// saving them. Shutdown calls it once the server stopped, after the stdin
-// lifeline's shutdown line, its EOF and a signal alike.
+// devyreStopSessionPersistence saves the session bindings and the
+// conversations' continuity once more and stops saving them. Shutdown calls it
+// once the server stopped, after the stdin lifeline's shutdown line, its EOF
+// and a signal alike.
 func (s *Service) devyreStopSessionPersistence() {
 	state := &s.devyreSessions
 	state.mu.Lock()
 	defer state.mu.Unlock()
 	state.started = false
+	devyreCloseSessionPersistenceLocked(state)
+}
+
+// devyreCloseSessionPersistenceLocked saves and stops both persistences.
+// Callers hold state.mu.
+func devyreCloseSessionPersistenceLocked(state *devyreSessionState) {
 	if state.persistence != nil {
 		state.persistence.Close()
 		state.persistence = nil
+	}
+	if state.continuity != nil {
+		state.continuity.Close()
+		state.continuity = nil
 	}
 }
 
@@ -101,10 +118,7 @@ func (s *Service) devyreSyncSessionPersistenceLocked(cfg *config.Config, load bo
 	_, affinity := selector.(*coreauth.SessionAffinitySelector)
 	enabled := affinity && cfg != nil && !cfg.Home.Enabled && cfg.Routing.SessionAffinityPersistEnabled()
 	if !enabled {
-		if state.persistence != nil {
-			state.persistence.Close()
-			state.persistence = nil
-		}
+		devyreCloseSessionPersistenceLocked(state)
 		return
 	}
 	if state.persistence == nil {
@@ -114,12 +128,16 @@ func (s *Service) devyreSyncSessionPersistenceLocked(cfg *config.Config, load bo
 			return
 		}
 		state.persistence = coreauth.NewSessionPersistence(path)
+		state.continuity = helps.NewClaudeContinuityPersistence(filepath.Join(filepath.Dir(path), helps.ClaudeContinuityFileName))
 		if load {
 			state.persistence.Load(selector)
+			state.continuity.Load()
 		}
 		state.persistence.Attach(selector)
+		state.continuity.Attach()
 		if !load {
 			state.persistence.Changed()
+			state.continuity.Changed()
 		}
 		return
 	}

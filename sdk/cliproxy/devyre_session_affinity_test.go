@@ -11,6 +11,7 @@ import (
 	"time"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
@@ -104,16 +105,26 @@ func TestDevyreSessionPersistenceAcrossRuns(t *testing.T) {
 		}
 	}
 
-	var bound string
+	var bound, conversation string
+	helps.ResetClaudeDiagnosticsForTest()
+	t.Cleanup(helps.ResetClaudeDiagnosticsForTest)
 	run("first run", func(service *Service) {
 		bound = devyrePersistPick(t, service, "across-runs")
+		conversation, _, _, _, _ = helps.BeginClaudeContinuity("id:persist-svc-a", "across-runs", true, "")
+		helps.PinClaudeSessionDate(conversation, "2026-10-19")
 	})
-	if _, errStat := os.Stat(filepath.Join(writable, coreauth.SessionAffinityFileName)); errStat != nil {
-		t.Fatalf("the stop did not save the bindings in WRITABLE_PATH: %v", errStat)
+	for _, name := range []string{coreauth.SessionAffinityFileName, helps.ClaudeContinuityFileName} {
+		if _, errStat := os.Stat(filepath.Join(writable, name)); errStat != nil {
+			t.Fatalf("the stop did not save %s in WRITABLE_PATH: %v", name, errStat)
+		}
 	}
+	helps.ResetClaudeDiagnosticsForTest() // a new process
 	run("second run", func(service *Service) {
 		if got := devyreLookup(service, "across-runs"); got != bound {
 			t.Fatalf("after a restart the session is bound to %q, want %s", got, bound)
+		}
+		if got := helps.PinClaudeSessionDate(conversation, "2026-10-20"); got != "2026-10-19" {
+			t.Fatalf("after a restart the conversation is pinned to %q, want 2026-10-19", got)
 		}
 	})
 }
@@ -147,7 +158,7 @@ func TestDevyreSessionPersistenceFollowsTheConfig(t *testing.T) {
 	service := devyrePersistService(cfg, configPath)
 	service.devyreStartSessionPersistence()
 	devyrePersistPick(t, service, "unsaved")
-	if service.devyreSessions.persistence != nil {
+	if service.devyreSessions.persistence != nil || service.devyreSessions.continuity != nil {
 		t.Fatal("session-affinity-persist: false persists")
 	}
 
@@ -165,26 +176,32 @@ func TestDevyreSessionPersistenceFollowsTheConfig(t *testing.T) {
 	}
 	restarted := devyrePersistService(devyreAffinityConfig(2, "1h"), configPath)
 	restarted.devyreStartSessionPersistence()
-	defer restarted.devyreStopSessionPersistence()
 	if got := devyreLookup(restarted, "after-reload"); got != bound {
 		t.Fatalf("after-reload is bound to %q after a restart, want %s", got, bound)
 	}
 	if got := devyreLookup(restarted, "unsaved"); got == "" {
 		t.Fatal("the binding made while saving was off was not saved once it was back on")
 	}
+	restarted.devyreStopSessionPersistence()
 
 	// Without session affinity nothing persists.
-	if errRemove := os.Remove(file); errRemove != nil {
-		t.Fatal(errRemove)
+	continuity := filepath.Join(dir, helps.ClaudeContinuityFileName)
+	for _, saved := range []string{file, continuity} {
+		if errRemove := os.Remove(saved); errRemove != nil {
+			t.Fatal(errRemove)
+		}
 	}
 	plain := devyrePersistService(expiringFirstRoutingConfig("expiring-first", nil, false), configPath)
 	plain.devyreStartSessionPersistence()
-	if plain.devyreSessions.persistence != nil {
+	if plain.devyreSessions.persistence != nil || plain.devyreSessions.continuity != nil {
 		t.Fatal("a selector without session affinity persists")
 	}
+	helps.BeginClaudeContinuity("id:persist-svc-a", "without-affinity", true, "")
 	plain.devyreStopSessionPersistence()
-	if _, errStat := os.Stat(file); !os.IsNotExist(errStat) {
-		t.Fatalf("a service without session affinity wrote %s: %v", file, errStat)
+	for _, saved := range []string{file, continuity} {
+		if _, errStat := os.Stat(saved); !os.IsNotExist(errStat) {
+			t.Fatalf("a service without session affinity wrote %s: %v", saved, errStat)
+		}
 	}
 }
 

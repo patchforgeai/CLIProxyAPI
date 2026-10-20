@@ -125,6 +125,8 @@ var claudeDiagnosticsState = struct {
 	lastCleanup  time.Time
 	nextSequence uint64
 	nextAccess   uint64
+	// devyre: the persistence told of every change (devyre_claude_continuity.go).
+	devyrePersistence *ClaudeContinuityPersistence
 }{entries: make(map[string]claudeDiagnosticsEntry)}
 
 // IsValidClaudePromptID verifies whether an explicit prompt ID adheres to strict RFC 4122 UUIDv4 semantics.
@@ -194,6 +196,7 @@ func BeginClaudeContinuity(credentialIdentity, sessionID string, isNewPromptTurn
 	entry.lastAccess = claudeDiagnosticsState.nextAccess
 	entry.expiresAt = now.Add(claudeDiagnosticsTTL)
 	claudeDiagnosticsState.entries[key] = entry
+	devyreContinuityChangedLocked()
 	return key, sequence, entry.previousMessageID, entry.previousRequestID, activePromptID
 }
 
@@ -220,6 +223,7 @@ func PinClaudeSessionDate(key, date string) string {
 	if entry.pinnedDate == "" {
 		entry.pinnedDate = date
 		claudeDiagnosticsState.entries[key] = entry
+		devyreContinuityChangedLocked()
 		return date
 	}
 	return entry.pinnedDate
@@ -269,6 +273,7 @@ func CommitClaudeContinuity(key string, sequence uint64, messageID, requestID st
 	entry.lastAccess = claudeDiagnosticsState.nextAccess
 	entry.expiresAt = now.Add(claudeDiagnosticsTTL)
 	claudeDiagnosticsState.entries[key] = entry
+	devyreContinuityChangedLocked()
 }
 
 // CommitClaudeDiagnostics advances continuity only after a response completes.

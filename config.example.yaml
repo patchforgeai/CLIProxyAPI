@@ -175,6 +175,9 @@ routing:
   # is set, else next to this file, so a restart does not move sessions to other accounts. Written
   # at most every 30 seconds while bindings change, and on shutdown. Ignored when
   # routing.session-affinity is false. Default: true.
+  # devyre: the continuity of each cloaked Claude conversation (the date its requests carry, its
+  # previous message and request, its prompt id) persists beside it in claude-continuity.json, so
+  # a restart on a later day does not change a conversation's date and with it its cached prefix.
   # session-affinity-persist: true
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
