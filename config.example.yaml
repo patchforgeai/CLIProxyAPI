@@ -446,6 +446,13 @@ upstream:
     # When true, return original model IDs in Anthropic model list responses instead of cloaked IDs.
     disable-cloaking-model-list: false
 
+    # devyre: the secret behind the names a cloaked request gives the client's tools upstream
+    # (mcp__<words>__<word>_<Name>). Unset, each client's API key is that secret, so a client
+    # whose key changes gets new names for every tool, and each of its conversations writes its
+    # whole context to the prompt cache again at its next request. Set it when client keys
+    # rotate; every client then shares these names.
+    # mcp-alias-secret: ""
+
     # Anthropic-Beta is assembled per request rather than sent as a fixed list, matching
     # Claude Code: context-1m sits right after claude-code, mid-conversation-system
     # is added only for models that accept a role=system turn, advanced-tool-use only when

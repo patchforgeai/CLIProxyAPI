@@ -184,7 +184,7 @@ func (e *ClaudeExecutor) countTokensUpstream(ctx context.Context, auth *cliproxy
 	// Claude Code 2.1.220's beta.messages.countTokens() always appends this beta.
 	extraBetas = append(extraBetas, claudeTokenCountingBeta)
 	if fp.MCPAlias && cloaked {
-		mcpAliases := resolveClaudeMCPAliasOptions(ctx)
+		mcpAliases := resolveClaudeMCPAliasOptions(ctx, e.cfg)
 		body, _ = prepareClaudeOAuthToolNamesForUpstream(body, mcpAliases)
 	}
 	body = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, body, baseModel, helps.APIKeyModelIsCompat(req))

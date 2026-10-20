@@ -7663,7 +7663,7 @@ func TestPrepareClaudeOAuthToolNamesForUpstream_PreservesMCPConvention(t *testin
 }
 
 func TestResolveClaudeMCPAliasOptions(t *testing.T) {
-	if options := resolveClaudeMCPAliasOptions(context.Background()); options.secret == "" {
+	if options := resolveClaudeMCPAliasOptions(context.Background(), nil); options.secret == "" {
 		t.Fatal("default caller alias secret is empty")
 	}
 
@@ -7671,15 +7671,15 @@ func TestResolveClaudeMCPAliasOptions(t *testing.T) {
 	ginCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	ginCtx.Set("userApiKey", "downstream-caller-one")
 	callerCtx := context.WithValue(context.Background(), "gin", ginCtx)
-	firstSecret := resolveClaudeMCPAliasOptions(callerCtx).secret
-	secondSecret := resolveClaudeMCPAliasOptions(callerCtx).secret
+	firstSecret := resolveClaudeMCPAliasOptions(callerCtx, nil).secret
+	secondSecret := resolveClaudeMCPAliasOptions(callerCtx, nil).secret
 	if firstSecret == "" || secondSecret != firstSecret {
 		t.Fatalf("caller alias secret is unstable: %q != %q", firstSecret, secondSecret)
 	}
 	otherGinCtx, _ := gin.CreateTestContext(httptest.NewRecorder())
 	otherGinCtx.Set("userApiKey", "downstream-caller-two")
 	otherCtx := context.WithValue(context.Background(), "gin", otherGinCtx)
-	if otherSecret := resolveClaudeMCPAliasOptions(otherCtx).secret; otherSecret == firstSecret {
+	if otherSecret := resolveClaudeMCPAliasOptions(otherCtx, nil).secret; otherSecret == firstSecret {
 		t.Fatalf("different downstream callers shared alias secret %q", firstSecret)
 	}
 }

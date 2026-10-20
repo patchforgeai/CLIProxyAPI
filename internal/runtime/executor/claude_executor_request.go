@@ -1650,7 +1650,11 @@ type claudeMCPAliasOptions struct {
 	secret string
 }
 
-func resolveClaudeMCPAliasOptions(ctx context.Context) claudeMCPAliasOptions {
+func resolveClaudeMCPAliasOptions(ctx context.Context, cfg *config.Config) claudeMCPAliasOptions {
+	// devyre: a configured secret outlives the caller's key (claude-code.mcp-alias-secret).
+	if secret := devyreClaudeMCPAliasSecret(cfg); secret != "" {
+		return claudeMCPAliasOptions{secret: secret}
+	}
 	// Alias identity belongs to the downstream caller, not to the selected
 	// upstream credential. This keeps names stable across OAuth refresh and auth
 	// failover while giving one caller a shared virtual MCP server component.

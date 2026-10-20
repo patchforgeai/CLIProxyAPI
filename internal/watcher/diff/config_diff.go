@@ -61,6 +61,17 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.ClaudeCode.DisableCloakingModelList != newCfg.ClaudeCode.DisableCloakingModelList {
 		changes = append(changes, fmt.Sprintf("claude-code.disable-cloaking-model-list: %t -> %t", oldCfg.ClaudeCode.DisableCloakingModelList, newCfg.ClaudeCode.DisableCloakingModelList))
 	}
+	// devyre: a secret, like remote-management.secret-key; a change renames every cloaked tool.
+	if oldAlias, newAlias := strings.TrimSpace(oldCfg.ClaudeCode.MCPAliasSecret), strings.TrimSpace(newCfg.ClaudeCode.MCPAliasSecret); oldAlias != newAlias {
+		switch {
+		case oldAlias == "":
+			changes = append(changes, "claude-code.mcp-alias-secret: created")
+		case newAlias == "":
+			changes = append(changes, "claude-code.mcp-alias-secret: deleted")
+		default:
+			changes = append(changes, "claude-code.mcp-alias-secret: updated")
+		}
+	}
 	if oldCfg.DisableImageGeneration != newCfg.DisableImageGeneration {
 		changes = append(changes, fmt.Sprintf("disable-image-generation: %v -> %v", oldCfg.DisableImageGeneration, newCfg.DisableImageGeneration))
 	}

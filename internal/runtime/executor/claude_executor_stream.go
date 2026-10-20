@@ -258,7 +258,7 @@ func (e *ClaudeExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.A
 	bodyForUpstream := body
 	var oauthToolNamesReverseMap map[string]string
 	if fp.MCPAlias && cloaked {
-		mcpAliases := resolveClaudeMCPAliasOptions(ctx)
+		mcpAliases := resolveClaudeMCPAliasOptions(ctx, e.cfg)
 		bodyForUpstream, oauthToolNamesReverseMap = prepareClaudeOAuthToolNamesForUpstream(bodyForUpstream, mcpAliases)
 	}
 	bodyForUpstream = sanitizeClaudeMessagesForClaudeUpstreamWithDebug(ctx, bodyForUpstream, baseModel, helps.APIKeyModelIsCompat(req))

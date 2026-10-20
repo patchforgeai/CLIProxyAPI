@@ -94,6 +94,10 @@ type CodexClientConfig struct {
 type ClaudeCodeConfig struct {
 	// DisableCloakingModelList disables model ID cloaking in Anthropic model list responses.
 	DisableCloakingModelList bool `yaml:"disable-cloaking-model-list" json:"disable-cloaking-model-list"`
+
+	// devyre: MCPAliasSecret names the caller's tools upstream in place of the
+	// caller's API key (internal/runtime/executor/devyre_claude_mcp_alias.go).
+	MCPAliasSecret string `yaml:"mcp-alias-secret,omitempty" json:"-"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.
