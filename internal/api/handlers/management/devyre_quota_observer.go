@@ -57,9 +57,9 @@ func (h *Handler) runQuotaObserver(ctx context.Context) {
 	}
 }
 
-// observeQuotaOnce runs one poller tick: it forgets the readings of removed
-// credentials, then, when the poller is enabled, picks the due credentials
-// with nextPolls and polls them one after another.
+// observeQuotaOnce runs one poller tick: it forgets the readings and the focus
+// of removed credentials, then, when the poller is enabled, picks the due
+// credentials with nextPolls and polls them one after another.
 func (h *Handler) observeQuotaOnce(ctx context.Context) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -74,10 +74,13 @@ func (h *Handler) observeQuotaOnce(ctx context.Context) {
 	}
 	cache := h.devyreUsageCache()
 	// Take the readings before the credential list, so a credential registered
-	// in between is never mistaken for a removed one.
+	// in between is never mistaken for a removed one; a focus set after
+	// listedAt is kept for the same reason.
 	stored := cache.store().Snapshot()
+	listedAt := time.Now()
 	auths := manager.List()
 	forgetRemovedCredentials(cache.store(), stored, auths)
+	forgetRemovedFocus(h.devyreFocusStore(), auths, listedAt)
 
 	routing := h.devyreRoutingConfig()
 	if !routing.QuotaPollerEnabled() {

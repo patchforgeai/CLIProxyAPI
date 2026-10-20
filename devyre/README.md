@@ -10,6 +10,7 @@ The design, the verified facts and the decisions behind this fork are in [PLAN.m
 - **T3 Code hub contract.** `TestT3Hub_*` pin the deprecated `/v0/management` endpoints that T3 Code's "CLIProxyAPI hub" decodes (`auth-files`, `api-call`, `reset-quota`), plus `/v8/management/requests/api-call`, which the panel uses. The auth-files listing also reports a Codex plan as `id_token.chatgpt_plan_type`, the key T3 reads, next to upstream's `id_token.plan_type`.
 - **Quota readings and usage cache.** One in-memory store of quota readings, fed by response headers, by usage bodies passing through `api-call`, and by an idle-credential poller. A usage cache inside `APICall` keeps the panel, the T3 hub and the poller from tripping Claude's rate-limited usage endpoint. See [Routing and quota readings](#routing-and-quota-readings).
 - **`expiring-first` routing.** A built-in strategy that prefers the credential whose quota would be lost soonest. Session affinity still keeps a thread on its credential. `GET /v8/management/routing/quota-readings` shows the ranking.
+- **Focus an account.** `/v8/management/routing/focus` focuses one credential per provider, for a while or until removed. Under `expiring-first` it then takes every request it can serve, threads already bound to another credential included, so its weekly quota is burned before it resets. The focus survives restarts. See [Focus](#focus).
 - **Deploy kit.** Docker Compose on loopback only, `tailscale serve` on port 8318, PowerShell scripts for secrets, start-up, backup and upstream syncs, and client snippets.
 - **Tailnet-only and passwordless.** CPA is reachable only from this PC and the tailnet, and chosen tailnet devices plus this PC use it without a key (`management.tailnet-auth`). `exposure-check.ps1` verifies both. See [Tailnet-only and passwordless](#tailnet-only-and-passwordless).
 - **Sidecar lifeline.** `-lifeline-stdin` lets a supervising process own the server's lifetime through stdin, in place of the 10-second keep-alive idle limit that upstream applies with `-password`; `-password-stdin` hands it the local password there, off the command line. The server then reports its listener on stdout, and `/keep-alive` proves it holds the password without anyone sending it. Off by default. See [Sidecar lifeline](#sidecar-lifeline).
@@ -51,17 +52,22 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/devyre_management_ban_test.go` | Over RESP, commands before `AUTH` never count toward the ban and five wrong passwords do |
 | `internal/api/devyre_panel.go` | `devyreServePanel`: `/management.html` from the panel built into the binary, with its sha256 as the `ETag`, or from the file `MANAGEMENT_STATIC_PATH` names; 404 in a `devyre_nopanel` build; never downloads |
 | `internal/api/devyre_panel_test.go` | Through the real server, with every request that leaves the machine refused and recorded: the embedded bytes, headers and a 304 revalidation with no request made and no file written (404 under `devyre_nopanel`), the `MANAGEMENT_STATIC_PATH` override, and 404 with `disable-control-panel` |
+| `internal/api/devyre_routing_focus.go` | `devyreLoadRoutingFocus`: loads the focus file from the auth dir at start-up, never failing it; `devyreRegisterRoutingFocus`: the `/v8` routes |
+| `internal/api/devyre_routing_focus_test.go` | The start-up load: an ended focus dropped, writes going to the same file, an invalid file starting empty |
+| `internal/api/devyre_routing_focus_route_test.go` | The focus endpoints are on `/v8` only, behind management auth, and the readings report the focus |
 | `internal/api/devyre_routing_readings_route_test.go` | The readings endpoint is on `/v8` only, behind management auth |
 | `internal/api/devyre_t3_hub_contract_test.go` | `TestT3Hub_*`, the T3 Code hub contract |
 | `internal/api/devyre_tailnet_auth.go` | Keyless proxy API for trusted requests (`proxy-api`), the key-only `/v1/ws` wrapper and the anti-framing headers of the panel pages |
 | `internal/api/devyre_tailnet_auth_test.go` | Full-stack `tailnet-auth` tests through the real server and config loader: session endpoint, token-bearing routes, CORS, proxy principal, `/v1/ws`, framing, the tailnet name on the API port, the rendered proxy debug lines |
 | `internal/api/handlers/management/devyre_oauth_redirect.go` | `redirect_port` on the Claude and Codex OAuth starts: parsing, the refusals, and the redirect-aware authorize URL and exchange |
 | `internal/api/handlers/management/devyre_oauth_redirect_test.go` | Through `StartOAuthV8`: the default redirects unchanged, the moved ones per provider, every refused value and the `is_webui` combination, a Codex exchange that uses the moved redirect, and a service that cannot move it |
-| `internal/api/handlers/management/devyre_quota_observer.go` | Idle-credential usage poller; also forgets the readings of removed credentials |
+| `internal/api/handlers/management/devyre_quota_observer.go` | Idle-credential usage poller; also forgets the readings and the focus of removed credentials |
 | `internal/api/handlers/management/devyre_quota_observer_test.go` | Poller scheduling, min-gap, backoff and pruning tests |
 | `internal/api/handlers/management/devyre_routing_config_test.go` | The routing blocks survive `/v8/management` config writes |
-| `internal/api/handlers/management/devyre_routing_readings.go` | `GET /v8/management/routing/quota-readings` |
-| `internal/api/handlers/management/devyre_routing_readings_test.go` | Readings endpoint golden JSON |
+| `internal/api/handlers/management/devyre_routing_focus.go` | `GET`, `PUT` and `DELETE /v8/management/routing/focus`; `SetRoutingFocusStore`; `forgetRemovedFocus` for the observer |
+| `internal/api/handlers/management/devyre_routing_focus_test.go` | Focus endpoints: lookups by ID and file name, replacing per provider, deletes by name and provider, every refusal, only existing credentials listed, the file written, and the observer forgetting removed credentials' focus |
+| `internal/api/handlers/management/devyre_routing_readings.go` | `GET /v8/management/routing/quota-readings`, the focus included |
+| `internal/api/handlers/management/devyre_routing_readings_test.go` | Readings endpoint golden JSON; a focused credential's rank and fields |
 | `internal/api/handlers/management/devyre_routing_strategy_test.go` | `PUT /routing/strategy` accepts `expiring-first` and its aliases |
 | `internal/api/handlers/management/devyre_tailnet_auth.go` | Keyless management access (`devyreTailnetAuthorize`, which `Middleware()` asks first) and `GET /v8/management/auth/session` |
 | `internal/api/handlers/management/devyre_tailnet_auth_test.go` | Middleware, ban, `allow-remote` and session tests, a `/v8` config write round trip, and the debug decision lines as the log formatter renders them |
@@ -99,6 +105,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/quotareading/reading.go` | Readings model: `Window`, `Kind`, `Reading` |
 | `internal/quotareading/store.go` | Readings store: `Put`, `Replace`, `Effective` |
 | `internal/quotareading/store_test.go` | Store tests |
+| `internal/routingfocus/store.go` | The focus store: one focus per provider, `Set`, `ClearProvider`, `ClearAuth`, `Retain`, `Focused`, `List`, the lock-free `Empty`, and the atomically written `routing-focus.devyre` file |
+| `internal/routingfocus/store_test.go` | Replacing per provider, clearing, retaining, ends inert and pruned, the file's exact contents and mode, invalid files, memory only, failed writes, concurrent use |
 | `internal/tailnetauth/decide.go` | The trust decision: `Decide`, a pure function of the policy and the request (the request carries the OS lookup of its peer's user, asked only when a local decision depends on it) |
 | `internal/tailnetauth/decide_test.go` | Table tests for every rule of the decision, local trust bound to a direct peer of the server's own user |
 | `internal/tailnetauth/peer.go` | `PeerRunsAsThisUser`: whether the process at the other end of a loopback connection runs as the server's OS user; the `/proc/net/tcp` parser |
@@ -107,8 +115,10 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/tailnetauth/peer_other.go` | Other systems: no answer (`errors.ErrUnsupported`), so nothing is local there |
 | `internal/tailnetauth/peer_test.go` | `/proc/net/tcp` lines (IPv4, IPv6, mapped, either byte order), a real loopback connection from this process (IPv4 and IPv6), and `FromHTTP` over a real server |
 | `internal/tailnetauth/peer_windows_test.go` | A process the server may not open is not its user's |
+| `sdk/cliproxy/auth/devyre_focus.go` | `devyreFocusTakesOver`: whether session affinity gives a bound session up to a usable focus |
+| `sdk/cliproxy/auth/devyre_focus_test.go` | The focus in the selector (urgency, 5h, 7d and model-scoped gates, tiers, other providers, ends, rotation, the `focus` log reason) and under session affinity (explicit sessions, the fallback key, LCP, the log line, through the manager) |
 | `sdk/cliproxy/auth/devyre_priority.go` | Exports the selectors' priority and availability rules for the readings endpoint |
-| `sdk/cliproxy/auth/selector_expiring_first.go` | The `expiring-first` selector |
+| `sdk/cliproxy/auth/selector_expiring_first.go` | The `expiring-first` selector, with the focus |
 | `sdk/cliproxy/auth/selector_expiring_first_test.go` | Selector tests, including session affinity |
 | `sdk/cliproxy/devyre_service_config_test.go` | Strategy aliases, settings and hot reload through the service config |
 | `test/devyre_scripts_test.go` | Runs the PowerShell scripts with `powershell.exe` against a fake `tailscale status` and a fake management API (skipped without Windows PowerShell): the `allowed-hosts` that `tailnet-trust.ps1` writes, and its device selection (new devices only by exact MagicDNS name, renamed automation hosts, confirmation, the automation guard); `new-secrets.ps1 -Rotate` keeping the `tailnet-auth` block that the server wrote, with a fake `docker` first on `PATH`; the `cpa-common.ps1` helpers that `exposure-check.ps1` reads `allowed-hosts` with; `update-panel.ps1` on a copy of the panel folder with a fake `gh`, vendoring a release only when it matches its sha256 digest and is an HTML page, and writing its record |
@@ -128,9 +138,9 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/auth/codex/openai_auth.go` | `GenerateAuthURL` became a wrapper passing `RedirectURI` to an unexported `generateAuthURL`. |
 | `internal/api/handlers/management/config_basic.go` | `normalizeRoutingStrategy` accepts `expiring-first`, so `PUT /routing/strategy` does too. |
 | `internal/api/handlers/management/handler.go` | Two hunks: `Middleware()` asks `devyreTailnetAuthorize` first and skips the key for a trusted request, and the missing-key branch of `AuthenticateManagementKey` no longer calls `fail()`, so only a wrong key counts toward the ban (RESP's commands before `AUTH`, which ask with an empty key only to learn whether the IP is banned, included). |
-| `internal/api/server.go` | Starts the quota observer once, right after the management handler is created. One line adds `devyreTailnetContext` to the engine, so the proxy API's keyless check reads the live config. One `if`, after the keep-alive setup, registers the lifeline's `/keep-alive` (`devyreEnableKeepAliveProbe`), and the line after it keeps the listen report. The `devyre` field (`devyreServerState`) holds the fork's own server settings. `Start` calls `devyreReportListen` twice: when `net.Listen` fails, and right before the first connection is accepted. |
+| `internal/api/server.go` | Starts the quota observer once, right after the management handler is created, and the line after it loads the focus (`devyreLoadRoutingFocus`). One line adds `devyreTailnetContext` to the engine, so the proxy API's keyless check reads the live config. One `if`, after the keep-alive setup, registers the lifeline's `/keep-alive` (`devyreEnableKeepAliveProbe`), and the line after it keeps the listen report. The `devyre` field (`devyreServerState`) holds the fork's own server settings. `Start` calls `devyreReportListen` twice: when `net.Listen` fails, and right before the first connection is accepted. |
 | `internal/api/server_management.go` | `serveManagementControlPanel` calls `devyreDenyFraming`, and once the control panel is known to be enabled it answers through `devyreServePanel` and returns, so upstream's file-or-download path after it never runs. |
-| `internal/api/server_management_v8.go` | Two lines register `GET /v8/management/routing/quota-readings` and `GET /v8/management/auth/session`. |
+| `internal/api/server_management_v8.go` | Three lines register `GET /v8/management/routing/quota-readings`, `/v8/management/routing/focus` (`devyreRegisterRoutingFocus`, its `GET`, `PUT` and `DELETE`) and `GET /v8/management/auth/session`. |
 | `internal/api/server_middleware.go` | Two hunks: `accessAuthMiddleware` falls back to `devyreKeylessProxyAccess` after the API keys fail with a 401, and `serveExampleAPIKeyWarningPage` calls `devyreDenyFraming`. |
 | `internal/api/server_options.go` | The `devyreKeepAliveProbe` and `devyreListenReport` fields that `WithDevyreKeepAliveProbe` and `WithDevyreListenReport` set. |
 | `internal/api/server_routes.go` | `AttachWebsocketRoute` uses `devyreKeyOnlyAuthMiddleware`, so `/v1/ws` is never keyless. |
@@ -139,6 +149,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/config/config_types.go` | The `Strategy` comment, the `ExpiringFirst` and `QuotaObservation` fields on `RoutingConfig`, and `RemoteManagement.TailnetAuth` (`management.tailnet-auth`). |
 | `internal/config/config_yaml.go` | `isKnownDefaultValue` keeps explicit zero values of the pointer-backed routing settings (`devyreKeepsExplicitZero`), so a save does not drop them. |
 | `internal/managementasset/updater.go` | `defaultManagementReleaseURL` and `defaultManagementFallbackURL` point at the panel fork's releases; never restore `cpamc.router-for.me`. `StartAutoUpdater` returns through `devyreSkipAutoUpdater` (which logs the panel served) and `EnsureLatestManagementHTML` through `devyreRefuseDownload`, so no updater starts and nothing is downloaded, whoever calls them. |
+| `sdk/cliproxy/auth/selector.go` | Three conditions in `SessionAffinitySelector`, where it reuses a binding (the explicit-session cache hit, the fallback-key cache hit and the LCP match in `pickLCP`), also ask `devyreFocusTakesOver`; a yes treats the bound credential as unavailable, so the upstream reselect-and-rebind path runs. |
 | `sdk/cliproxy/service_config.go` | `expiring-first` aliases in `normalizedRoutingRuntimeState`, construction in `newRoutingSelector`, and the gate and log settings in `routingRuntimeState`. That struct must stay comparable: no pointers, maps or slices. |
 
 If upstream deletes the `/v0/management` routes, `TestT3Hub_*` fails first. Restore the three routes T3 uses (`GET auth-files`, `POST api-call`, `POST reset-quota`) in `internal/api/devyre_v0_shim.go`.
@@ -150,10 +161,37 @@ With `routing.strategy: expiring-first` (the deploy template's setting), CPA pic
 - **Urgency** is the remaining percent of a credential's longest window, Claude's 7-day limit, divided by the hours until that window resets. The highest urgency is picked; equal urgencies take turns.
 - **Gates.** A credential is skipped while a window that applies to the request has at most `gate-remaining-percent` (2) left and has not reset: the 5-hour window, the 7-day window, or a window scoped to the requested model family. When every credential is gated, the one whose gates reset first is picked, and upstream 429s and cooldowns take over.
 - **Unknown credentials rank last.** A credential without readings is used only when no credential with readings is usable, taking turns with the other unknowns. It gets readings from its own traffic (response headers), from the panel or the T3 hub reading its usage, or from the idle poller (on by default with `expiring-first`). The poller checks every minute. It polls one Claude credential at a time, at least 10 minutes after any Claude usage call, so three new accounts all have readings about 20 minutes after a start; after that it re-polls a Claude credential once its weekly reading is 30 minutes old. Codex credentials are polled once their reading is 5 minutes old.
-- **Session affinity.** A thread stays on the credential it started on, because the prompt cache is per account. It moves only when that credential becomes unavailable (cooldown, disabled) or the binding expires after an hour, never for urgency. Expiring-first only places new threads and failed-over ones.
+- **Session affinity.** A thread stays on the credential it started on, because the prompt cache is per account. It moves only when that credential becomes unavailable (cooldown, disabled), the binding expires after an hour, or a [focus](#focus) takes it, never for urgency. Expiring-first only places new threads and failed-over ones.
 - **Priority tiers** keep their meaning: only the highest available tier is considered.
 
-`GET /v8/management/routing/quota-readings` (management key required; not on `/v0`) shows what the selector sees: per credential, its effective windows with `remaining_percent`, `resets_at`, `observed_at` and `source` (`header`, `usage` or `poll`), whether it is `usable` and why not (`gate_reason`, such as `"5h exhausted"` or `"7d exhausted"`), its `urgency_per_hour`, and its `rank` within its provider (1 is picked next; 0 means gated, unavailable or in a lower tier). Model-scoped windows are ignored there, so the view matches a request for an unscoped model.
+`GET /v8/management/routing/quota-readings` (management key required; not on `/v0`) shows what the selector sees: per credential, its effective windows with `remaining_percent`, `resets_at`, `observed_at` and `source` (`header`, `usage` or `poll`), whether it is `usable` and why not (`gate_reason`, such as `"5h exhausted"` or `"7d exhausted"`), its `urgency_per_hour`, its `rank` within its provider (1 is picked next; 0 means gated, unavailable or in a lower tier), and whether it is `focused`, with `focus_until` (the focus's end, `null` without one or when it is not focused). A focused credential that is ranked at all is rank 1. Model-scoped windows are ignored there, so the view matches a request for an unscoped model.
+
+### Focus
+
+Focusing a credential makes the router use it for every request it can serve, until the focus ends or is removed. It is meant for an account whose weekly quota should be burned first, such as one that just got a full weekly reset: the 7-day window resets whether its quota was used or not.
+
+- **One per provider.** Focusing a credential replaces any focus of its provider. Focuses of different providers apply side by side.
+- **What it can serve.** The focused credential must be among the selector's candidates: not disabled, cooling down or otherwise unavailable, and in the highest available priority tier, so priority tiers keep their meaning and a focus below the top tier does nothing. And its readings must not gate it for the request's model: neither its 5-hour nor its 7-day window may be exhausted, nor a window scoped to the requested model family (an exhausted Fable window gates Fable requests only). Then the pick is the focus, whatever the urgencies, logged with the reason `focus`. Otherwise the pick is the normal expiring-first pick.
+- **Threads move to it.** Focus deliberately overrides session affinity: a thread bound to another credential moves to the focus on its next request that the focus can serve, whether the binding came from an explicit session ID, the fallback key or the prompt-prefix (LCP) match, and is rebound to it. The log shows `session-affinity: focus takes over the binding | session=... from=<auth> focus=<auth>`. The moved thread rebuilds its prompt cache on the new account once.
+- **Afterwards.** A thread moved to the focus stays bound to it, like any binding. When the focus ends, is removed or becomes gated, its threads stay on that credential until it becomes unavailable (for example a 429 cooldown) or the binding expires; new threads go back to the expiring-first order.
+- **Only with `expiring-first`.** The other strategies ignore the focus.
+- **Ends.** A focus with an end is inert from that instant on, everywhere, and is dropped at the next change or start. A credential that is removed loses its focus within a minute (the quota observer's tick).
+
+The endpoints need the management key (or passwordless trust) and exist only on `/v8`. Every answer, `200`, is the list of active focuses whose credential still exists, by provider:
+
+```json
+{"focus":[{"auth_id":"claude-a.json","auth_index":"1a2b3c4d","name":"claude-a.json","provider":"claude","until":"2026-10-21T12:00:00Z","set_at":"2026-10-19T12:00:00Z"}]}
+```
+
+`name` is the credential's file name as the credential list shows it, or its ID when it has none; `until` is `null` for a focus without an end.
+
+| Request | Effect |
+|---|---|
+| `GET /v8/management/routing/focus` | The list. |
+| `PUT /v8/management/routing/focus` with `{"name":"<auth ID or file name>","until":"<RFC 3339>"}` | Focuses the credential, found by ID, then by file name; `"until": null` or no `until` means no end. 404 `{"error":"auth file not found"}` for an unknown credential, 409 for a plugin's virtual credential, 400 for a body that is not such an object, an `until` that is not RFC 3339 with a zone, or one that is not in the future. |
+| `DELETE /v8/management/routing/focus?name=<auth ID or file name>` or `?provider=<provider>` | Removes that credential's focus, or the provider's. Exactly one of the two (400 otherwise); removing a focus that is not there succeeds. |
+
+**Persistence.** The focus is kept in `routing-focus.devyre` in the auth directory (`auths\` here, so `backup.ps1` includes it): `{"version":1,"focus":[{"auth_id":...,"provider":...,"until":...|null,"set_at":...}]}`, mode 0600, replaced atomically through a temporary file. It is not a `.json` file because the auth watcher loads every `*.json` there as a credential. The server reads it once at start; a missing file means nothing is focused, and an unreadable or invalid one is logged as a warning and ignored, so nothing is focused and the next change replaces it. A change that cannot be saved answers 500 and changes nothing. Only a configured auth directory is used: the server binary always resolves `auth-dir` (its default included) before it starts, so a config built in code without one (tests, embedders) keeps the focus in memory only and never reads or rewrites the default directory, which may hold another deployment's focus. So does an auth directory that does not resolve.
 
 **Readings.** Response headers and usage bodies feed one in-memory store, and the newest observation of each window wins. A usage body lists every window the provider reports, so a window it no longer reports is dropped. The store is cleared on restart and refills as described above.
 
@@ -374,17 +412,18 @@ Run `devyre\scripts\backup.ps1 -Destination <folder>`. It writes `config.yaml`, 
 ## Fork tests
 
 ```powershell
-go test ./internal/api/ -run 'T3Hub|QuotaReadings|TailnetAuth|DevyreKeylessProxy|DevyreKeepAlive|DevyrePanel|LifelineProof|DevyreListenReport|OnlyWrongPasswordsCountTowardTheBan'
+go test ./internal/api/ -run 'T3Hub|QuotaReadings|RoutingFocus|TailnetAuth|DevyreKeylessProxy|DevyreKeepAlive|DevyrePanel|LifelineProof|DevyreListenReport|OnlyWrongPasswordsCountTowardTheBan'
 go test ./internal/cmd/ -run 'Lifeline|PasswordLine|ReportListen|TakenPort'
 go test ./cmd/server/ -run 'LifelineStdin|PasswordStdin'
 go test ./internal/managementasset/ -run DevyrePanel
 go test -tags devyre_nopanel ./internal/managementasset/ ./internal/api/ -run DevyrePanel
 go test ./internal/config/ -run 'DevyreDeployTemplate|ExpiringFirst|TailnetAuth'
 go test ./internal/quotareading/
+go test ./internal/routingfocus/
 go test ./internal/tailnetauth/
-go test ./internal/api/handlers/management/ -run 'UsageCache|QuotaObserver|RoutingQuota|ExpiringFirst|RoutingStrategy|TailnetAuth|GetAuthSession|AuthenticateManagementKey|DevyreRedirect'
+go test ./internal/api/handlers/management/ -run 'UsageCache|QuotaObserver|RoutingQuota|RoutingFocus|ForgetRemovedFocus|ExpiringFirst|RoutingStrategy|TailnetAuth|GetAuthSession|AuthenticateManagementKey|DevyreRedirect'
 go test ./internal/auth/claude/ ./internal/auth/codex/ -run Devyre
-go test ./sdk/cliproxy/auth/ -run ExpiringFirst
+go test ./sdk/cliproxy/auth/ -run 'ExpiringFirst|Focus'
 go test ./sdk/cliproxy/ -run ExpiringFirst
 go test ./test/ -run Devyre
 ```

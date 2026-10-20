@@ -16,11 +16,13 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/routingfocus"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -689,6 +691,8 @@ func usageCacheLabel(resp apiCallResponse) string {
 type devyreHandlerState struct {
 	usage        *usageCache
 	observerOnce sync.Once
+	// focus overrides routingfocus.Default() (SetRoutingFocusStore).
+	focus atomic.Pointer[routingfocus.Store]
 }
 
 // devyreStates maps *Handler to *devyreHandlerState. A server owns one

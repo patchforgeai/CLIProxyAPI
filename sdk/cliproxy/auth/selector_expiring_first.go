@@ -13,6 +13,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/routingfocus"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
@@ -24,6 +25,7 @@ const (
 	expiringFirstReasonMostUrgent = "most-urgent"
 	expiringFirstReasonNoData     = "no-data"
 	expiringFirstReasonAllGated   = "all-gated"
+	expiringFirstReasonFocus      = "focus"
 )
 
 // expiringFirstMaxRotationKeys bounds the round-robin cursors, like RoundRobinSelector.
@@ -51,6 +53,12 @@ const expiringFirstMaxRotationKeys = 4096
 // priority tiers keep their meaning. Wrapped by SessionAffinitySelector, a
 // bound session keeps its credential while it stays available; this selector
 // only places new and failed-over sessions.
+//
+// A focused credential (routingfocus) overrides all of this: while it is among
+// the candidates and usable for the request's model, every pick is the focus,
+// whatever the urgencies, and SessionAffinitySelector moves bound sessions to
+// it (devyreFocusTakesOver). A gated focus, or one outside the candidates'
+// priority tier, is ignored and the pick proceeds as above.
 type ExpiringFirstSelector struct {
 	// GateRemainingPercent is the remaining percent at or below which a short,
 	// long or matching model-scoped window gates the credential. The routing
@@ -60,6 +68,8 @@ type ExpiringFirstSelector struct {
 	LogPicks bool
 	// Now is a test hook; nil means time.Now.
 	Now func() time.Time
+	// Focus holds the focused credentials; nil means routingfocus.Default().
+	Focus *routingfocus.Store
 
 	mu sync.Mutex
 	rr map[string]string // provider:model -> last picked ID among ties and unknowns
@@ -96,11 +106,7 @@ func (s *ExpiringFirstSelector) pick(ctx context.Context, provider, model string
 		if auth == nil {
 			continue
 		}
-		reading := quotareading.Effective(store, auth.ID, auth.Provider, auth.Quota.Signals, auth.Quota.ObservedAt, now)
-		candidates = append(candidates, expiringFirstCandidate{
-			auth: auth,
-			eval: quotareading.Evaluate(reading, model, now, s.GateRemainingPercent),
-		})
+		candidates = append(candidates, expiringFirstCandidate{auth: auth, eval: s.evaluate(store, auth, model, now)})
 	}
 	if len(candidates) == 0 {
 		return expiringFirstCandidate{}, "", &Error{Code: "auth_not_found", Message: "no auth candidates"}
@@ -108,7 +114,11 @@ func (s *ExpiringFirstSelector) pick(ctx context.Context, provider, model string
 	// Candidates usually arrive sorted by ID already; the rotation relies on it.
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].auth.ID < candidates[j].auth.ID })
 
-	pool, reason := expiringFirstPool(candidates)
+	reason := expiringFirstReasonFocus
+	pool := s.focusPool(candidates, now)
+	if len(pool) == 0 {
+		pool, reason = expiringFirstPool(candidates)
+	}
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	picked := s.rotateLocked(key, pool)
@@ -123,6 +133,60 @@ func (s *ExpiringFirstSelector) now() time.Time {
 		return s.Now()
 	}
 	return time.Now()
+}
+
+func (s *ExpiringFirstSelector) focusStore() *routingfocus.Store {
+	if s.Focus != nil {
+		return s.Focus
+	}
+	return routingfocus.Default()
+}
+
+// evaluate gates and ranks auth for model on its effective readings: store
+// merged with the credential's response-header signals.
+func (s *ExpiringFirstSelector) evaluate(store *quotareading.Store, auth *Auth, model string, now time.Time) quotareading.Evaluation {
+	reading := quotareading.Effective(store, auth.ID, auth.Provider, auth.Quota.Signals, auth.Quota.ObservedAt, now)
+	return quotareading.Evaluate(reading, model, now, s.GateRemainingPercent)
+}
+
+// focusPool returns the focused candidates that are usable for the request, in
+// candidate order: normally one, several only in a mixed-provider pick, where
+// they rotate like ties. It is nil when no candidate is a usable focus.
+func (s *ExpiringFirstSelector) focusPool(candidates []expiringFirstCandidate, now time.Time) []expiringFirstCandidate {
+	focus := s.focusStore()
+	if focus.Empty() {
+		return nil
+	}
+	var pool []expiringFirstCandidate
+	for _, candidate := range candidates {
+		if candidate.eval.Usable && focus.Focused(candidate.auth.ID, now) {
+			pool = append(pool, candidate)
+		}
+	}
+	return pool
+}
+
+// usableFocus returns the auths among a pick's candidates that the pick would
+// place this request on because they are focused: auths are what the pick
+// receives (one priority tier), narrowed the way pick narrows them. It is nil
+// when nothing is focused or no focus is usable for model.
+func (s *ExpiringFirstSelector) usableFocus(ctx context.Context, provider, model string, auths []*Auth) []*Auth {
+	focus := s.focusStore()
+	if focus.Empty() {
+		return nil
+	}
+	now := s.now()
+	store := quotareading.Default()
+	var usable []*Auth
+	for _, auth := range preferCodexWebsocketAuths(ctx, provider, auths) {
+		if auth == nil || !focus.Focused(auth.ID, now) {
+			continue
+		}
+		if s.evaluate(store, auth, model, now).Usable {
+			usable = append(usable, auth)
+		}
+	}
+	return usable
 }
 
 // expiringFirstPool returns the candidates the pick rotates among, in candidate

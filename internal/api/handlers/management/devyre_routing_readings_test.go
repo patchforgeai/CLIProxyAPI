@@ -15,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/routingfocus"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -113,7 +114,7 @@ func readingsGoldenFixture() ([]*coreauth.Auth, *quotareading.Store) {
 
 func TestRoutingQuotaReadingsGolden(t *testing.T) {
 	auths, store := readingsGoldenFixture()
-	response := buildRoutingQuotaReadings(" EF ", 2, auths, store, readingsTestNow)
+	response := buildRoutingQuotaReadings(" EF ", 2, auths, store, routingfocus.NewStore(), readingsTestNow)
 	got, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +126,126 @@ func TestRoutingQuotaReadingsGolden(t *testing.T) {
 		if strings.Contains(string(got), secret) {
 			t.Fatalf("quota readings leaked %q", secret)
 		}
+	}
+}
+
+// A focused credential is ranked like the selector picks it: first when it is
+// in its provider's ranked group, and rank 0 like any other credential outside
+// it (gated, unavailable, or below the top tier).
+func TestRoutingQuotaReadingsFocus(t *testing.T) {
+	t.Parallel()
+
+	// The focus store's own clock is the wall clock, so ends are set from it;
+	// the readings are evaluated at readingsTestNow, before every end.
+	until := time.Now().Add(72 * time.Hour).UTC().Truncate(time.Second)
+	tests := []struct {
+		name  string
+		focus []routingfocus.Focus
+		// want lists auth_id=rank for the credentials it names; focused names
+		// the credentials reported as focused.
+		want    map[string]int
+		focused []string
+	}{
+		{
+			name:    "nothing focused",
+			want:    map[string]int{"claude-alpha.json": 1, "claude-bravo.json": 2, "codex-one.json": 1},
+			focused: nil,
+		},
+		{
+			name:    "a usable focus is rank 1",
+			focus:   []routingfocus.Focus{{AuthID: "claude-bravo.json", Provider: "claude"}},
+			want:    map[string]int{"claude-bravo.json": 1, "claude-alpha.json": 2, "claude-hotel.json": 3, "claude-delta.json": 4},
+			focused: []string{"claude-bravo.json"},
+		},
+		{
+			name:    "a focus without readings is rank 1",
+			focus:   []routingfocus.Focus{{AuthID: "claude-delta.json", Provider: "claude", Until: until}},
+			want:    map[string]int{"claude-delta.json": 1, "claude-alpha.json": 2, "claude-bravo.json": 3, "claude-hotel.json": 4},
+			focused: []string{"claude-delta.json"},
+		},
+		{
+			name:    "a gated focus keeps rank 0",
+			focus:   []routingfocus.Focus{{AuthID: "claude-charlie.json", Provider: "claude"}},
+			want:    map[string]int{"claude-charlie.json": 0, "claude-alpha.json": 1},
+			focused: []string{"claude-charlie.json"},
+		},
+		{
+			name:    "a focus below the top tier keeps rank 0",
+			focus:   []routingfocus.Focus{{AuthID: "claude-echo.json", Provider: "claude"}},
+			want:    map[string]int{"claude-echo.json": 0, "claude-alpha.json": 1},
+			focused: []string{"claude-echo.json"},
+		},
+		{
+			name:    "an unavailable focus keeps rank 0",
+			focus:   []routingfocus.Focus{{AuthID: "claude-golf.json", Provider: "claude"}},
+			want:    map[string]int{"claude-golf.json": 0, "claude-alpha.json": 1},
+			focused: []string{"claude-golf.json"},
+		},
+		{
+			name: "focus is per provider",
+			focus: []routingfocus.Focus{
+				{AuthID: "codex-two.json", Provider: "codex"},
+				{AuthID: "claude-hotel.json", Provider: "claude"},
+			},
+			want:    map[string]int{"claude-hotel.json": 1, "claude-alpha.json": 2, "codex-two.json": 0, "codex-one.json": 1},
+			focused: []string{"claude-hotel.json", "codex-two.json"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			auths, store := readingsGoldenFixture()
+			focus := routingfocus.NewStore()
+			for _, f := range tc.focus {
+				if err := focus.Set(f); err != nil {
+					t.Fatal(err)
+				}
+			}
+			response := buildRoutingQuotaReadings("expiring-first", 2, auths, store, focus, readingsTestNow)
+			focusedSet := make(map[string]bool, len(tc.focused))
+			for _, id := range tc.focused {
+				focusedSet[id] = true
+			}
+			seen := 0
+			for _, credential := range response.Credentials {
+				if want, ok := tc.want[credential.AuthID]; ok {
+					seen++
+					if credential.Rank != want {
+						t.Fatalf("%s rank = %d, want %d", credential.AuthID, credential.Rank, want)
+					}
+				}
+				if credential.Focused != focusedSet[credential.AuthID] {
+					t.Fatalf("%s focused = %t", credential.AuthID, credential.Focused)
+				}
+				var wantUntil *time.Time
+				for _, f := range tc.focus {
+					if f.AuthID == credential.AuthID && !f.Until.IsZero() {
+						wantUntil = &f.Until
+					}
+				}
+				if (credential.FocusUntil == nil) != (wantUntil == nil) || (wantUntil != nil && !credential.FocusUntil.Equal(*wantUntil)) {
+					t.Fatalf("%s focus_until = %v, want %v", credential.AuthID, credential.FocusUntil, wantUntil)
+				}
+			}
+			if seen != len(tc.want) {
+				t.Fatalf("found %d of the credentials %v", seen, tc.want)
+			}
+		})
+	}
+
+	// The JSON names the fields, with the end in UTC and null without one.
+	auths, store := readingsGoldenFixture()
+	focus := routingfocus.NewStore()
+	if err := focus.Set(routingfocus.Focus{AuthID: "claude-bravo.json", Provider: "claude", Until: until.In(time.FixedZone("CEST", 2*3600))}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(buildRoutingQuotaReadings("expiring-first", 2, auths, store, focus, readingsTestNow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBravo := `"auth_id":"claude-bravo.json","auth_index":"idx-bravo","provider":"claude","label":"claude-bravo.json","priority":0,"usable":true,"gate_reason":"","urgency_per_hour":1.25,"rank":1,"focused":true,"focus_until":"` + until.Format(time.RFC3339) + `"`
+	if !strings.Contains(string(body), wantBravo) || !strings.Contains(string(body), `"rank":2,"focused":false,"focus_until":null`) {
+		t.Fatalf("readings JSON = %s", body)
 	}
 }
 
@@ -241,6 +362,8 @@ const routingQuotaReadingsGolden = `{
       "gate_reason": "",
       "urgency_per_hour": 2.1,
       "rank": 1,
+      "focused": false,
+      "focus_until": null,
       "windows": [
         {
           "id": "5h",
@@ -270,6 +393,8 @@ const routingQuotaReadingsGolden = `{
       "gate_reason": "",
       "urgency_per_hour": 1.25,
       "rank": 2,
+      "focused": false,
+      "focus_until": null,
       "windows": [
         {
           "id": "5h",
@@ -307,6 +432,8 @@ const routingQuotaReadingsGolden = `{
       "gate_reason": "",
       "urgency_per_hour": 0.6,
       "rank": 3,
+      "focused": false,
+      "focus_until": null,
       "windows": [
         {
           "id": "7d",
@@ -328,6 +455,8 @@ const routingQuotaReadingsGolden = `{
       "gate_reason": "",
       "urgency_per_hour": null,
       "rank": 4,
+      "focused": false,
+      "focus_until": null,
       "windows": []
     },
     {
@@ -340,6 +469,8 @@ const routingQuotaReadingsGolden = `{
       "gate_reason": "5h exhausted",
       "urgency_per_hour": 0.9,
       "rank": 0,
+      "focused": false,
+      "focus_until": null,
       "windows": [
         {
           "id": "5h",
@@ -369,6 +500,8 @@ const routingQuotaReadingsGolden = `{
       "gate_reason": "",
       "urgency_per_hour": 10,
       "rank": 0,
+      "focused": false,
+      "focus_until": null,
       "windows": [
         {
           "id": "7d",
@@ -390,6 +523,8 @@ const routingQuotaReadingsGolden = `{
       "gate_reason": "",
       "urgency_per_hour": 40,
       "rank": 0,
+      "focused": false,
+      "focus_until": null,
       "windows": [
         {
           "id": "7d",
@@ -411,6 +546,8 @@ const routingQuotaReadingsGolden = `{
       "gate_reason": "7d exhausted",
       "urgency_per_hour": 0,
       "rank": 0,
+      "focused": false,
+      "focus_until": null,
       "windows": [
         {
           "id": "5h",
@@ -440,6 +577,8 @@ const routingQuotaReadingsGolden = `{
       "gate_reason": "",
       "urgency_per_hour": 1,
       "rank": 1,
+      "focused": false,
+      "focus_until": null,
       "windows": [
         {
           "id": "primary",
@@ -469,6 +608,8 @@ const routingQuotaReadingsGolden = `{
       "gate_reason": "primary exhausted",
       "urgency_per_hour": 0.8,
       "rank": 0,
+      "focused": false,
+      "focus_until": null,
       "windows": [
         {
           "id": "primary",
@@ -498,6 +639,8 @@ const routingQuotaReadingsGolden = `{
       "gate_reason": "",
       "urgency_per_hour": null,
       "rank": 1,
+      "focused": false,
+      "focus_until": null,
       "windows": []
     }
   ]

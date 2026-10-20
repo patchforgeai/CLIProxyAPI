@@ -1058,7 +1058,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 
 	if cachedAuthID, ok := s.cache.GetAndRefresh(cacheKey); ok {
 		for _, auth := range available {
-			if auth.ID == cachedAuthID {
+			// devyre: a usable focus takes the session over (devyre_focus.go).
+			if auth.ID == cachedAuthID && !s.devyreFocusTakesOver(ctx, provider, model, primaryID, auth.ID, available) {
 				bind(auth.ID)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
@@ -1080,7 +1081,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 	if fallbackKey != "" {
 		if cachedAuthID, ok := s.cache.Get(fallbackKey); ok {
 			for _, auth := range available {
-				if auth.ID == cachedAuthID {
+				// devyre: a usable focus takes the session over (devyre_focus.go).
+				if auth.ID == cachedAuthID && !s.devyreFocusTakesOver(ctx, provider, model, primaryID, auth.ID, available) {
 					if !isSubagent || s.subagentAffinity {
 						bind(auth.ID)
 						if isFork {
@@ -1145,7 +1147,8 @@ func (s *SessionAffinitySelector) pickLCP(ctx context.Context, provider, model s
 
 	if match, ok := s.matcher.MatchFingerprintsWithContext(namespace, fingerprints, tailFingerprints, envDigest, minPrefixLength); ok {
 		for _, auth := range available {
-			if auth == nil || auth.ID != match.AuthID {
+			// devyre: a usable focus takes the session over; the cold path below rebinds it (devyre_focus.go).
+			if auth == nil || auth.ID != match.AuthID || s.devyreFocusTakesOver(ctx, provider, model, match.SessionID, auth.ID, available) {
 				continue
 			}
 			if match.SessionID != "" {

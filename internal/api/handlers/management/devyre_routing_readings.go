@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/routingfocus"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -40,11 +41,15 @@ type routingQuotaReadingsCredential struct {
 	UrgencyPerHour *float64 `json:"urgency_per_hour"`
 	// Rank is the 1-based expiring-first order within the provider: under that
 	// strategy, rank 1 is picked next unless a session binding, a model-scoped
-	// gate or the Codex websocket preference applies. It is 0 for credentials
-	// outside that order: gated, unavailable, or below the provider's top
-	// available priority tier.
-	Rank    int                          `json:"rank"`
-	Windows []routingQuotaReadingsWindow `json:"windows"`
+	// gate or the Codex websocket preference applies. A focused credential in
+	// the order is rank 1. It is 0 for credentials outside that order: gated,
+	// unavailable, or below the provider's top available priority tier.
+	Rank int `json:"rank"`
+	// Focused reports a focus (routingfocus) on the credential; FocusUntil is
+	// its end, null without one or when the credential is not focused.
+	Focused    bool                         `json:"focused"`
+	FocusUntil *time.Time                   `json:"focus_until"`
+	Windows    []routingQuotaReadingsWindow `json:"windows"`
 }
 
 // routingQuotaReadingsWindow is one effective quota window: resets that already
@@ -79,7 +84,7 @@ func (h *Handler) GetRoutingQuotaReadings(c *gin.Context) {
 	if manager != nil {
 		auths = manager.List()
 	}
-	c.JSON(http.StatusOK, buildRoutingQuotaReadings(strategy, gatePercent, auths, quotareading.Default(), time.Now()))
+	c.JSON(http.StatusOK, buildRoutingQuotaReadings(strategy, gatePercent, auths, quotareading.Default(), h.devyreFocusStore(), time.Now()))
 }
 
 // routingQuotaReadingsEntry carries the ranking inputs next to the response row.
@@ -95,13 +100,18 @@ type routingQuotaReadingsEntry struct {
 //
 // Per provider, the top tier is the highest priority among the credentials the
 // selectors would consider (coreauth.AuthSelectable), exactly as the selectors
-// narrow candidates. Usable credentials in that tier are ranked by urgency,
-// highest first, unknown urgencies last, ties by auth ID.
-func buildRoutingQuotaReadings(strategy string, gatePercent float64, auths []*coreauth.Auth, store *quotareading.Store, now time.Time) routingQuotaReadingsResponse {
+// narrow candidates. Usable credentials in that tier are ranked like the
+// selector picks: the focused credential first, then by urgency, highest
+// first, unknown urgencies last, ties by auth ID.
+func buildRoutingQuotaReadings(strategy string, gatePercent float64, auths []*coreauth.Auth, store *quotareading.Store, focus *routingfocus.Store, now time.Time) routingQuotaReadingsResponse {
 	if normalized, ok := normalizeRoutingStrategy(strategy); ok {
 		strategy = normalized
 	} else {
 		strategy = strings.TrimSpace(strategy)
+	}
+	focused := make(map[string]routingfocus.Focus)
+	for _, active := range focus.List(now) {
+		focused[active.AuthID] = active
 	}
 
 	entries := make([]*routingQuotaReadingsEntry, 0, len(auths))
@@ -130,6 +140,10 @@ func buildRoutingQuotaReadings(strategy string, gatePercent float64, auths []*co
 		if evaluation.UrgencyKnown {
 			urgency := roundHundredths(evaluation.Urgency)
 			entry.credential.UrgencyPerHour = &urgency
+		}
+		if active, ok := focused[auth.ID]; ok {
+			entry.credential.Focused = true
+			entry.credential.FocusUntil = optionalUTCTime(active.Until)
 		}
 		if entry.selectable {
 			if top, ok := topPriority[provider]; !ok || entry.credential.Priority > top {
@@ -162,10 +176,13 @@ func buildRoutingQuotaReadings(strategy string, gatePercent float64, auths []*co
 	return routingQuotaReadingsResponse{Strategy: strategy, GeneratedAt: now.UTC(), Credentials: credentials}
 }
 
-// routingQuotaRanksBefore orders rank candidates like the selector: known
-// urgency before unknown, higher urgency first, then auth ID in place of the
-// selector's round-robin among ties.
+// routingQuotaRanksBefore orders rank candidates like the selector: the
+// focused credential first, then known urgency before unknown, higher urgency
+// first, then auth ID in place of the selector's round-robin among ties.
 func routingQuotaRanksBefore(a, b *routingQuotaReadingsEntry) bool {
+	if a.credential.Focused != b.credential.Focused {
+		return a.credential.Focused
+	}
 	if a.evaluation.UrgencyKnown != b.evaluation.UrgencyKnown {
 		return a.evaluation.UrgencyKnown
 	}
