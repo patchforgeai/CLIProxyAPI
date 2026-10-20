@@ -625,6 +625,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationExec, errExec)
 				}
 			}
+			// devyre: a bound session retries its credential on a transient failure (devyre_transient.go).
+			if execCtx, resp, errExec = m.devyreRetryTransient(execCtx, auth, provider, upstreamModel, resultModel, routeModel, execOpts, resp, errExec, func(attemptCtx context.Context) (cliproxyexecutor.Response, error) {
+				return executor.Execute(attemptCtx, auth, execReq, execOpts)
+			}); errExec != nil && execCtx.Err() != nil {
+				return cliproxyexecutor.Response{}, execCtx.Err()
+			} else if hasUpstreamExecutionAttempt(errExec) {
+				upstreamErr = errExec
+			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel
 			}
@@ -836,6 +844,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 				} else {
 					warnLogUpstreamFailure(execCtx, entry, provider, upstreamModel, auth, durationExec, errExec)
 				}
+			}
+			// devyre: a bound session retries its credential on a transient failure (devyre_transient.go).
+			if execCtx, resp, errExec = m.devyreRetryTransient(execCtx, auth, provider, upstreamModel, resultModel, routeModel, execOpts, resp, errExec, func(attemptCtx context.Context) (cliproxyexecutor.Response, error) {
+				return executor.CountTokens(attemptCtx, auth, execReq, execOpts)
+			}); errExec != nil && execCtx.Err() != nil {
+				return cliproxyexecutor.Response{}, execCtx.Err()
+			} else if hasUpstreamExecutionAttempt(errExec) {
+				upstreamErr = errExec
 			}
 			if errCancel := claudeOAuthRequestCancellation(execCtx, auth, errExec); errCancel != nil {
 				return cliproxyexecutor.Response{}, errCancel

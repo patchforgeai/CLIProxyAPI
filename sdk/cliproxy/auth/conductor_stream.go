@@ -239,6 +239,7 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 		}
 		execOpts.Metadata = ensureCanonicalSessionMetadata(execOpts.Metadata, execOpts.Headers, payload)
 		ctx = syncMetadataSessionToContext(ctx, execOpts.Metadata)
+		transient := m.devyreTransientRetry(auth, provider, resultModel, routeModel, execOpts, ephemeralResult) // devyre: nil unless the session is bound to auth
 		startStream := time.Now()
 		streamResult, errStream := executor.ExecuteStream(ctx, auth, execReq, execOpts)
 		errStream = markUpstreamExecutionAttemptFromContext(ctx, errStream)
@@ -278,6 +279,12 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			} else {
 				warnLogUpstreamFailure(ctx, entry, provider, execModel, auth, durationStream, errStream)
 			}
+		}
+		// devyre: a bound session retries its credential on a transient failure to start the stream.
+		if ctx, streamResult, errStream = transient.retryStart(ctx, executor, auth, execReq, execOpts, execModel, streamResult, errStream); errStream != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		} else if hasUpstreamExecutionAttempt(errStream) {
+			upstreamErr = errStream
 		}
 		if !ephemeralResult {
 			if errCancel := claudeOAuthRequestCancellation(ctx, auth, errStream); errCancel != nil {
@@ -364,6 +371,13 @@ func (m *Manager) executeStreamWithModelPool(ctx context.Context, executor Provi
 			if hasUpstreamExecutionAttempt(bootstrapErr) {
 				upstreamErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 			}
+		}
+		// devyre: a bound session retries its credential on a transient failure before the first payload.
+		if ctx, streamResult, buffered, closed, bootstrapErr = transient.retryBootstrap(ctx, executor, auth, execReq, execOpts, execModel, streamResult, buffered, closed, bootstrapErr); bootstrapErr != nil && ctx.Err() != nil {
+			discardStreamChunks(streamResult.Chunks)
+			return nil, ctx.Err()
+		} else if hasUpstreamExecutionAttempt(bootstrapErr) {
+			upstreamErr = newStreamBootstrapError(bootstrapErr, streamResult.Headers)
 		}
 		if !ephemeralResult {
 			if errCancel := claudeOAuthRequestCancellation(ctx, auth, bootstrapErr); errCancel != nil {

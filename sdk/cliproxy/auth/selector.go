@@ -1063,6 +1063,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			// devyre: a usable focus takes the session over (devyre_focus.go).
 			if auth.ID == cachedAuthID && !s.devyreFocusTakesOver(ctx, provider, model, primaryID, auth.ID, available) {
 				bind(auth.ID)
+				devyreMarkBound(opts.Metadata, auth.ID) // devyre: a transient failure retries it (devyre_transient.go)
 				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
 			}
@@ -1089,6 +1090,9 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 					// devyre: a non-fork subagent joins only with headroom (devyre_placement.go).
 					if (!isSubagent || s.subagentAffinity) && s.devyreJoinsParent(entry, isSubagent, auth, provider, model, primaryID, fallbackID) {
 						bind(auth.ID)
+						if !isSubagent { // devyre: a fork or alias reads that cache; a transient failure retries it
+							devyreMarkBound(opts.Metadata, auth.ID)
+						}
 						if isFork {
 							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						} else {

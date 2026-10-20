@@ -207,6 +207,8 @@ type Manager struct {
 	refreshLocks sync.Map
 	// persistLocks serializes disk persistence per auth ID and guards against out-of-order writes.
 	persistLocks sync.Map
+
+	devyre devyreManagerState // devyre: transient retries of a bound credential (devyre_transient.go)
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
