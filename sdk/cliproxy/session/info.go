@@ -27,6 +27,7 @@ type SessionInfo struct {
 	IsFork          bool           `json:"is_fork,omitempty"`
 	IsCompaction    bool           `json:"is_compaction,omitempty"`
 	IsSubagent      bool           `json:"is_subagent,omitempty"`
+	AgentType       string         `json:"agent_type,omitempty"` // devyre: the kind of agent the client names, empty when it does not (devyre_agent_type.go)
 	Metadata        map[string]any `json:"metadata,omitempty"`
 }
 
@@ -211,6 +212,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 				info.ParentSessionID = "claude:" + parentCandidate
 			}
 			info.SessionID = "claude:" + sid + ":agent:" + agentID
+			applyClaudeAgentType(&info, headers) // devyre: a fork says so (devyre_agent_type.go)
 		} else {
 			info.AgentName = "main"
 			info.SessionID = "claude:" + sid
@@ -265,6 +267,7 @@ func ExtractSessionInfo(headers http.Header, payload []byte, metadata map[string
 					info.ParentSessionID = "claude:" + parentCandidate
 				}
 				info.AgentName = agentID
+				applyClaudeAgentType(&info, headers) // devyre: a fork says so (devyre_agent_type.go)
 			} else {
 				info.SessionID = "claude:" + sid
 				if parentSID != "" && parentSID != sid {

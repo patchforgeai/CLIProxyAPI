@@ -107,21 +107,49 @@ type headroomJudge interface {
 	headroomFor(auth *Auth, model string) (bool, string)
 }
 
+// devyreAgentTypeMetadataKey carries, in a request's metadata, the kind of
+// agent the client says the request comes from (SessionInfo.AgentType);
+// absent when it does not say.
+const devyreAgentTypeMetadataKey = "devyre_agent_type"
+
+// devyreSetAgentType records agentType in metadata, or removes it when empty.
+func devyreSetAgentType(metadata map[string]any, agentType string) {
+	if metadata == nil {
+		return
+	}
+	if agentType == "" {
+		delete(metadata, devyreAgentTypeMetadataKey)
+		return
+	}
+	metadata[devyreAgentTypeMetadataKey] = agentType
+}
+
+// devyreAgentType returns the kind of agent metadata says the request comes
+// from, or "" when the client did not say.
+func devyreAgentType(metadata map[string]any) string {
+	agentType, _ := metadata[devyreAgentTypeMetadataKey].(string)
+	return agentType
+}
+
 // devyreJoinsParent reports whether a session may take its parent's binding to
 // auth. A fork reads its parent's cached prefix, so staying is what makes its
-// cache hit; other aliases of one session stay together too. A non-fork
-// subagent starts a fresh context with nothing of its parent's cache to reuse,
-// so it takes the parent's credential only while that credential has headroom
-// for the request. Otherwise it is placed like a new session, and an info line
-// says why. Without a fallback that knows headroom, nothing changes.
-func (s *SessionAffinitySelector) devyreJoinsParent(entry *log.Entry, isSubagent bool, auth *Auth, provider, model, sessionID, parentID string) bool {
+// cache hit; other aliases of one session stay together too. A subagent that
+// says it is not a fork (agentType, Claude Code's X-Claude-Code-Agent-Type)
+// starts a fresh context with nothing of its parent's cache to reuse, so it
+// takes the parent's credential only while that credential has headroom for
+// the request. Otherwise it is placed like a new session, and an info line
+// says why. A subagent that does not say what it is may be a fork, whose move
+// would rewrite its parent's whole context on another account, while staying
+// costs a move only if the credential then runs out: it stays with its parent.
+// Without a fallback that knows headroom, nothing changes.
+func (s *SessionAffinitySelector) devyreJoinsParent(entry *log.Entry, isSubagent bool, agentType string, auth *Auth, provider, model, sessionID, parentID string) bool {
 	judge, ok := s.fallback.(headroomJudge)
-	if !isSubagent || !ok {
+	if !isSubagent || !ok || agentType == "" {
 		return true
 	}
 	has, reason := judge.headroomFor(auth, model)
 	if !has {
-		entry.Infof("session-affinity: subagent left its parent's auth without headroom | session=%s parent=%s auth=%s provider=%s model=%s headroom=%q", truncateSessionID(sessionID), truncateSessionID(parentID), auth.ID, provider, model, reason)
+		entry.Infof("session-affinity: subagent left its parent's auth without headroom | session=%s parent=%s agent=%s auth=%s provider=%s model=%s headroom=%q", truncateSessionID(sessionID), truncateSessionID(parentID), agentType, auth.ID, provider, model, reason)
 	}
 	return has
 }

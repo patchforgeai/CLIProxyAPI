@@ -398,8 +398,12 @@ func TestExpiringFirstFailoverForARemovedCredential(t *testing.T) {
 }
 
 // A fork reads its parent's cached prefix, so it stays with its parent. A
-// non-fork subagent starts a fresh context and takes the parent's credential
-// only while that credential has headroom for it.
+// subagent that says it is not a fork starts a fresh context and takes the
+// parent's credential only while that credential has headroom for it. One that
+// does not say may be a fork, and stays with its parent too. The requests are
+// Claude Code's own: with CLAUDE_CODE_GATEWAY_HINT_HEADERS a subagent names its
+// type in X-Claude-Code-Agent-Type ("fork" for a fork); without it, it sends
+// X-Claude-Code-Agent-Id alone.
 func TestExpiringFirstSubagentJoinsItsParentOnlyWithHeadroom(t *testing.T) {
 	hook := efLogHook(t, log.InfoLevel)
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: newHeadroomTestSelector(), TTL: time.Hour})
@@ -415,11 +419,11 @@ func TestExpiringFirstSubagentJoinsItsParentOnlyWithHeadroom(t *testing.T) {
 		}
 		return got.ID
 	}
-	subagent := func(agent string, fork bool) cliproxyexecutor.Options {
+	subagent := func(agent, agentType string) cliproxyexecutor.Options {
 		opts := efSessionOpts("root")
 		opts.Headers.Set("X-Claude-Code-Agent-Id", agent)
-		if fork {
-			opts.Metadata[cliproxyexecutor.IsForkMetadataKey] = true
+		if agentType != "" {
+			opts.Headers.Set("X-Claude-Code-Agent-Type", agentType)
 		}
 		return opts
 	}
@@ -429,28 +433,36 @@ func TestExpiringFirstSubagentJoinsItsParentOnlyWithHeadroom(t *testing.T) {
 	}
 
 	hook.Reset()
-	if got := pick("subagent", subagent("helper", false), parentAuth, roomy); got != "auth-q" {
+	if got := pick("subagent", subagent("helper", "general-purpose"), parentAuth, roomy); got != "auth-q" {
 		t.Fatalf("a subagent without headroom on its parent's credential went to %s, want auth-q", got)
 	}
 	lines := efAffinityLogs(hook)
 	if len(lines) != 2 ||
-		lines[0] != `session-affinity: subagent left its parent's auth without headroom | session=claude:r... parent=claude:root auth=auth-p provider=claude model=claude-opus-5-5 headroom="5h at 10% left"` ||
+		lines[0] != `session-affinity: subagent left its parent's auth without headroom | session=claude:r... parent=claude:root agent=general-purpose auth=auth-p provider=claude model=claude-opus-5-5 headroom="5h at 10% left"` ||
 		!strings.HasPrefix(lines[1], "session-affinity: cache miss, new binding | session=claude:r... auth=auth-q ") {
 		t.Fatalf("session-affinity lines = %q", lines)
 	}
 
 	hook.Reset()
-	if got := pick("fork", subagent("forked", true), parentAuth, roomy); got != "auth-p" {
+	if got := pick("fork", subagent("forked", "fork"), parentAuth, roomy); got != "auth-p" {
 		t.Fatalf("a fork went to %s, want its parent's auth-p", got)
 	}
 	if lines := efAffinityLogs(hook); len(lines) != 1 || !strings.HasPrefix(lines[0], "session-affinity: fork cache hit | ") {
 		t.Fatalf("session-affinity lines = %q", lines)
 	}
 
+	hook.Reset()
+	if got := pick("subagent of no stated kind", subagent("unsaid", ""), parentAuth, roomy); got != "auth-p" {
+		t.Fatalf("a subagent that does not say what it is went to %s, want its parent's auth-p", got)
+	}
+	if lines := efAffinityLogs(hook); len(lines) != 1 || !strings.HasPrefix(lines[0], "session-affinity: fallback cache hit | ") {
+		t.Fatalf("session-affinity lines = %q", lines)
+	}
+
 	// With headroom back, a subagent joins its parent as before.
 	parentAuth.Quota.Signals = efClaudeSignals(efWindow{"5h", 50, efHour}, efWindow{"7d", 50, 5 * efHour})
 	hook.Reset()
-	if got := pick("subagent with headroom", subagent("second", false), parentAuth, roomy); got != "auth-p" {
+	if got := pick("subagent with headroom", subagent("second", "Explore"), parentAuth, roomy); got != "auth-p" {
 		t.Fatalf("a subagent with headroom on its parent's credential went to %s, want auth-p", got)
 	}
 	if lines := efAffinityLogs(hook); len(lines) != 1 || !strings.HasPrefix(lines[0], "session-affinity: fallback cache hit | ") {

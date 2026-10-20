@@ -1088,7 +1088,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 				// devyre: a usable focus takes the session over (devyre_focus.go).
 				if auth.ID == cachedAuthID && !s.devyreFocusTakesOver(ctx, provider, model, primaryID, auth.ID, available) {
 					// devyre: a non-fork subagent joins only with headroom (devyre_placement.go).
-					if (!isSubagent || s.subagentAffinity) && s.devyreJoinsParent(entry, isSubagent, auth, provider, model, primaryID, fallbackID) {
+					if (!isSubagent || s.subagentAffinity) && s.devyreJoinsParent(entry, isSubagent, devyreAgentType(opts.Metadata), auth, provider, model, primaryID, fallbackID) {
 						bind(auth.ID)
 						if !isSubagent { // devyre: a fork or alias reads that cache; a transient failure retries it
 							devyreMarkBound(opts.Metadata, auth.ID)
@@ -1659,6 +1659,7 @@ func extractExplicitSessionIDs(headers http.Header, payload []byte, metadata map
 		if info.ParentSessionID != "" {
 			metadata[cliproxyexecutor.ParentSessionIDMetadataKey] = info.ParentSessionID
 		}
+		devyreSetAgentType(metadata, info.AgentType) // devyre: which subagents join by headroom (devyre_placement.go)
 	}
 	fallback := info.ParentSessionID
 	if fallback == "" && strings.HasPrefix(info.SessionID, "pck:") && len(payload) > 0 {
