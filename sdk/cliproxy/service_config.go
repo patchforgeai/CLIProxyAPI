@@ -240,6 +240,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 		s.coreManager.SetSelector(s.devyreRoutingSelector(routingState)) // devyre: keeps the session bindings
 		s.appliedRoutingState = &routingState
 	}
+	s.devyreApplySessionPersistence(commit.cfg) // devyre: follows the setting and a rebuilt selector
 	s.applyRetryConfig(commit.cfg)
 	store := s.resolveCooldownStateStore(commit.cfg)
 	if !s.coreManager.ApplyConfigWithCooldownStateStore(ctx, commit.cfg, store) {

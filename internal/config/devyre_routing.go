@@ -156,6 +156,13 @@ func IsExpiringFirstStrategy(strategy string) bool {
 	}
 }
 
+// SessionAffinityPersistEnabled reports whether the session bindings persist
+// across restarts: session affinity is on and session-affinity-persist is not
+// false.
+func (r RoutingConfig) SessionAffinityPersistEnabled() bool {
+	return r.SessionAffinity && (r.SessionAffinityPersist == nil || *r.SessionAffinityPersist)
+}
+
 // QuotaPollerEnabled reports whether the idle-credential poller should run:
 // the explicit poller.enabled when set, otherwise whether the strategy is
 // expiring-first.
@@ -179,6 +186,7 @@ func devyreParseDuration(raw string, def time.Duration) time.Duration {
 // devyrePointerSettings are the pointer-backed routing settings whose explicit
 // zero value (0 or false) differs from leaving them unset.
 var devyrePointerSettings = []string{
+	"routing.session-affinity-persist",
 	"routing.expiring-first.gate-remaining-percent",
 	"routing.expiring-first.headroom-short-percent",
 	"routing.expiring-first.headroom-long-percent",

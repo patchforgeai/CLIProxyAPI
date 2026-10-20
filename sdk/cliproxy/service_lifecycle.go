@@ -161,6 +161,8 @@ func (s *Service) Run(ctx context.Context) error {
 		s.hooks.OnBeforeStart(s.cfg)
 	}
 
+	s.devyreStartSessionPersistence() // devyre: restore the session bindings before the first request
+
 	s.serverErr = make(chan error, 1)
 	go func() {
 		if errStart := s.server.Start(); errStart != nil {
@@ -332,6 +334,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				}
 			}
 		}
+		s.devyreStopSessionPersistence() // devyre: save the session bindings once more
 
 		if s.pluginHost != nil {
 			sdktranslator.SetPluginHooks(nil)

@@ -525,6 +525,80 @@ func TestExpiringFirstRoutingConfigExampleIsValid(t *testing.T) {
 	}
 }
 
+func TestDevyreSessionAffinityPersistConfig(t *testing.T) {
+	field, ok := reflect.TypeOf(RoutingConfig{}).FieldByName("SessionAffinityPersist")
+	if !ok || field.Tag.Get("yaml") != "session-affinity-persist,omitempty" || field.Tag.Get("json") != "session-affinity-persist,omitempty" {
+		t.Fatalf("RoutingConfig.SessionAffinityPersist tags = %q", field.Tag)
+	}
+	on, off := true, false
+	for _, tc := range []struct {
+		affinity bool
+		persist  *bool
+		want     bool
+	}{
+		{affinity: false, want: false},
+		{affinity: false, persist: &on, want: false},
+		{affinity: true, want: true},
+		{affinity: true, persist: &on, want: true},
+		{affinity: true, persist: &off, want: false},
+	} {
+		routing := RoutingConfig{SessionAffinity: tc.affinity, SessionAffinityPersist: tc.persist}
+		if got := routing.SessionAffinityPersistEnabled(); got != tc.want {
+			t.Fatalf("SessionAffinityPersistEnabled(affinity=%v, persist=%v) = %v, want %v", tc.affinity, tc.persist, got, tc.want)
+		}
+	}
+
+	// An explicit false survives v8 and v0 saves of an unrelated field.
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := "config-version: 8\nserver:\n  port: 8317\nrouting:\n  session-affinity: true\n  session-affinity-persist: false\n"
+	if err := ValidateV8Config([]byte(raw)); err != nil {
+		t.Fatalf("v8 validation rejected session-affinity-persist: %v", err)
+	}
+	cfg, err := LoadConfig(writeRoutingConfig(t, path, raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, migrate := range []bool{true, false} {
+		if persist := cfg.Routing.SessionAffinityPersist; persist == nil || *persist || cfg.Routing.SessionAffinityPersistEnabled() {
+			t.Fatalf("save %d: session-affinity-persist = %v, want an explicit false", i, persist)
+		}
+		cfg.Port = 8400 + i
+		if err = SaveConfigPreserveComments(path, cfg, migrate); err != nil {
+			t.Fatal(err)
+		}
+		if saved, _ := os.ReadFile(path); !strings.Contains(string(saved), "session-affinity-persist: false") {
+			t.Fatalf("save (migrate=%v) dropped session-affinity-persist:\n%s", migrate, saved)
+		}
+		if cfg, err = LoadConfig(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A save from memory adds an explicit false, and never invents the key.
+	fresh, err := LoadConfig(writeRoutingConfig(t, path, "config-version: 8\nrouting:\n  session-affinity: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh.Port = 8500
+	if err = SaveConfigPreserveComments(path, fresh, true); err != nil {
+		t.Fatal(err)
+	}
+	if saved, _ := os.ReadFile(path); strings.Contains(string(saved), "session-affinity-persist") {
+		t.Fatalf("a save invented session-affinity-persist:\n%s", saved)
+	}
+	fresh.Routing.SessionAffinityPersist = &off
+	if err = SaveConfigPreserveComments(path, fresh, true); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persist := reloaded.Routing.SessionAffinityPersist; persist == nil || *persist {
+		t.Fatalf("an explicit false set in memory was not saved: %v", persist)
+	}
+}
+
 // writeRoutingConfig writes raw to path and returns path.
 func writeRoutingConfig(t *testing.T, path, raw string) string {
 	t.Helper()

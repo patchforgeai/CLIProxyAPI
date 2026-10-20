@@ -55,6 +55,9 @@ func TestExpiringFirstRoutingConfigSurvivesV8ManagementAPI(t *testing.T) {
 		if ef := routing.ExpiringFirst; ef.HeadroomShortPercent == nil || ef.HeadroomShort() != 0 || ef.HeadroomLongPercent == nil || ef.HeadroomLong() != 7.5 {
 			t.Fatalf("%s: headroom = %+v", stage, ef)
 		}
+		if persist := routing.SessionAffinityPersist; persist == nil || *persist {
+			t.Fatalf("%s: session-affinity-persist = %v, want an explicit false", stage, persist)
+		}
 		if routing.ExpiringFirst.GateRemainingPercent == nil || routing.ExpiringFirst.GatePercent() != 0 || !routing.ExpiringFirst.LogPicks ||
 			cache.Enabled == nil || cache.IsEnabled() || cache.ClaudeUsageTTLDuration() != 7*time.Minute ||
 			poller.Enabled == nil || routing.QuotaPollerEnabled() || poller.ClaudeMinGapDuration() != 15*time.Minute || poller.CodexIntervalDuration() != 6*time.Minute {
@@ -75,6 +78,7 @@ func TestExpiringFirstRoutingConfigSurvivesV8ManagementAPI(t *testing.T) {
 		"quota-observation":{"usage-cache":{"enabled":false,"claude-usage-ttl":"7m"},"poller":{"enabled":false,"claude-min-gap":"15m"}}}}`, http.StatusOK)
 	request(http.MethodPut, "/v8/management/config/routing/quota-observation/poller/codex-interval", `"6m"`, http.StatusOK)
 	request(http.MethodPut, "/v8/management/config/routing/expiring-first/headroom-long-percent", `7.5`, http.StatusOK)
+	request(http.MethodPut, "/v8/management/config/routing/session-affinity-persist", `false`, http.StatusOK)
 	if loaded := assertBlocks("v8 write"); !config.IsExpiringFirstStrategy(loaded.Routing.Strategy) {
 		t.Fatalf("strategy = %q", loaded.Routing.Strategy)
 	}

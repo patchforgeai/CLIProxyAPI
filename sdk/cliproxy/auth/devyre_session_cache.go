@@ -87,6 +87,25 @@ func (c *SessionCache) devyreRestore(bindings []sessionBinding, now time.Time) i
 	return len(accepted)
 }
 
+// devyreChangedLocked tells the persistence hook that the bindings changed.
+// Callers hold c.mu; the hook must not call back into the cache.
+func (c *SessionCache) devyreChangedLocked() {
+	if c.devyreOnChange != nil {
+		c.devyreOnChange()
+	}
+}
+
+// devyreSetOnChange sets the function every change to the bindings calls, with
+// the cache's lock held; nil removes it.
+func (c *SessionCache) devyreSetOnChange(onChange func()) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.devyreOnChange = onChange
+}
+
 // devyreActiveBindings counts, per credential, the live bindings whose key
 // starts with prefix and ends with suffix and whose session made a request
 // within window before now. A binding's last use is its expiry minus the TTL,

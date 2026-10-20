@@ -30,6 +30,7 @@ type SessionCache struct {
 	ttl              time.Duration
 	stopCh           chan struct{}
 	stopOnce         sync.Once
+	devyreOnChange   func() // devyre: schedules a save (devyre_session_persist.go); called with mu held
 }
 
 // NewSessionCache creates a cache with the specified TTL.
@@ -190,6 +191,7 @@ func (c *SessionCache) replaceAliasGroupsLocked(authID string, expiresAt time.Ti
 	if c.maxEntries > 0 && len(c.entries) > c.maxEntries {
 		c.evictExcessLocked()
 	}
+	c.devyreChangedLocked() // devyre
 }
 
 func (c *SessionCache) evictExcessLocked() {
@@ -229,6 +231,7 @@ func (c *SessionCache) removeAliasGroupLocked(entry sessionEntry) {
 		}
 		delete(c.entries, alias)
 	}
+	c.devyreChangedLocked() // devyre
 }
 
 func sameSessionEntryGroup(left, right sessionEntry) bool {

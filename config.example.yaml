@@ -171,6 +171,11 @@ routing:
   # for maximum parallel concurrency.
   # Ignored when routing.session-affinity is false.
   session-affinity-subagents: true
+  # Keep the session bindings across restarts in session-affinity.json, in WRITABLE_PATH when it
+  # is set, else next to this file, so a restart does not move sessions to other accounts. Written
+  # at most every 30 seconds while bindings change, and on shutdown. Ignored when
+  # routing.session-affinity is false. Default: true.
+  # session-affinity-persist: true
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
   force-model-prefix: false

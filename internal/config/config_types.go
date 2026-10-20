@@ -375,6 +375,10 @@ type RoutingConfig struct {
 	// Default: true. Ignored when SessionAffinity is false.
 	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
 
+	// devyre: keep the session bindings in session-affinity.json across restarts.
+	// Default: true. Ignored when SessionAffinity is false (devyre_routing.go).
+	SessionAffinityPersist *bool `yaml:"session-affinity-persist,omitempty" json:"session-affinity-persist,omitempty"`
+
 	// devyre: expiring-first selector and quota observation settings (devyre_routing.go).
 	ExpiringFirst    ExpiringFirstConfig    `yaml:"expiring-first,omitempty" json:"expiring-first,omitempty"`
 	QuotaObservation QuotaObservationConfig `yaml:"quota-observation,omitempty" json:"quota-observation,omitempty"`
