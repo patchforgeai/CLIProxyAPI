@@ -270,16 +270,16 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	if err != nil {
 		return
 	}
-	// devyre: one reader owns the client socket in both modes, so a client leaving while a
-	// response streams ends it at once (devyre_responses_socket.go).
-	socketInput, stopSocketInput := h.devyreStartSocketReader(c, conn)
+	writer := newResponsesWebsocketWriter(conn)
+	passthroughSessionID := uuid.NewString()
+	// devyre: one reader owns the client socket in both modes; it handles response.interrupt
+	// and a client leaving while a response streams (devyre_responses_socket.go).
+	socketInput, stopSocketInput := h.devyreStartSocketReader(c, conn, writer, passthroughSessionID)
 	defer stopSocketInput()
 	var duplexInput <-chan cliproxyexecutor.WebsocketInput
 	if h != nil && h.Cfg != nil && h.Cfg.CodexResponseSteering {
 		duplexInput = socketInput
 	}
-	writer := newResponsesWebsocketWriter(conn)
-	passthroughSessionID := uuid.NewString()
 	downstreamSessionKey := websocketDownstreamSessionKey(c.Request)
 	retainResponsesWebsocketToolCaches(downstreamSessionKey)
 	clientIP := websocketClientAddress(c)

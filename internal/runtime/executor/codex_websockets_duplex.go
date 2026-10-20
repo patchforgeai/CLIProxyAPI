@@ -311,6 +311,14 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					log.Infof("codex websockets: request forwarded session=%s auth=%s url=%s event=response.steer", sess.sessionID, auth.ID, initial.wsURL)
 					continue
 
+				case cliproxyexecutor.DevyreResponseInterruptType:
+					// devyre: a control frame like response.steer, written unchanged while its
+					// response runs on this socket (devyre_codex_interrupt.go).
+					if !e.devyreDuplexInterrupt(streamCtx, sess, conn, auth.ID, initial.wsURL, payload, out, fail) {
+						return
+					}
+					continue
+
 				case "response.create", "response.append":
 					if len(pendingCreates) == 0 && readyForCreate() {
 						if !processCreatePayload(payload) {

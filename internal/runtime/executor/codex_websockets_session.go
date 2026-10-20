@@ -83,6 +83,8 @@ type codexWebsocketSession struct {
 	lastEventMu   sync.Mutex
 	lastEventConn *websocket.Conn
 	lastEventType string
+
+	devyre devyreCodexResponses // devyre: the responses on the socket, for response.interrupt
 }
 
 type codexWebsocketRead struct {
@@ -715,6 +717,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			if eventType != "" {
 				sess.setLastEventType(conn, eventType)
 			}
+			sess.devyreObserveUpstream(conn, eventType, payload) // devyre: before any request reads it
 		}
 
 		ch, done := sess.activeForConn(conn)
