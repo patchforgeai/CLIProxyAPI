@@ -270,12 +270,13 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	if err != nil {
 		return
 	}
+	// devyre: one reader owns the client socket in both modes, so a client leaving while a
+	// response streams ends it at once (devyre_responses_socket.go).
+	socketInput, stopSocketInput := h.devyreStartSocketReader(c, conn)
+	defer stopSocketInput()
 	var duplexInput <-chan cliproxyexecutor.WebsocketInput
 	if h != nil && h.Cfg != nil && h.Cfg.CodexResponseSteering {
-		socketCtx, cancelSocket := context.WithCancel(c.Request.Context())
-		defer cancelSocket()
-		c.Request = c.Request.WithContext(socketCtx)
-		duplexInput = readResponsesWebsocketInput(socketCtx, cancelSocket, conn)
+		duplexInput = socketInput
 	}
 	writer := newResponsesWebsocketWriter(conn)
 	passthroughSessionID := uuid.NewString()
@@ -407,18 +408,16 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		var msgType int
 		var payload []byte
 		var errReadMessage error
-		if duplexInput == nil {
-			msgType, payload, errReadMessage = conn.ReadMessage()
-		} else {
-			select {
-			case message, ok := <-duplexInput:
-				if !ok {
-					return
-				}
+		// devyre: frames come from the socket reader; its cancel cause is the read error.
+		select {
+		case message, ok := <-socketInput:
+			if !ok {
+				errReadMessage = context.Cause(c.Request.Context())
+			} else {
 				msgType, payload, errReadMessage = websocket.TextMessage, message.Payload, message.Err
-			case <-c.Request.Context().Done():
-				return
 			}
+		case <-c.Request.Context().Done():
+			errReadMessage = context.Cause(c.Request.Context())
 		}
 		if errReadMessage != nil {
 			wsTerminateErr = errReadMessage
@@ -765,6 +764,9 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				// The client hung up while a downstream write was in flight. This is a
 				// normal shutdown race, not a proxy failure.
 				log.Debugf("responses websocket: client closed during forward id=%s error=%v", passthroughSessionID, errForward)
+			case errors.Is(errForward, context.Canceled) && c.Request.Context().Err() != nil:
+				// devyre: the socket reader ended the connection, as when the client leaves.
+				log.Infof("responses websocket: connection ended during forward id=%s cause=%v", passthroughSessionID, context.Cause(c.Request.Context()))
 			default:
 				log.Warnf("responses websocket: forward failed id=%s error=%v", passthroughSessionID, errForward)
 			}
