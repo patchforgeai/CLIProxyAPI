@@ -55,9 +55,14 @@ type routingQuotaReadingsCredential struct {
 	Rank int `json:"rank"`
 	// Focused reports a focus (routingfocus) on the credential; FocusUntil is
 	// its end, null without one or when the credential is not focused.
-	Focused    bool                         `json:"focused"`
-	FocusUntil *time.Time                   `json:"focus_until"`
-	Windows    []routingQuotaReadingsWindow `json:"windows"`
+	Focused    bool       `json:"focused"`
+	FocusUntil *time.Time `json:"focus_until"`
+	// AvoidedUntil is set while new sessions are placed on other credentials
+	// because this one failed transiently a moment ago (a 5xx or 529,
+	// coreauth.TransientlyAvoidedUntil): it ranks after them until then. The
+	// sessions bound to it keep it.
+	AvoidedUntil *time.Time                   `json:"avoided_until,omitempty"`
+	Windows      []routingQuotaReadingsWindow `json:"windows"`
 }
 
 // routingQuotaReadingsWindow is one effective quota window: resets that already
@@ -97,7 +102,9 @@ func (h *Handler) GetRoutingQuotaReadings(c *gin.Context) {
 	if manager != nil {
 		auths = manager.List()
 	}
-	c.JSON(http.StatusOK, buildRoutingQuotaReadings(strategy, thresholds, auths, quotareading.Default(), h.devyreFocusStore(), time.Now()))
+	now := time.Now()
+	failing := func(authID string) (time.Time, bool) { return coreauth.TransientlyAvoidedUntil(authID, now) }
+	c.JSON(http.StatusOK, buildRoutingQuotaReadings(strategy, thresholds, auths, quotareading.Default(), h.devyreFocusStore(), failing, now))
 }
 
 // routingQuotaReadingsEntry carries the ranking inputs next to the response row.
@@ -105,6 +112,7 @@ type routingQuotaReadingsEntry struct {
 	credential routingQuotaReadingsCredential
 	view       coreauth.ExpiringFirstView
 	selectable bool
+	avoided    bool
 }
 
 // buildRoutingQuotaReadings evaluates every non-disabled credential the way the
@@ -115,10 +123,11 @@ type routingQuotaReadingsEntry struct {
 // Per provider, the top tier is the highest priority among the credentials the
 // selectors would consider (coreauth.AuthSelectable), exactly as the selectors
 // narrow candidates. Usable credentials in that tier are ranked in the order
-// the selector places a new session: the focused credential first, then
-// coreauth.CompareExpiringFirstPlacement, with the auth ID in place of its
-// turn-taking among ties.
-func buildRoutingQuotaReadings(strategy string, thresholds quotareading.Thresholds, auths []*coreauth.Auth, store *quotareading.Store, focus *routingfocus.Store, now time.Time) routingQuotaReadingsResponse {
+// the selector places a new session: the credentials that failed transiently a
+// moment ago (failing, nil for none) after the others, then the focused
+// credential first, then coreauth.CompareExpiringFirstPlacement, with the auth
+// ID in place of its turn-taking among ties.
+func buildRoutingQuotaReadings(strategy string, thresholds quotareading.Thresholds, auths []*coreauth.Auth, store *quotareading.Store, focus *routingfocus.Store, failing func(authID string) (time.Time, bool), now time.Time) routingQuotaReadingsResponse {
 	if normalized, ok := normalizeRoutingStrategy(strategy); ok {
 		strategy = normalized
 	} else {
@@ -162,6 +171,12 @@ func buildRoutingQuotaReadings(strategy string, thresholds quotareading.Threshol
 			entry.credential.Focused = true
 			entry.credential.FocusUntil = optionalUTCTime(active.Until)
 		}
+		if failing != nil {
+			if until, ok := failing(auth.ID); ok {
+				entry.avoided = true
+				entry.credential.AvoidedUntil = optionalUTCTime(until)
+			}
+		}
 		if entry.selectable {
 			if top, ok := topPriority[provider]; !ok || entry.credential.Priority > top {
 				topPriority[provider] = entry.credential.Priority
@@ -194,9 +209,13 @@ func buildRoutingQuotaReadings(strategy string, thresholds quotareading.Threshol
 }
 
 // routingQuotaRanksBefore orders rank candidates like the selector places a new
-// session: the focused credential first, then the placement order, then auth ID
-// in place of the selector's round-robin among ties.
+// session: a credential that failed transiently a moment ago after the others,
+// then the focused credential first, then the placement order, then auth ID in
+// place of the selector's round-robin among ties.
 func routingQuotaRanksBefore(a, b *routingQuotaReadingsEntry) bool {
+	if a.avoided != b.avoided {
+		return !a.avoided
+	}
 	if a.credential.Focused != b.credential.Focused {
 		return a.credential.Focused
 	}

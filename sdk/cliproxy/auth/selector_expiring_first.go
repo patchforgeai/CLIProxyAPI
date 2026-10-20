@@ -69,6 +69,11 @@ const expiringFirstMaxRotationKeys = 4096
 // bindings, so sessions that leave one credential together spread over the
 // credentials that can carry them instead of all landing on the most urgent.
 //
+// Before any of this, a credential that failed transiently on the request's model
+// a moment ago is left out while another candidate has not
+// (devyre_transient_soft.go): the sessions bound there keep it, new ones and
+// failovers go elsewhere until it answers or upstream's cooldown would have ended.
+//
 // A focused credential (routingfocus) overrides all of this: while it is among
 // the candidates and usable for the request's model, every pick is the focus,
 // whatever the urgencies, headroom or stay power, failovers included, and
@@ -94,6 +99,9 @@ type ExpiringFirstSelector struct {
 	Now func() time.Time
 	// Focus holds the focused credentials; nil means routingfocus.Default().
 	Focus *routingfocus.Store
+	// transients holds the credentials' recent transient failures
+	// (devyre_transient_soft.go); nil means the store the manager shares.
+	transients *devyreTransientStore
 
 	mu sync.Mutex
 	rr map[string]string // provider:model -> last picked ID among ties and unknowns
@@ -253,6 +261,7 @@ func (s *ExpiringFirstSelector) pick(ctx context.Context, provider, model string
 	}
 	// Candidates usually arrive sorted by ID already; the rotation relies on it.
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].auth.ID < candidates[j].auth.ID })
+	candidates = s.withoutTransientlyFailing(ctx, provider, model, candidates, now)
 
 	reason := expiringFirstReasonFocus
 	pool := s.focusPool(candidates, now)
@@ -325,11 +334,49 @@ func (s *ExpiringFirstSelector) usableFocus(ctx context.Context, provider, model
 		if auth == nil || !focus.Focused(auth.ID, now) {
 			continue
 		}
+		// A focus that just failed transiently takes no sessions over: a move there
+		// would write their contexts into an account that is failing.
+		if _, failing := s.transientStore().avoidedUntil(auth.ID, model, now); failing {
+			continue
+		}
 		if s.evaluate(store, auth, model, now).Usable {
 			usable = append(usable, auth)
 		}
 	}
 	return usable
+}
+
+func (s *ExpiringFirstSelector) transientStore() *devyreTransientStore {
+	if s.transients != nil {
+		return s.transients
+	}
+	return devyreTransientsDefault
+}
+
+// withoutTransientlyFailing leaves out the candidates that failed transiently on
+// model a moment ago (devyreTransientStore.avoidedUntil), unless every candidate
+// did: new sessions and failovers go where the failure is not, while the sessions
+// bound to those credentials keep them (devyre_transient_soft.go).
+func (s *ExpiringFirstSelector) withoutTransientlyFailing(ctx context.Context, provider, model string, candidates []expiringFirstCandidate, now time.Time) []expiringFirstCandidate {
+	store := s.transientStore()
+	kept := make([]expiringFirstCandidate, 0, len(candidates))
+	var left []string
+	for _, candidate := range candidates {
+		if _, failing := store.avoidedUntil(candidate.auth.ID, model, now); failing {
+			left = append(left, candidate.auth.ID)
+			continue
+		}
+		kept = append(kept, candidate)
+	}
+	if len(left) == 0 || len(kept) == 0 {
+		return candidates
+	}
+	level := log.DebugLevel
+	if s.LogPicks {
+		level = log.InfoLevel
+	}
+	selectorLogEntry(ctx).Logf(level, "expiring-first: left out auths that failed transiently a moment ago | provider=%s model=%s auths=%s", provider, model, strings.Join(left, ","))
+	return kept
 }
 
 // expiringFirstPool returns the candidates the pick rotates among, in candidate

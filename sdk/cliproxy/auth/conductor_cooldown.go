@@ -760,6 +760,10 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			}
 		}
 	}
+	// devyre: a transient failure keeps the credential and its sessions (devyre_transient_soft.go).
+	if m.devyreSoftTransient(ctx, result) {
+		return
+	}
 	modelKey := canonicalModelKey(result.Model)
 
 	var authSnapshot *Auth

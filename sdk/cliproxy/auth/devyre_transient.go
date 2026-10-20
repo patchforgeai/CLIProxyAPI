@@ -45,6 +45,9 @@ type devyreManagerState struct {
 	// transientWait waits before a retry of the bound credential; a test hook,
 	// nil waits on a timer.
 	transientWait func(ctx context.Context, d time.Duration) error
+	// transients holds the streaks of transient failures (devyre_transient_soft.go);
+	// a test hook, nil uses the store the expiring-first selector shares.
+	transients *devyreTransientStore
 }
 
 // devyreMarkBound tells the conductor that the request's session was already
@@ -121,6 +124,9 @@ func (t *devyreTransient) next(ctx context.Context, auth *Auth, err error) (bool
 	}
 	wait := devyreTransientBackoff[t.retries]
 	t.retries++
+	// The failure counts toward the credential's streak (devyre_transient_soft.go):
+	// new sessions are placed elsewhere while it is retried.
+	t.m.devyreNoteTransient(auth.ID, t.routeModel, statusCodeFromError(err), retryAfterFromError(err))
 	t.m.recordAvailabilityNeutralResult(ctx, Result{AuthID: auth.ID, Provider: t.provider, Model: t.resultModel, RouteModel: t.routeModel, Success: false, Error: resultErrorFromError(err), Options: t.opts})
 	session, _ := t.opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey].(string)
 	logEntryWithRequestID(ctx).Infof("session-affinity: transient failure on the bound auth, retrying it | session=%s auth=%s provider=%s model=%s retry=%d/%d wait=%s",

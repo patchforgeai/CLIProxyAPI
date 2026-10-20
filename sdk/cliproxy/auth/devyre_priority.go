@@ -24,6 +24,13 @@ func AuthSelectable(auth *Auth, model string, now time.Time) bool {
 	return !blocked
 }
 
+// TransientlyAvoidedUntil reports until when the expiring-first selector places new
+// sessions on other credentials than authID because authID failed transiently a
+// moment ago, on any model (devyre_transient_soft.go), and false when it does not.
+func TransientlyAvoidedUntil(authID string, now time.Time) (time.Time, bool) {
+	return devyreTransientsDefault.avoidedUntil(authID, "", now)
+}
+
 // ExpiringFirstView is how the expiring-first selector sees one credential for
 // one model: its effective quota reading, its gates and urgency, and the
 // headroom of its windows.

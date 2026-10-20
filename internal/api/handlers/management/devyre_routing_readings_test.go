@@ -128,7 +128,7 @@ var readingsTestThresholds = quotareading.Thresholds{Gate: 2, HeadroomShort: 20,
 
 func TestRoutingQuotaReadingsGolden(t *testing.T) {
 	auths, store := readingsGoldenFixture()
-	response := buildRoutingQuotaReadings(" EF ", readingsTestThresholds, auths, store, routingfocus.NewStore(), readingsTestNow)
+	response := buildRoutingQuotaReadings(" EF ", readingsTestThresholds, auths, store, routingfocus.NewStore(), nil, readingsTestNow)
 	got, err := json.MarshalIndent(response, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -223,7 +223,7 @@ func TestRoutingQuotaReadingsFocus(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			response := buildRoutingQuotaReadings("expiring-first", readingsTestThresholds, auths, store, focus, readingsTestNow)
+			response := buildRoutingQuotaReadings("expiring-first", readingsTestThresholds, auths, store, focus, nil, readingsTestNow)
 			focusedSet := make(map[string]bool, len(tc.focused))
 			for _, id := range tc.focused {
 				focusedSet[id] = true
@@ -261,12 +261,65 @@ func TestRoutingQuotaReadingsFocus(t *testing.T) {
 	if err := focus.Set(routingfocus.Focus{AuthID: "claude-bravo.json", Provider: "claude", Until: until.In(time.FixedZone("CEST", 2*3600))}); err != nil {
 		t.Fatal(err)
 	}
-	body, err := json.Marshal(buildRoutingQuotaReadings("expiring-first", readingsTestThresholds, auths, store, focus, readingsTestNow))
+	body, err := json.Marshal(buildRoutingQuotaReadings("expiring-first", readingsTestThresholds, auths, store, focus, nil, readingsTestNow))
 	if err != nil {
 		t.Fatal(err)
 	}
 	wantBravo := `"auth_id":"claude-bravo.json","auth_index":"idx-bravo","provider":"claude","label":"claude-bravo.json","priority":0,"usable":true,"gate_reason":"","headroom":true,"urgency_per_hour":1.25,"rank":1,"focused":true,"focus_until":"` + until.Format(time.RFC3339) + `"`
 	if !strings.Contains(string(body), wantBravo) || !strings.Contains(string(body), `"rank":2,"focused":false,"focus_until":null`) {
+		t.Fatalf("readings JSON = %s", body)
+	}
+}
+
+// A credential that failed transiently a moment ago is ranked after the others,
+// focused or not, as the selector places new sessions elsewhere until then; the
+// JSON says until when.
+func TestRoutingQuotaReadingsRankTransientlyFailingCredentialsLast(t *testing.T) {
+	t.Parallel()
+	until := readingsTestNow.Add(time.Minute).UTC()
+	failing := func(authID string) (time.Time, bool) {
+		if authID == "claude-alpha.json" {
+			return until, true
+		}
+		return time.Time{}, false
+	}
+	ranks := func(focus *routingfocus.Store) map[string]routingQuotaReadingsCredential {
+		t.Helper()
+		auths, store := readingsGoldenFixture()
+		response := buildRoutingQuotaReadings("expiring-first", readingsTestThresholds, auths, store, focus, failing, readingsTestNow)
+		byID := make(map[string]routingQuotaReadingsCredential, len(response.Credentials))
+		for _, credential := range response.Credentials {
+			byID[credential.AuthID] = credential
+		}
+		return byID
+	}
+
+	byID := ranks(routingfocus.NewStore())
+	if got := byID["claude-bravo.json"].Rank; got != 1 {
+		t.Fatalf("claude-bravo.json rank = %d, want 1 while claude-alpha.json is failing", got)
+	}
+	alpha := byID["claude-alpha.json"]
+	if alpha.Rank != 6 || alpha.AvoidedUntil == nil || !alpha.AvoidedUntil.Equal(until) {
+		t.Fatalf("claude-alpha.json rank %d, avoided_until %v; want rank 6 until %v", alpha.Rank, alpha.AvoidedUntil, until)
+	}
+	if byID["claude-bravo.json"].AvoidedUntil != nil {
+		t.Fatal("a credential that did not fail reports avoided_until")
+	}
+
+	focus := routingfocus.NewStore()
+	if err := focus.Set(routingfocus.Focus{AuthID: "claude-alpha.json", Provider: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ranks(focus)["claude-alpha.json"].Rank; got != 6 {
+		t.Fatalf("the failing focus has rank %d, want 6: new sessions go elsewhere", got)
+	}
+
+	auths, store := readingsGoldenFixture()
+	body, err := json.Marshal(buildRoutingQuotaReadings("expiring-first", readingsTestThresholds, auths, store, routingfocus.NewStore(), failing, readingsTestNow))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"focus_until":null,"avoided_until":"`+until.Format(time.RFC3339)+`"`) {
 		t.Fatalf("readings JSON = %s", body)
 	}
 }
