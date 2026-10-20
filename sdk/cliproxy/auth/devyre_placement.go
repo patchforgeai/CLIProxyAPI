@@ -183,6 +183,35 @@ func (d *devyreAffinityState) forget(key string) {
 	}
 }
 
+// CarrySessionBindings copies the live session bindings of the
+// SessionAffinitySelector from into the one to, with their absolute expiries,
+// and the bindings a credential failure suspended. A selector rebuilt by a
+// routing reload then keeps every session where it is: with an empty cache,
+// each session's next request would be placed anew, many on another account,
+// and pay to write its whole context into that account's cache. It returns how
+// many bindings it copied; selectors without session affinity copy nothing.
+func CarrySessionBindings(from, to Selector) int {
+	src, okFrom := from.(*SessionAffinitySelector)
+	dst, okTo := to.(*SessionAffinitySelector)
+	if !okFrom || !okTo || src == nil || dst == nil || src == dst || src.cache == nil || dst.cache == nil {
+		return 0
+	}
+	now := time.Now()
+	carried := dst.cache.devyreRestore(src.cache.devyreBindings(now), now)
+	src.devyre.mu.Lock()
+	suspended := make(map[string]suspendedBinding, len(src.devyre.suspended))
+	for key, binding := range src.devyre.suspended {
+		suspended[key] = binding
+	}
+	src.devyre.mu.Unlock()
+	for key, binding := range suspended {
+		if now.Before(binding.until) {
+			dst.devyre.suspend(key, binding.authID, binding.until, now)
+		}
+	}
+	return carried
+}
+
 // devyreSuspend remembers, after OnResult removed key's binding to authID for a
 // credential failure, that the session was bound there: its next pick, the
 // retry of the failed request included, is a failover rather than a new

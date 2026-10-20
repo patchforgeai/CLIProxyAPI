@@ -237,7 +237,7 @@ func (s *Service) applyManagerConfig(ctx context.Context, commit configCommit) b
 	}
 	routingState := normalizedRoutingRuntimeState(commit.cfg)
 	if s.appliedRoutingState == nil || *s.appliedRoutingState != routingState {
-		s.coreManager.SetSelector(newRoutingSelector(routingState))
+		s.coreManager.SetSelector(s.devyreRoutingSelector(routingState)) // devyre: keeps the session bindings
 		s.appliedRoutingState = &routingState
 	}
 	s.applyRetryConfig(commit.cfg)
