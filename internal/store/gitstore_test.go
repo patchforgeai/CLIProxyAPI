@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +18,7 @@ import (
 	gitconfig "github.com/go-git/go-git/v6/config"
 	"github.com/go-git/go-git/v6/plumbing"
 	"github.com/go-git/go-git/v6/plumbing/object"
+	"github.com/go-git/go-git/v6/storage/filesystem/dotgit"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 )
 
@@ -1830,8 +1833,45 @@ func corruptGitRepository(t *testing.T, repoDir string) {
 			t.Fatalf("remove packfile %s: %v", filepath.Base(packfile), errRemove)
 		}
 	}
-	if errVerify := verifyRepositoryHead(repo); !isRepositoryCorruptionError(errVerify) {
+	// A repository opened now must find the corruption, as the store's own open does. The handle
+	// that repacked keeps the packs it opened and the objects it read (go-git v6), so it would
+	// still answer from them.
+	reopened, errReopen := git.PlainOpen(repoDir)
+	if errReopen != nil {
+		t.Fatalf("open repository after corruption: %v", errReopen)
+	}
+	defer func() {
+		if errClose := reopened.Close(); errClose != nil {
+			t.Errorf("close reopened repository: %v", errClose)
+		}
+	}()
+	if errVerify := verifyRepositoryHead(reopened); !isRepositoryCorruptionError(errVerify) {
 		t.Fatalf("verifyRepositoryHead error = %v, want repository corruption", errVerify)
+	}
+}
+
+func TestIsRepositoryCorruptionErrorCoversMissingObjectStoreFiles(t *testing.T) {
+	missing := func(path string) error {
+		return fmt.Errorf("packhandle: pack size: %w", &fs.PathError{Op: "statat", Path: path, Err: fs.ErrNotExist})
+	}
+	unreadable := &fs.PathError{Op: "open", Path: filepath.Join("objects", "pack", "pack-0.pack"), Err: fs.ErrPermission}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"packfile not found", fmt.Errorf("open pack: %w", dotgit.ErrPackfileNotFound), true},
+		{"object not found", plumbing.ErrObjectNotFound, true},
+		{"pack gone after its handle opened", missing(filepath.Join("objects", "pack", "pack-0.pack")), true},
+		{"loose object gone, absolute path", missing(filepath.Join(t.TempDir(), ".git", "objects", "ab", "cdef")), true},
+		{"file outside the object store", missing(filepath.Join("config", "config.yaml")), false},
+		{"a ref named objects", missing(filepath.Join("refs", "heads", "objects")), false},
+		{"object store file not readable", fmt.Errorf("read: %w", unreadable), false},
+		{"no error", nil, false},
+	} {
+		if got := isRepositoryCorruptionError(tc.err); got != tc.want {
+			t.Errorf("%s: isRepositoryCorruptionError(%v) = %v, want %v", tc.name, tc.err, got, tc.want)
+		}
 	}
 }
 

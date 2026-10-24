@@ -1524,7 +1524,25 @@ func rollbackRecoveredGitDirectory(gitDir, backupGitDir string) error {
 }
 
 func isRepositoryCorruptionError(err error) bool {
-	return errors.Is(err, dotgit.ErrPackfileNotFound) || errors.Is(err, plumbing.ErrObjectNotFound)
+	if errors.Is(err, dotgit.ErrPackfileNotFound) || errors.Is(err, plumbing.ErrObjectNotFound) {
+		return true
+	}
+	// devyre: go-git v6 keeps a packfile's handle once it has opened it, and a .pack gone after
+	// that is reported as the file's own "not exist" ("packhandle: pack size: statat
+	// objects/pack/…"), not as ErrPackfileNotFound. A file missing from the object store is the
+	// same corruption.
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) && errors.Is(pathErr.Err, fs.ErrNotExist) {
+		return isObjectStorePath(pathErr.Path)
+	}
+	return false
+}
+
+// isObjectStorePath reports whether path, as go-git names a file of the repository (relative to
+// its .git directory, or absolute), is inside the object store.
+func isObjectStorePath(path string) bool {
+	slashed := "/" + filepath.ToSlash(path)
+	return strings.HasPrefix(slashed, "/objects/") || strings.Contains(slashed, "/.git/objects/")
 }
 
 func verifyRepositoryHead(repo *git.Repository) error {
