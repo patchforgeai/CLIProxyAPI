@@ -203,6 +203,11 @@ func main() {
 		log.Errorf("-password-stdin: %v", errPassword)
 		os.Exit(1)
 	}
+	// devyre: -auth-files-key-stdin reads the auth files' key from the next line (devyre_auth_seal.go).
+	if errKey := devyreApplyAuthFilesKeyStdin(); errKey != nil {
+		log.Errorf("-auth-files-key-stdin: %v", errKey)
+		os.Exit(1)
+	}
 
 	if discoverGateways || discoverJSON {
 		cfgInclude, cfgExclude := cmd.LoadDiscoveryScanFilters(configPath)
@@ -651,6 +656,11 @@ func main() {
 	} else {
 		cfg.AuthDir = resolvedAuthDir
 	}
+	// devyre: with -auth-files-key-stdin, encrypt the plaintext auth files before anything loads them.
+	if errSeal := devyreSealAuthDir(cfg.AuthDir, usePostgresStore || useObjectStore || useGitStore); errSeal != nil {
+		log.Errorf("-auth-files-key-stdin: %v", errSeal)
+		os.Exit(1)
+	}
 	managementasset.SetCurrentConfig(cfg)
 
 	// Create login options to be used in authentication flows.
@@ -975,7 +985,7 @@ func argvFlagConsumesValue(name string) bool {
 	case "codex-login", "codex-device-login", "claude-login", "no-browser",
 		"antigravity-login", "kimi-login", "kimi-ai-login", "xai-login", "devin-login", "meta-login",
 		"discover", "discover-json", "home-disable-cluster-discovery",
-		"tui", "standalone", "local-model", "lifeline-stdin", "password-stdin":
+		"tui", "standalone", "local-model", "lifeline-stdin", "password-stdin", "auth-files-key-stdin":
 		return false
 	default:
 		return name != ""

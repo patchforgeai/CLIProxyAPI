@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authseal"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/credentialweight"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -419,7 +420,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context, pagination authFilesPagi
 
 		// Read file to get type field
 		full := filepath.Join(h.cfg.AuthDir, name)
-		if data, errRead := os.ReadFile(full); errRead == nil {
+		if data, errRead := authseal.ReadFile(full); errRead == nil { // devyre: opens a sealed auth file
 			typeValue := gjson.GetBytes(data, "type").String()
 			emailValue := gjson.GetBytes(data, "email").String()
 			fileData["type"] = typeValue
@@ -744,6 +745,7 @@ func (h *Handler) buildAuthFileEntryLocked(auth *coreauth.Auth, quotaSupported .
 	if claims := extractCodexIDTokenClaims(auth); claims != nil {
 		entry["id_token"] = claims
 	}
+	devyreAddAccountUUID(entry, auth) // devyre: what the app read from the file before it was sealed
 	// Expose priority from Attributes (set by synthesizer from JSON "priority" field).
 	// Fall back to Metadata for auths registered via UploadAuthFile (no synthesizer).
 	if p := strings.TrimSpace(authAttribute(auth, "priority")); p != "" {

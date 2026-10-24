@@ -14,6 +14,7 @@ The design, the verified facts and the decisions behind this fork are in [PLAN.m
 - **Deploy kit.** Docker Compose on loopback only, `tailscale serve` on port 8318, PowerShell scripts for secrets, start-up, backup and upstream syncs, and client snippets.
 - **Tailnet-only and passwordless.** CPA is reachable only from this PC and the tailnet, and chosen tailnet devices plus this PC use it without a key (`management.tailnet-auth`). `exposure-check.ps1` verifies both. See [Tailnet-only and passwordless](#tailnet-only-and-passwordless).
 - **Sidecar lifeline.** `-lifeline-stdin` lets a supervising process own the server's lifetime through stdin, in place of the 10-second keep-alive idle limit that upstream applies with `-password`; `-password-stdin` hands it the local password there, off the command line. The server then reports its listener on stdout, and `/keep-alive` proves it holds the password without anyone sending it. Off by default. See [Sidecar lifeline](#sidecar-lifeline).
+- **Sealed auth files.** `-auth-files-key-stdin` keeps the credentials in `auth-dir` encrypted at rest with a key handed over on stdin after the password: AES-256-GCM, each file bound to its name, the plaintext files sealed at the first start with the key. Every auth file is written atomically, with or without a key. Off by default. See [Sealed auth files](#sealed-auth-files).
 - **OAuth redirect port.** The Claude and Codex OAuth starts take an opt-in `redirect_port`, used for the authorize URL and the token exchange, so a caller with its own callback listener on an OS-assigned port never collides with whatever holds 54545 or 1455. Without it nothing changes. See [OAuth redirect port](#oauth-redirect-port).
 - **Codex `response.interrupt`.** The router writes Codex's interrupt, unchanged, to the upstream socket its response runs on and never answers one with an error, and a Responses websocket client that leaves mid-response ends its upstream response at once, with or without steering. See [Codex response.interrupt](#codex-responseinterrupt).
 
@@ -46,6 +47,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `devyre/start-cpa.cmd` | Double-click starter for `ensure-running.ps1` |
 | `devyre/scripts/up.ps1` | Refuses to publish beyond 127.0.0.1, builds and tags the image, recreates the container, waits for `/healthz` and the panel |
 | `devyre/scripts/update-panel.ps1` | Refreshes the embedded panel: a panel fork release through your own `gh` login, kept only when it matches the sha256 digest the release lists, or a clean local build of a clone; writes `management.html` and `panel.json` and never commits |
+| `cmd/server/devyre_auth_seal.go` | Registers `-auth-files-key-stdin`, makes the key line the auth files' key, and seals the plaintext auth files at start (`devyreSealAuthDir`), refusing the key with a git, object or Postgres store |
+| `cmd/server/devyre_auth_seal_test.go` | The flag is a boolean listed alone in the help and never takes the next argument as a value; the start seals the plaintext files only with a key and the file store |
 | `cmd/server/devyre_lifeline.go` | Registers `-lifeline-stdin` and `-password-stdin`, and reads the password line for `main` |
 | `cmd/server/devyre_lifeline_test.go` | Both flags are booleans listed in the help output, argv scanning never takes the next argument as a value, and `-password-stdin` never goes with `-password` |
 | `internal/api/devyre_lifeline.go` | `WithDevyreKeepAliveProbe`: `/keep-alive`, authenticated by the local password, without the idle watcher, answering challenges with `LifelineProof`; `WithDevyreListenReport`: `Start` reports its listener; `devyreServerState`, the fork's own server fields |
@@ -60,6 +63,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/devyre_t3_hub_contract_test.go` | `TestT3Hub_*`, the T3 Code hub contract |
 | `internal/api/devyre_tailnet_auth.go` | Keyless proxy API for trusted requests (`proxy-api`), the key-only `/v1/ws` wrapper and the anti-framing headers of the panel pages |
 | `internal/api/devyre_tailnet_auth_test.go` | Full-stack `tailnet-auth` tests through the real server and config loader: session endpoint, token-bearing routes, CORS, proxy principal, `/v1/ws`, framing, the tailnet name on the API port, the rendered proxy debug lines |
+| `internal/api/handlers/management/devyre_auth_files.go` | `devyreAddAccountUUID`: the auth-file listing's `account_uuid` |
+| `internal/api/handlers/management/devyre_auth_seal_test.go` | With a key, through the routes: an upload stored sealed, the listing's `account_uuid`, a download answering the JSON, a status change written sealed |
 | `internal/api/handlers/management/devyre_oauth_redirect.go` | `redirect_port` on the Claude and Codex OAuth starts: parsing, the refusals, and the redirect-aware authorize URL and exchange |
 | `internal/api/handlers/management/devyre_oauth_redirect_test.go` | Through `StartOAuthV8`: the default redirects unchanged, the moved ones per provider, every refused value and the `is_webui` combination, a Codex exchange that uses the moved redirect, and a service that cannot move it |
 | `internal/api/handlers/management/devyre_quota_observer.go` | Idle-credential usage poller; also forgets the readings and the focus of removed credentials |
@@ -78,7 +83,13 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/auth/claude/devyre_redirect_test.go` | Only the redirect changes in the authorize URL; the exchange body carries the moved redirect |
 | `internal/auth/codex/devyre_redirect.go` | `LoopbackRedirectURI` (`http://127.0.0.1:<port>/auth/callback`), `GenerateAuthURLWithRedirect` (upstream already has `ExchangeCodeForTokensWithRedirect`) |
 | `internal/auth/codex/devyre_redirect_test.go` | Only the redirect changes in the authorize URL |
-| `internal/cmd/devyre_lifeline.go` | The stdin lifeline: `SetStdinLifeline`, the shutdown line, the run context that ends with stdin, the password line (`ReadStdinPassword`) on the same buffered reader, and the listening line |
+| `internal/authseal/authseal.go` | The auth files' key (`SetKey`), the sealed format (`Seal`, `Open`, the name as associated data), and the reads and writes every auth file goes through (`ReadFile`, `WriteFile`, `WriteJSON`) |
+| `internal/authseal/replace.go`, `replace_windows.go`, `replace_darwin.go`, `replace_other.go` | The atomic replace: a temporary file beside the auth file, its creation time kept (Windows, macOS), the rename tried again while another handle holds the file (Windows) |
+| `internal/authseal/migrate.go` | `SealDir`: the plaintext auth files sealed at start, the rest left as they are |
+| `internal/authseal/authseal_test.go`, `migrate_test.go`, `replace_windows_test.go`, `replace_darwin_test.go`, `replace_other_test.go` | Round trips and every refusal (another key, another name, a changed byte, malformed, no key); plaintext read with and without a key; the mode, no temporary file left, the creation time kept, the rename while a reader holds the file, writes through a link, the encoder's bytes; the migration: what it seals and what it leaves, run twice, creation times, without a key |
+| `internal/cmd/devyre_auth_seal.go` | `ReadStdinAuthFilesKey`: the key line on the shared stdin reader |
+| `internal/cmd/devyre_auth_seal_test.go` | The key line (CRLF, last line, empty, short, padded, standard base64, not base64, over-long; no error shows the line), and the password, the key and a shutdown line written at once |
+| `internal/cmd/devyre_lifeline.go` | The stdin lifeline: `SetStdinLifeline`, the shutdown line, the run context that ends with stdin, the password line (`ReadStdinPassword`, its reader shared with the key line) on the same buffered reader, and the listening line |
 | `internal/cmd/devyre_lifeline_test.go` | Line parsing (EOF, `shutdown`, CRLF, unknown and over-long lines, read errors), the password line (CRLF, last line, empty, blank, over-long, a shutdown line buffered behind it), the listening lines, and `StartService` in process: the listening line, `/keep-alive` with the local password and with a challenge, then a graceful stop on a shutdown line and on EOF; a taken port reported and `StartService` returning |
 | `internal/config/devyre_claude_code_test.go` | `claude-code.mcp-alias-secret`: its tags, both layouts, kept by saves, never invented, never in the config's JSON view |
 | `internal/config/devyre_deploy_template_test.go` | Loads the deploy template through the real config loader and checks the typed routing values; pins the `tailnet-auth` block and the keys `tailnet-trust.ps1` writes |
@@ -124,11 +135,14 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/tailnetauth/peer_other.go` | Other systems: no answer (`errors.ErrUnsupported`), so nothing is local there |
 | `internal/tailnetauth/peer_test.go` | `/proc/net/tcp` lines (IPv4, IPv6, mapped, either byte order), a real loopback connection from this process (IPv4 and IPv6), and `FromHTTP` over a real server |
 | `internal/tailnetauth/peer_windows_test.go` | A process the server may not open is not its user's |
+| `internal/watcher/devyre_auth_seal.go` | `devyreAuthFileExists`, which the remove debounce asks |
+| `internal/watcher/devyre_auth_seal_test.go` | A sealed file loaded from its plaintext and hashed by it, a changed one and one without the key not loaded; a remove right after a replace; through real file events, sealed files added, changed and removed |
 | `internal/watcher/diff/devyre_config_diff_test.go` | A reload's change to `claude-code.mcp-alias-secret` reported as created, updated or deleted, never with its value, and an unchanged one not at all |
 | `sdk/api/handlers/openai/devyre_responses_socket.go` | `devyreStartSocketReader`: the one reader of a Responses websocket client, in both modes; it hands each `response.interrupt` to `devyreInterruptResponse`, queues every other frame, and cancels the request with the read error when the client leaves |
 | `sdk/api/handlers/openai/devyre_responses_socket_test.go` | The real handler, auth manager and Codex executor against a scripted upstream websocket (the harness the interrupt tests share); a client that closes its socket mid-response closes the upstream socket, in both modes |
 | `sdk/api/handlers/openai/devyre_responses_interrupt.go` | `devyreInterruptResponse`: the interrupt through the Codex executor, or answered locally, never with an error; the connection's live credential check |
 | `sdk/api/handlers/openai/devyre_responses_interrupt_test.go` | In both modes: what Codex does on a steer (the interrupt unchanged on the upstream socket, its zero-output end passed through, the next create on the same socket, no error); interrupts before any response, after one ended and for an unknown id, answered without reaching upstream; the disabled-credential refusal |
+| `sdk/auth/devyre_filestore_seal_test.go` | The store with a key: a sign-in's file and a refresh's written sealed and listed back, an unchanged save not written, another key's file replaced by a save, nothing sealed listed without the key |
 | `sdk/cliproxy/auth/devyre_focus.go` | `devyreFocusTakesOver`: whether session affinity gives a bound session up to a usable focus |
 | `sdk/cliproxy/auth/devyre_focus_test.go` | The focus in the selector (urgency, 5h, 7d and model-scoped gates, tiers, other providers, ends, rotation, the `focus` log reason) and under session affinity (explicit sessions, the fallback key, LCP, the log line, through the manager) |
 | `sdk/cliproxy/auth/devyre_placement.go` | What `SessionAffinitySelector` tells its fallback about a pick (new placement or failover, the credential left, the active bindings), the bindings a credential failure suspended, whether a subagent joins its parent's credential, and `CarrySessionBindings` for a rebuilt selector |
@@ -158,13 +172,17 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 
 | File | Our change |
 |---|---|
-| `cmd/server/main.go` | `argvFlagConsumesValue` lists `lifeline-stdin` and `password-stdin` among the flags that take no value, and one call right after `flag.Parse` (`devyreApplyPasswordStdin`) reads the password line. The flags themselves are registered in `cmd/server/devyre_lifeline.go`. |
+| `cmd/server/main.go` | `argvFlagConsumesValue` lists `lifeline-stdin`, `password-stdin` and `auth-files-key-stdin` among the flags that take no value; right after `flag.Parse` one call reads the password line (`devyreApplyPasswordStdin`) and the next the key line (`devyreApplyAuthFilesKeyStdin`), and one right after the auth dir is resolved seals its plaintext files (`devyreSealAuthDir`). The flags themselves are registered in `cmd/server/devyre_lifeline.go` and `devyre_auth_seal.go`. |
 | `config.example.yaml` | A `devyre:` comment above `disable-control-panel` says the panel is built in, so `disable-auto-update-panel` and `panel-github-repository` have no effect, and `panel-github-repository` names the panel fork; a commented `management.tailnet-auth` block with every setting off; `routing:` documents `expiring-first`, a commented `session-affinity-persist` (whose comment also names `claude-continuity.json`), and the `expiring-first` (gate, headroom, log) and `quota-observation` blocks; `upstream.claude` documents a commented `mcp-alias-secret`. |
 | `internal/api/handlers/management/api_tools.go` | Three hunks hook the usage cache into `APICall`: a lookup after `auth_index` and `url` are parsed, complete or fail after the upstream call, and a record on success. `/v0` and `/v8` share this handler. |
-| `internal/api/handlers/management/auth_files.go` | `extractCodexIDTokenClaims` also emits `chatgpt_plan_type`, the key T3 Code reads. |
+| `internal/api/handlers/management/auth_files.go` | `extractCodexIDTokenClaims` also emits `chatgpt_plan_type`, the key T3 Code reads. `listAuthFilesFromDisk` reads through `authseal.ReadFile`, and `buildAuthFileEntryLocked` lists `account_uuid` (`devyreAddAccountUUID`). |
+| `internal/api/handlers/management/auth_files_crud.go` | `DownloadAuthFile` and `buildAuthFromFileData` read through `authseal.ReadFile`, `writeAuthFile` writes through `authseal.WriteFile`. |
+| `internal/api/handlers/management/auth_files_fields.go` | `setSourceAuthFileDisabled` reads and writes through `authseal`, `mergeExistingAuthFileMetadata` and `saveTokenRecord` read through `authseal.ReadFile`. |
 | `internal/api/handlers/management/auth_files_provider_oauth.go` | `RequestAnthropicToken` and `RequestCodexToken` read `redirect_port` first (`devyreOAuthRedirect`), and build the authorize URL and exchange the code through `devyreClaudeAuthURL`/`devyreClaudeExchange` and `devyreCodexAuthURL`/`devyreCodexExchange`, which fall back to upstream's calls without it. |
 | `internal/auth/claude/anthropic_auth.go` | `GenerateAuthURL` and `ExchangeCodeForTokens` became wrappers passing `RedirectURI` to unexported `generateAuthURL` and `exchangeCodeForTokens`, which take the redirect as a parameter. |
 | `internal/auth/codex/openai_auth.go` | `GenerateAuthURL` became a wrapper passing `RedirectURI` to an unexported `generateAuthURL`. |
+| `internal/auth/claude/token.go`, `internal/auth/codex/token.go`, `internal/auth/kimi/token.go`, `internal/auth/xai/token.go`, `internal/auth/vertex/vertex_credentials.go` | `SaveTokenToFile` writes through `authseal.WriteJSON` (the bytes its encoder wrote, sealed with a key, replaced atomically) in place of `os.Create` and the encoder. |
+| `internal/auth/meta/meta.go` | `SaveTokenToFile` reads the old file through `authseal.ReadFile` and writes through `authseal.WriteFile` in place of its own temporary file and rename. |
 | `internal/api/handlers/management/config_basic.go` | `normalizeRoutingStrategy` accepts `expiring-first`, so `PUT /routing/strategy` does too. |
 | `internal/api/handlers/management/handler.go` | Two hunks: `Middleware()` asks `devyreTailnetAuthorize` first and skips the key for a trusted request, and the missing-key branch of `AuthenticateManagementKey` no longer calls `fail()`, so only a wrong key counts toward the ban (RESP's commands before `AUTH`, which ask with an empty key only to learn whether the IP is banned, included). |
 | `internal/api/server.go` | Starts the quota observer once, right after the management handler is created, and the line after it loads the focus (`devyreLoadRoutingFocus`). One line adds `devyreTailnetContext` to the engine, so the proxy API's keyless check reads the live config. One `if`, after the keep-alive setup, registers the lifeline's `/keep-alive` (`devyreEnableKeepAliveProbe`), and the line after it keeps the listen report. The `devyre` field (`devyreServerState`) holds the fork's own server settings. `Start` calls `devyreReportListen` twice: when `net.Listen` fails, and right before the first connection is accepted. |
@@ -179,6 +197,8 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/config/config_yaml.go` | `isKnownDefaultValue` keeps explicit zero values of the pointer-backed routing settings (`devyreKeepsExplicitZero`), so a save does not drop them. |
 | `internal/config/sdk_config.go` | `ClaudeCodeConfig.MCPAliasSecret` (`claude-code.mcp-alias-secret`, `upstream.claude.mcp-alias-secret` in the v8 layout), kept out of the JSON view with `json:"-"`. |
 | `internal/managementasset/updater.go` | `defaultManagementReleaseURL` and `defaultManagementFallbackURL` point at the panel fork's releases; never restore `cpamc.router-for.me`. `StartAutoUpdater` returns through `devyreSkipAutoUpdater` (which logs the panel served) and `EnsureLatestManagementHTML` through `devyreRefuseDownload`, so no updater starts and nothing is downloaded, whoever calls them. |
+| `internal/pluginhost/auth_callbacks.go` | The auth-file listing, `authPhysicalJSONByIndex` and `buildAuthFromFileData` read through `authseal.ReadFile`, `saveAuthFile` writes through `authseal.WriteFile`. |
+| `internal/pluginhost/auth_provider.go` | `pluginTokenStorageFileCurrent` reads through `authseal.ReadFile`, and `atomicWriteFile` writes through `authseal.WriteFile`. |
 | `internal/runtime/executor/claude_executor_execute.go` | Passes `e.cfg` to `resolveClaudeMCPAliasOptions`. |
 | `internal/runtime/executor/claude_executor_request.go` | `resolveClaudeMCPAliasOptions` takes the config and returns its `devyreClaudeMCPAliasSecret` first, when one is set. |
 | `internal/runtime/executor/claude_executor_stream.go` | Passes `e.cfg` to `resolveClaudeMCPAliasOptions`. |
@@ -188,9 +208,14 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/runtime/executor/codex_websockets_duplex.go` | A `response.interrupt` case next to `response.steer` in the writer's switch hands the frame to `devyreDuplexInterrupt` instead of the `default:` rejection. |
 | `internal/runtime/executor/codex_websockets_session.go` | The `devyre` field (`devyreCodexResponses`) on `codexWebsocketSession`, and one line in `readUpstreamLoop` that calls `devyreObserveUpstream` for every text frame before any request reads it. |
 | `internal/runtime/executor/codex_websockets_stream.go` | The per-response read loop's empty `response.incomplete` check skips the end of a response this router interrupted (`devyreInterruptedEnd`). |
+| `internal/watcher/clients.go` | `reloadClients`, `addOrUpdateClientLocked` and `loadFileClients` read through `authseal.ReadFile`, so the hash is the plaintext's. |
+| `internal/watcher/events.go` | `authFileUnchanged` reads through `authseal.ReadFile`, and `handleEvent` debounces a remove only while the file is there (`devyreAuthFileExists`). |
+| `internal/watcher/synthesizer/file.go` | `Synthesize` reads through `authseal.ReadFile`. |
 | `internal/watcher/diff/config_diff.go` | `BuildConfigChangeDetails` reports `claude-code.mcp-alias-secret` created, updated or deleted, never its value. |
 | `sdk/api/handlers/openai/openai_responses_websocket.go` | Three hunks in `ResponsesWebsocket`: it starts `devyreStartSocketReader` in both modes (with steering on, the duplex input is that reader's channel, and upstream's `readResponsesWebsocketInput` is left unused); the loop reads every frame from that channel, taking the context's cancel cause as the read error; and a forward that ended because the reader cancelled the request logs at info, not as a failure. |
 | `sdk/api/handlers/openai/openai_responses_websocket_forward.go` | `forwardResponsesWebsocket` ends a response on `response.incomplete` as on `response.completed`, so an interrupted response no longer closes the client socket. |
+| `sdk/auth/filestore.go` | `Save` reads and writes a metadata-only auth through `authseal` (a sealed file it cannot open is replaced like a missing one), and `readAuthFiles` reads through `authseal.ReadFile`. |
+| `sdk/auth/manager.go` | `Login` reads the existing file through `authseal.ReadFile`. |
 | `sdk/cliproxy/auth/conductor.go` | The `devyre` field (`devyreManagerState`) on `Manager`. |
 | `sdk/cliproxy/auth/conductor_cooldown.go` | `MarkResult` hands each result to `devyreSoftTransient` right after the result policy; when that keeps a transient failure soft, it has recorded the failure and `MarkResult` returns. |
 | `sdk/cliproxy/auth/conductor_execution.go` | `executeMixedOnce` and `executeCountMixedOnce` hand a failed attempt to `devyreRetryTransient` right after the 401 refresh, and return when the request ended during its wait. |
@@ -421,9 +446,25 @@ Upstream stops a server started with `-password` 10 seconds after the last authe
 
 **`-password-stdin`** reads the local password from the first line of stdin instead of `-password`, whose value other local users can read from the process list on Linux (`/proc/<pid>/cmdline`) and macOS. The line ending (LF or CRLF) is not part of it; an empty, blank or over-long (4 KB) line, or stdin ending first, stops the server with exit code 1, and so does `-password` given too. With `-lifeline-stdin` the rest of stdin is the lifeline, read from the same buffer, so a supervisor may write the password and later lines at once.
 
-A supervisor can tell whether a build has all of this from its help output: `-h` lists `-lifeline-stdin` and `-password-stdin`. They came together: a build that lists `-password-stdin` also prints the listening line and answers challenges.
+A supervisor can tell whether a build has all of this from its help output: `-h` lists `-lifeline-stdin` and `-password-stdin`. They came together: a build that lists `-password-stdin` also prints the listening line and answers challenges. A build that also lists `-auth-files-key-stdin` takes the auth files' key on the line after the password ([Sealed auth files](#sealed-auth-files)).
 
 The flags are off by default and change nothing else. The Docker deployment does not use them.
+
+## Sealed auth files
+
+`-auth-files-key-stdin` keeps the credentials in `auth-dir`, the `*.json` token files, encrypted at rest with a key a supervising process hands over on stdin. The Anvil app uses it, with a key derived from its data folder's key, which the OS keystore protects while its cloud is set up. Without the flag nothing changes but the atomic writes below.
+
+- **The key** is the line after the password line under `-password-stdin`, or the first line without it: 32 bytes in base64url without padding. It is never on the command line or in the environment, and lives in memory only. A missing, empty or malformed line stops the server with exit code 1, and the error never shows the line.
+- **The format.** A sealed file is one line, `cpa-sealed-auth.v1.<nonce>.<ciphertext>`, both base64url: AES-256-GCM with a fresh 96-bit nonce at every write, over the file's JSON. The associated data is `cpa-sealed-auth.v1`, a newline and the file's base name in Unicode NFC and lower case (the forms Windows and macOS give one file), so a sealed file opens only under its own name: moved or copied to another one, it is refused like a changed file. It is never valid JSON, so code that reads it as JSON fails instead of taking it for a credential. The names stay `*.json`: they are the credentials' IDs.
+- **Writes.** Every write of an auth file goes through `internal/authseal`: each provider's token storage, the store's metadata saves (refreshes, status changes), uploads, field changes, and plugin saves. The content goes to a temporary file beside the auth file (`.<name>.<random>.tmp`, owner-only, synced), which is renamed over it, so a kill mid-write leaves the old file or the new one, never part of a credential. That holds with or without a key; without one the file is the plaintext JSON as before. The replaced file keeps its creation time on Windows (`SetFileTime`) and macOS (`setattrlist`); Linux lets no program set it, so there a rewritten file's creation is its last write. On Windows a rename over a file that another handle holds open without sharing its deletion (Go's `os.Open`, which the watcher reads with) is refused, so the write tries again for about 1.7 s.
+- **Reads.** Every read of an auth file opens a sealed one with the key and takes a plaintext one as it is: the store, the watcher and its synthesizer, the management routes, the plugin host and the CLI logins. The watcher hashes the plaintext, so a sealed rewrite of the same JSON, with another nonce, is no change. A sealed file that does not open (no key, another key, changed, renamed) is logged by name and not loaded, and the server never rewrites or removes it on its own; a sign-in or an upload of that account replaces it.
+- **At start**, before anything loads them, every plaintext `*.json` file in `auth-dir` and its subfolders is sealed in place, atomically and keeping its creation time, so adding the key loses no sign-in. A file that is not JSON, a link, and a sealed file this key cannot open are left as they are, each logged by name. A plaintext file placed there while the server runs is read as it is, and sealed at its next write or the next start.
+- **The management API** answers as before: an upload takes JSON and stores it sealed, a download answers the JSON, and the listing reports `account_uuid` too (a Claude account's), which a supervisor used to read from the file itself.
+- **Only with the file token store.** The git, object and Postgres stores (`GITSTORE_*`, `OBJECTSTORE_*`, `PGSTORE_*`) mirror the files elsewhere as they are, so with one of them the key stops the server at start.
+- **Without the key** (the default, the Docker deployment) the server reads and writes plaintext as upstream does. It does not load a sealed file it finds, logs it, and leaves it alone. It keeps working rather than refusing to start: a deployment without a supervisor has no key to hand over, and plaintext is all it can keep; a supervisor that holds a key always passes it, and the Anvil app refuses a build whose help does not list the flag.
+- **The watcher.** On Windows a rename over a file raises a remove event for it, then a create. Upstream's watcher ignores a second remove of a file within a second, which swallowed a real removal right after a write; a remove is now debounced only while the file is still there.
+
+What it protects: a copy of `auth-dir` (a backup, a sync tool, a bug report) or a program that reads files reveals no token without the key. What it does not: anything that can read the key where the supervisor keeps it, or this process's memory, can open the files, as it can use them.
 
 ## OAuth redirect port
 
@@ -474,7 +515,7 @@ The server answers `/management.html` from a copy of the panel built into the bi
 ## Sync with upstream
 
 1. Run `devyre\scripts\sync-upstream.ps1`. It requires a clean tree, fast-forwards `main` from `origin`, creates `sync/upstream-YYYYMMDD` and merges `upstream/main`. It then runs the checks: `gofmt -l`, `go build ./cmd/server` and `go build -tags devyre_nopanel ./cmd/server`, `go test ./...`, and `go test -tags devyre_nopanel ./internal/managementasset/ ./internal/api/ -run DevyrePanel`. It never pushes.
-2. If the merge conflicts, resolve the conflicts at the hotspots above, keeping upstream's behavior plus our hunks. Commit the merge, then run the checks by hand. `go test ./internal/api/ -run T3Hub` must stay green.
+2. If the merge conflicts, resolve the conflicts at the hotspots above, keeping upstream's behavior plus our hunks. Commit the merge, then run the checks by hand. `go test ./internal/api/ -run T3Hub` must stay green. Code the merge adds that reads or writes an auth file must go through `authseal.ReadFile` and `authseal.WriteFile` ([Sealed auth files](#sealed-auth-files)): look for new `os.ReadFile`, `os.WriteFile`, `os.Create` and `SaveTokenToFile` on auth paths in the diff.
 3. Push the branch and open the PR against the fork, never against upstream:
    `gh pr create --repo patchforgeai/CLIProxyAPI --base main --head sync/upstream-YYYYMMDD`.
 4. Merge the PR, tag `v<upstream version>-devyre.<n>`, and run `up.ps1`.
@@ -497,15 +538,18 @@ Run `devyre\scripts\backup.ps1 -Destination <folder>`. It writes `config.yaml`, 
 
 ```powershell
 go test ./internal/api/ -run 'T3Hub|QuotaReadings|RoutingFocus|TailnetAuth|DevyreKeylessProxy|DevyreKeepAlive|DevyrePanel|LifelineProof|DevyreListenReport|OnlyWrongPasswordsCountTowardTheBan'
-go test ./internal/cmd/ -run 'Lifeline|PasswordLine|ReportListen|TakenPort'
-go test ./cmd/server/ -run 'LifelineStdin|PasswordStdin'
+go test ./internal/cmd/ -run 'Lifeline|PasswordLine|ReportListen|TakenPort|KeyLine'
+go test ./cmd/server/ -run 'LifelineStdin|PasswordStdin|AuthFilesKeyStdin|DevyreSealAuthDir'
+go test ./internal/authseal/
+go test ./internal/watcher/ -run Devyre
+go test ./sdk/auth/ -run Devyre
 go test ./internal/managementasset/ -run DevyrePanel
 go test -tags devyre_nopanel ./internal/managementasset/ ./internal/api/ -run DevyrePanel
 go test ./internal/config/ -run 'DevyreDeployTemplate|ExpiringFirst|TailnetAuth|DevyreSession'
 go test ./internal/quotareading/
 go test ./internal/routingfocus/
 go test ./internal/tailnetauth/
-go test ./internal/api/handlers/management/ -run 'UsageCache|QuotaObserver|RoutingQuota|RoutingFocus|ForgetRemovedFocus|ExpiringFirst|RoutingStrategy|TailnetAuth|GetAuthSession|AuthenticateManagementKey|DevyreRedirect'
+go test ./internal/api/handlers/management/ -run 'UsageCache|QuotaObserver|RoutingQuota|RoutingFocus|ForgetRemovedFocus|ExpiringFirst|RoutingStrategy|TailnetAuth|GetAuthSession|AuthenticateManagementKey|DevyreRedirect|DevyreAuthFileRoutes'
 go test ./internal/auth/claude/ ./internal/auth/codex/ -run Devyre
 go test ./sdk/cliproxy/auth/ -run 'ExpiringFirst|Focus|DevyreSession|DevyreTransient'
 go test ./sdk/cliproxy/ -run 'ExpiringFirst|DevyreSession'

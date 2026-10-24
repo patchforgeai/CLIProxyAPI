@@ -77,21 +77,27 @@ func ReadStdinPassword() (string, error) {
 // readPasswordLine reads one line, without its line ending. A last line without a newline
 // counts; an empty or over-long one does not.
 func readPasswordLine(reader *bufio.Reader) (string, error) {
+	return readSecretLine(reader, "password")
+}
+
+// readSecretLine reads the line of stdin that holds what (a password, a key), without its line
+// ending; its errors name what, never the line.
+func readSecretLine(reader *bufio.Reader, what string) (string, error) {
 	line, errRead := reader.ReadSlice('\n')
 	if errors.Is(errRead, bufio.ErrBufferFull) {
-		return "", fmt.Errorf("the password line on stdin is longer than %d bytes", reader.Size())
+		return "", fmt.Errorf("the %s line on stdin is longer than %d bytes", what, reader.Size())
 	}
 	if errRead != nil && !errors.Is(errRead, io.EOF) {
-		return "", fmt.Errorf("reading the password from stdin: %w", errRead)
+		return "", fmt.Errorf("reading the %s from stdin: %w", what, errRead)
 	}
-	password := strings.TrimRight(string(line), "\r\n")
-	if strings.TrimSpace(password) == "" {
+	value := strings.TrimRight(string(line), "\r\n")
+	if strings.TrimSpace(value) == "" {
 		if errors.Is(errRead, io.EOF) {
-			return "", errors.New("stdin ended before the password line")
+			return "", fmt.Errorf("stdin ended before the %s line", what)
 		}
-		return "", errors.New("the password line on stdin is empty")
+		return "", fmt.Errorf("the %s line on stdin is empty", what)
 	}
-	return password, nil
+	return value, nil
 }
 
 // devyreWithLifeline returns a context that ends when the lifeline does, has the server report

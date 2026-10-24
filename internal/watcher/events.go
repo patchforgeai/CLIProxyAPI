@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authseal"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -94,7 +95,10 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	w.observeAuthFile(event.Name)
 
 	if event.Op&(fsnotify.Remove|fsnotify.Rename) != 0 {
-		if w.shouldDebounceRemove(normalizedName, now) {
+		// devyre: every auth file is now replaced atomically, which on Windows raises a remove of
+		// its own; a remove right after it is debounced only while the file is there, so one that
+		// really removed it is still processed (internal/authseal).
+		if w.shouldDebounceRemove(normalizedName, now) && devyreAuthFileExists(event.Name) {
 			log.Debugf("debouncing remove event for %s", filepath.Base(event.Name))
 			return
 		}
@@ -166,7 +170,8 @@ func (w *Watcher) observeAuthFile(path string) {
 }
 
 func (w *Watcher) authFileUnchanged(path string) (bool, error) {
-	data, errRead := os.ReadFile(path)
+	// devyre: the plaintext's hash, so a sealed rewrite with a fresh nonce is no change (internal/authseal).
+	data, errRead := authseal.ReadFile(path)
 	if errRead != nil {
 		return false, errRead
 	}

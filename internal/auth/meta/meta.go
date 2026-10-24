@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authseal"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -177,7 +178,7 @@ func (ts *MetaTokenStorage) SaveTokenToFile(authFilePath string) error {
 	// Only login callers without a metadata snapshot inherit settings from disk.
 	metadata := ts.Metadata
 	if metadata == nil {
-		if raw, errRead := os.ReadFile(authFilePath); errRead == nil {
+		if raw, errRead := authseal.ReadFile(authFilePath); errRead == nil { // devyre: opens a sealed file
 			_ = json.Unmarshal(raw, &metadata)
 		}
 	}
@@ -195,20 +196,9 @@ func (ts *MetaTokenStorage) SaveTokenToFile(authFilePath string) error {
 	if err != nil {
 		return fmt.Errorf("meta token storage: encode token file: %w", err)
 	}
-	file, err := os.CreateTemp(filepath.Dir(authFilePath), ".meta-token-*")
-	if err != nil {
-		return fmt.Errorf("meta token storage: create token file: %w", err)
-	}
-	defer func() { _ = os.Remove(file.Name()) }()
-	if _, errWrite := file.Write(append(raw, '\n')); errWrite != nil {
-		_ = file.Close()
-		return fmt.Errorf("meta token storage: write token file: %w", errWrite)
-	}
-	if errClose := file.Close(); errClose != nil {
-		return fmt.Errorf("meta token storage: close token file: %w", errClose)
-	}
-	if errRename := os.Rename(file.Name(), authFilePath); errRename != nil {
-		return fmt.Errorf("meta token storage: replace token file: %w", errRename)
+	// devyre: sealed with -auth-files-key-stdin, replaced atomically as before (internal/authseal).
+	if errWrite := authseal.WriteFile(authFilePath, append(raw, '\n')); errWrite != nil {
+		return fmt.Errorf("meta token storage: replace token file: %w", errWrite)
 	}
 
 	return nil

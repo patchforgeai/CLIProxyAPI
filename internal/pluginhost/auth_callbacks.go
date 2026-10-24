@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authseal"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
 )
@@ -178,7 +179,7 @@ func (h *Host) listAuthFilesFromDisk() ([]pluginapi.HostAuthFileEntry, error) {
 			fileEntry.Size = info.Size()
 			fileEntry.ModTime = info.ModTime()
 		}
-		if data, errRead := os.ReadFile(full); errRead == nil {
+		if data, errRead := authseal.ReadFile(full); errRead == nil { // devyre: opens a sealed auth file
 			var metadata map[string]any
 			if errUnmarshal := json.Unmarshal(data, &metadata); errUnmarshal == nil {
 				if provider, ok := metadata["type"].(string); ok {
@@ -251,7 +252,7 @@ func (h *Host) authPhysicalJSONByIndex(authIndex string) (*coreauth.Auth, []byte
 	if path == "" {
 		return nil, nil, fmt.Errorf("auth file path not found for auth_index %s", authIndex)
 	}
-	data, errRead := os.ReadFile(path)
+	data, errRead := authseal.ReadFile(path) // devyre: a plugin gets a sealed auth file's JSON
 	if errRead != nil {
 		if os.IsNotExist(errRead) {
 			return nil, nil, fmt.Errorf("auth file not found for auth_index %s", authIndex)
@@ -302,7 +303,7 @@ func (h *Host) saveAuthFile(ctx context.Context, name string, data []byte) (stri
 	if errBuild != nil {
 		return "", errBuild
 	}
-	if errWrite := os.WriteFile(dst, data, 0o600); errWrite != nil {
+	if errWrite := authseal.WriteFile(dst, data); errWrite != nil { // devyre: sealed with -auth-files-key-stdin
 		return "", fmt.Errorf("failed to write auth file: %w", errWrite)
 	}
 	if errUpsert := h.upsertAuthRecord(ctx, auth); errUpsert != nil {
@@ -317,7 +318,7 @@ func (h *Host) buildAuthFromFileData(path string, data []byte) (*coreauth.Auth, 
 	}
 	if data == nil {
 		var errRead error
-		data, errRead = os.ReadFile(path)
+		data, errRead = authseal.ReadFile(path) // devyre: opens a sealed auth file
 		if errRead != nil {
 			return nil, fmt.Errorf("failed to read auth file: %w", errRead)
 		}

@@ -912,6 +912,25 @@ The server fork moved the same day, to https://github.com/patchforgeai/CLIProxyA
 | C9 | Out of scope: holding requests for a cooldown, moving bound sessions ahead of time, persisting the LCP matcher | Measured cooldowns ran from 14 minutes to 127 hours; a move ahead of time costs the same rewrite; Claude Code always sends explicit session ids |
 | C10 | A request whose session already had its binding (its own, or the parent binding a fork reads) retries that credential on a transient failure before any byte reached the client: HTTP 500, 502, 503, 504, 529, or a transport failure. At most two retries, after 0.5 s and 1 s, recorded without a cooldown and without releasing the binding; then the walk moves on as before. Credential failures, a credential that became unusable, output already sent, and requests without such a binding keep failing over at once | Two 502 pages from Anthropic's edge and one closed idle connection each moved a session in the sample (request ids 6bb69361, 47fbb2c4, 83d8f4fd): those are not the credential's fault, so another account does not help, and the move rewrote the whole context. A new session has no cache to keep, and upstream expects it to move at once |
 
+## 20. Addendum: Sealed auth files (2026-10-23)
+
+**Request:** the desktop app that runs this fork as a sidecar keeps its users' Claude and ChatGPT sign-ins (access, refresh and ID tokens) in `auth-dir` as plaintext JSON, which any process of the user can read, the commands an agent runs included. The app already seals its own secrets with its data folder's key, which the OS keystore wraps while its cloud is set up; the sign-ins should have the same protection. User-facing documentation: `devyre/README.md`, "Sealed auth files".
+
+### Decisions (do not relitigate)
+
+| # | Decision | Why |
+|---|---|---|
+| S1 | `-auth-files-key-stdin` reads a 32-byte key (base64url) from the line after the password line, or the first line without `-password-stdin` | The key must stay off the command line and out of the environment, as the password does (L1); the supervisor derives it from its own key for this alone, so the router never holds that key |
+| S2 | AES-256-GCM with a fresh 96-bit nonce per write; the associated data is a version line and the file's base name in NFC and lower case; the file is one non-JSON line with a version prefix | A sealed file opens only under its own name, a changed byte fails it, and anything that reads it as JSON fails instead of taking it for a credential. Lower case and NFC are the forms Windows (lower-cased IDs) and macOS (decomposed names) give one file |
+| S3 | The names stay `*.json` | They are the credentials' IDs, which the app turns into its account ids; renaming them would make every account new |
+| S4 | Every read and write of an auth file goes through `internal/authseal`; a write is a temporary file renamed over the auth file, with or without a key | One place decides the format, so no path writes plaintext by mistake. An in-place truncate and write, killed midway, left half a credential, which sealed would not open at all |
+| S5 | A replaced file keeps its creation time on Windows and macOS; on Windows a rename that another handle blocks is tried again for about 1.7 s | NTFS gives a renamed file its own creation time (measured), and the app orders accounts first seen together by it. Go's `os.Open` shares no deletion, so the watcher's read of a file it just saw change blocks the next rename |
+| S6 | At start, before anything loads them, the plaintext files are sealed in place; a sealed file the key cannot open is never rewritten or removed by the server | Users keep their sign-ins without doing anything; a file sealed with another key may be recoverable with it |
+| S7 | Without the key the server keeps upstream's plaintext and skips sealed files, rather than refusing to start | The Docker deployment and other users of the binary have no supervisor to hand a key over; the app, which always has one, refuses a build without the flag instead |
+| S8 | The key works with the file token store only; a git, object or Postgres store with a key stops the server | Those stores mirror the files elsewhere as they are, which would mix sealed and plaintext copies |
+| S9 | The watcher debounces a remove of a file within a second of another only while the file is there | Every write is now a rename, which on Windows raises a remove of its own, and the debounce then swallowed a real removal right after a write |
+| S10 | The credentials listing reports `account_uuid` | The app read a Claude account's uuid from its token file; once the file is sealed only the router can read it |
+
 ---
 
 ## Appendix A — `devyre/deploy/config.template.yaml`
