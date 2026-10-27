@@ -1013,6 +1013,12 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		auth.Generation++
 		auth.UpdatedAt = now
 
+		// devyre: a model's failed request must not inherit the subscription
+		// rejection headers of an older request. The account's passive snapshot
+		// still feeds its meters; model evidence is used for usage recovery.
+		if result.Provider == "claude" && statusCodeFromResult(result.Error) == http.StatusTooManyRequests && modelState != nil {
+			modelState.Quota.ClearObservationSignals()
+		}
 		if !result.SkipQuotaObservation {
 			auth.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
 			if modelState != nil {

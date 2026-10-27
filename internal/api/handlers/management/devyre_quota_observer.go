@@ -276,7 +276,12 @@ func (h *Handler) pollUsage(ctx context.Context, cache *usageCache, poll quotaPo
 	}
 	provider := strings.ToLower(strings.TrimSpace(auth.Provider))
 	logEntry := log.WithFields(log.Fields{"provider": provider, "auth_index": auth.Index})
+	h.mu.Lock()
+	manager := h.authManager
+	h.mu.Unlock()
 	call := cache.begin(ctx, usageRequest{
+		manager:   manager,
+		observed:  auth,
 		key:       usageCacheKey(auth.Index, poll.url),
 		authIndex: auth.Index,
 		target:    poll.target,

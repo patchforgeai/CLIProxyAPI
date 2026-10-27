@@ -300,6 +300,24 @@ The endpoints need the management key (or passwordless trust) and exist only on 
 - The Claude usage URL with a query string, such as the panel's reset-grant check `?cedar_ember=1&skip_spend=1`, is cached under its full URL for 5 minutes, for up to 4 distinct query strings per credential. Further query strings are not cached: each request for one goes upstream (`miss`). Either way the call counts toward the poller's 10-minute Claude gap and shares the credential's 429 backoff, because Anthropic limits the endpoint per account whatever the query.
 - A successful `POST`, `PUT`, `PATCH` or `DELETE` through `api-call` for a credential, such as a redeemed reset, makes that credential's cached responses stale, so the next read shows the new state. A Claude backoff still holds.
 
+### Claude subscription recovery
+
+A fresh, complete Claude usage response can lift a subscription-window cooldown before
+its old reset time, for example after a plan is restored. Previously the usage cache updated
+the meters while the conductor kept rejecting requests until that old deadline.
+`ReconcileClaudeUsage` (`sdk/cliproxy/auth/devyre_usage_recovery.go`) reconciles both model
+and credential availability, the scheduler, the registry and persisted cooldowns. Both shared
+windows must have room, and every rejected window must now be reported as available. The
+credential's generation and registration must still match the snapshot taken before the
+usage call; a rejection or replacement during that call wins even on the same clock tick.
+
+Only actual fresh usage responses qualify, from management refresh or the idle poller.
+Cache hits, stale fallbacks, profile reads and partial query variants cannot lift a limit.
+Ordinary rate limits, billing, authentication and unrelated model errors are preserved.
+A model's new 429 drops its previous response's passive signals before observing its own:
+older subscription headers must not make a later per-minute limit look recoverable.
+The credential's passive signals continue to feed the usage meters.
+
 ## How to run
 
 This runs on this PC with Docker Desktop, and Tailscale fronts it. Prerequisites:

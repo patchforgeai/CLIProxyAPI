@@ -256,6 +256,8 @@ func (c *usageCache) backoffLocked(req usageRequest, now time.Time) (*apiCallRes
 
 // usageRequest is one allowlisted usage GET.
 type usageRequest struct {
+	manager   *coreauth.Manager
+	observed  *coreauth.Auth
 	key       string
 	authIndex string
 	target    usageTarget
@@ -485,7 +487,7 @@ func (call *usageCacheCall) complete(resp apiCallResponse) apiCallResponse {
 		case call.invalidates && success:
 			c.invalidate(call.req.authIndex, now)
 		case call.observeOnly && success && !c.startedBeforeInvalidation(call):
-			c.recordReadings(call.req, resp.Body, now)
+			c.recordReadings(call.req, resp.Body, now, call.started)
 		}
 		return resp
 	}
@@ -530,7 +532,7 @@ func (call *usageCacheCall) complete(resp apiCallResponse) apiCallResponse {
 	call.finishLocked(entry, &out)
 	c.mu.Unlock()
 	if success && !straddled {
-		c.recordReadings(call.req, resp.Body, now)
+		c.recordReadings(call.req, resp.Body, now, call.started)
 	}
 	return out
 }
@@ -635,7 +637,7 @@ func (c *usageCache) startedBeforeInvalidation(call *usageCacheCall) bool {
 // replaces the credential's stored windows and a window it no longer reports
 // is dropped; a query variant's body is only merged. Profile bodies carry no
 // windows. Parse errors never include the body.
-func (c *usageCache) recordReadings(req usageRequest, body string, now time.Time) {
+func (c *usageCache) recordReadings(req usageRequest, body string, now, started time.Time) {
 	windows, ok, errParse := quotareading.UsageSnapshot(req.provider, req.target.canonicalURL, []byte(body), now)
 	if errParse != nil {
 		log.WithError(errParse).WithField("provider", req.provider).Debug("usage cache: usage body not recorded")
@@ -654,6 +656,9 @@ func (c *usageCache) recordReadings(req usageRequest, body string, now time.Time
 		return
 	}
 	c.store().Replace(req.authID, req.provider, windows, now)
+	if req.target.endpoint == usageEndpointClaudeUsage && req.manager != nil {
+		req.manager.ReconcileClaudeUsage(req.observed, windows, started)
+	}
 }
 
 // clone returns a deep copy so cached responses never share header slices.
@@ -747,6 +752,10 @@ func (h *Handler) beginUsageCall(c *gin.Context, method, rawURL string, auth *co
 		return nil
 	}
 	req.authID, req.provider = auth.ID, auth.Provider
+	req.observed = auth
+	h.mu.Lock()
+	req.manager = h.authManager
+	h.mu.Unlock()
 	req.refresh = strings.EqualFold(strings.TrimSpace(c.GetHeader(usageCacheHeader)), usageCacheRefreshValue)
 	req.source = quotareading.SourceUsage
 	return cache.begin(c.Request.Context(), req, h.devyreRoutingConfig().QuotaObservation.UsageCache)
