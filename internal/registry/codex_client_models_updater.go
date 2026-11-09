@@ -28,39 +28,30 @@ func StartCodexClientModelsUpdater(ctx context.Context) {
 	})
 }
 
+// devyre: a failed fetch is tried again after a backoff (devyreRefreshLoop).
 func runCodexClientModelsUpdater(ctx context.Context) {
-	tryRefreshCodexClientModels(ctx, "startup Codex client model refresh")
-
-	ticker := time.NewTicker(modelsRefreshInterval)
-	defer ticker.Stop()
-	log.Infof("periodic Codex client model refresh started (interval=%s)", modelsRefreshInterval)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			tryRefreshCodexClientModels(ctx, "periodic Codex client model refresh")
-		}
-	}
+	devyreRefreshLoop(ctx, modelsRefreshInterval, "startup Codex client model refresh", "periodic Codex client model refresh", "Codex client model", tryRefreshCodexClientModels, time.After)
 }
 
-func tryRefreshCodexClientModels(ctx context.Context, label string) {
+// tryRefreshCodexClientModels reports whether the remote catalog was fetched and taken.
+func tryRefreshCodexClientModels(ctx context.Context, label string) bool {
 	data, sourceURL := fetchCodexClientModelsFromRemote(ctx)
 	if data == nil {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
-		return
+		return false
 	}
 
 	changed, err := loadCodexClientModelsFromBytes(data, sourceURL)
 	if err != nil {
 		log.Warnf("%s: fetched catalog rejected, keeping current data: %v", label, err)
-		return
+		return false
 	}
 	if !changed {
 		log.Infof("%s completed from %s, no changes detected", label, sourceURL)
-		return
+		return true
 	}
 	log.Infof("%s completed from %s, catalog updated", label, sourceURL)
+	return true
 }
 
 func fetchCodexClientModelsFromRemote(ctx context.Context) ([]byte, string) {

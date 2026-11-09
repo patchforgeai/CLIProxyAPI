@@ -123,6 +123,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/quotareading/reading.go` | Readings model: `Window`, `Kind`, `Reading` |
 | `internal/quotareading/store.go` | Readings store: `Put`, `Replace`, `Effective` |
 | `internal/quotareading/store_test.go` | Store tests |
+| `internal/registry/devyre_catalog_retry.go` | `devyreRefreshLoop`: the remote model catalogs' download at start and then every interval, a failed one tried again after a minute, doubling up to the interval (`devyreCatalogRetry`) |
+| `internal/registry/devyre_catalog_retry_test.go` | The backoff's waits; the loop with a timer the test fires: a failed start retried in a minute, doubled, the interval after a success, the backoff starting over, the loop ending with its context |
 | `internal/registry/devyre_codex_client_model.go` | `ValidateCodexClientModel`: one Codex client catalog entry checked as the catalog checks each of its entries |
 | `internal/routingfocus/store.go` | The focus store: one focus per provider, `Set`, `ClearProvider`, `ClearAuth`, `Retain`, `Focused`, `List`, the lock-free `Empty`, and the atomically written `routing-focus.devyre` file |
 | `internal/routingfocus/store_test.go` | Replacing per provider, clearing, retaining, ends inert and pruned, the file's exact contents and mode, invalid files, memory only, failed writes, concurrent use |
@@ -207,6 +209,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/api/server_routes.go` | `AttachWebsocketRoute` uses `devyreKeyOnlyAuthMiddleware`, so `/v1/ws` is never keyless. |
 | `internal/cmd/run.go` | With the stdin lifeline on, `StartServiceWithPluginHost` runs until the lifeline ends (`devyreWithLifeline`) instead of applying the 10-second keep-alive idle limit. |
 | `internal/client/codex/models/models.go` | `loadCodexClientModelTemplates` returns its templates through `devyreWithAccountTemplates`. |
+| `internal/registry/model_updater.go`, `codex_client_models_updater.go`, `devin_models_updater.go` | Each `run…Updater` is one `devyreRefreshLoop` call in place of the start refresh and the ticker loop (upstream's `periodicRefresh`, `tryPeriodicRefresh` and `tryStartupRefresh` went with it), and each `tryRefresh…` returns whether the catalog was fetched and taken. |
 | `internal/config/config_defaults.go` | `DefaultPanelGitHubRepository` points at the panel fork; nothing fetches from it. |
 | `internal/config/config_types.go` | The `Strategy` comment, the `SessionAffinityPersist` (`routing.session-affinity-persist`), `ExpiringFirst` and `QuotaObservation` fields on `RoutingConfig`, and `RemoteManagement.TailnetAuth` (`management.tailnet-auth`). |
 | `internal/config/config_yaml.go` | `isKnownDefaultValue` keeps explicit zero values of the pointer-backed routing settings (`devyreKeepsExplicitZero`), so a save does not drop them. |
@@ -551,6 +554,8 @@ Now:
 - **When it asks.** Once at start; before a Codex client's model list, waiting for credentials that have no answer for that client's version yet (at most 10 s) and refreshing answers older than 15 minutes behind the list; and when a request names a model no credential serves, waiting for a running lookup or starting one unless one ended within the last minute, then looking the model up again. One lookup runs at a time and every caller shares it. A credential whose lookup fails keeps its last answer and is not waited for again within the minute; only the failure's status is logged, never the body.
 - **A model nobody serves is answered.** The router's own `unknown provider for model` answer is decided before any credential is asked, so no reconnect or rotation can change it. It is now a type of its own (`UnroutableModelError`), and the websocket sends it as an `error` event with status 400 and closes, as it does for other request faults. A `model_not_found` from an upstream credential still stays silent, as upstream decided.
 
+- **A failed catalog download is tried again soon.** Upstream downloads each remote catalog once at start, then every three hours whether or not that worked: a router started before its network is up (at sign-in, a laptop waking) served the embedded catalog for three hours, and logged only `startup model refresh: fetch failed from all URLs, keeping current data`. A failure is now tried again after a minute, doubling up to the three hours (`devyreRefreshLoop`). Evidence: a router started with its only way out (a proxy) down, which came up 20 s later, logged "model: trying again in 1m0s" and took the remote catalog a minute after the start; the build before waited three hours. This keeps every provider's catalog current where the download works at all; where it never does, Codex is served from OpenAI as above, and the others keep the embedded catalog.
+
 Evidence (2026-11-09): the real `codex exec` 0.163.0 routed as Anvil routes it (`model_providers.<id>` with `supports_websockets=true`), against a router started with `-local-model`, the state a failed catalog download leaves, and a credential made from a real ChatGPT login with a dummy refresh token. Before: `Model metadata for gpt-6.1-terra not found`, five reconnects on `Connection reset without closing handshake`, and the turn failing after 6.5 s on `unknown provider for model gpt-6.1-terra` over HTTP. After: the router's list carries `gpt-6.1-terra`, the turn on it answers over the websocket in 4.6 s without a warning, and a model OpenAI does not list fails in 0.6 s with the 400 above, without a reconnect.
 
 ## Embedded panel
@@ -607,6 +612,7 @@ go test ./sdk/cliproxy/auth/ -run 'ExpiringFirst|Focus|DevyreSession|DevyreTrans
 go test ./sdk/cliproxy/ -run 'ExpiringFirst|DevyreSession'
 go test ./sdk/api/handlers/openai/ ./internal/runtime/executor/ -run Devyre
 go test ./internal/codexaccountmodels/
+go test ./internal/registry/ -run 'DevyreCatalogRetry|DevyreRefreshLoop'
 go test ./internal/client/codex/models/ -run AccountModels
 go test ./sdk/api/handlers/ -run 'UnknownModelIsTyped|AsksTheCodexAccounts'
 go test ./sdk/api/handlers/openai/ -run UnroutableModel

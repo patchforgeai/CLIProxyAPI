@@ -28,39 +28,30 @@ func StartDevinModelsUpdater(ctx context.Context) {
 	})
 }
 
+// devyre: a failed fetch is tried again after a backoff (devyreRefreshLoop).
 func runDevinModelsUpdater(ctx context.Context) {
-	tryRefreshDevinModels(ctx, "startup Devin model refresh")
-
-	ticker := time.NewTicker(modelsRefreshInterval)
-	defer ticker.Stop()
-	log.Infof("periodic Devin model refresh started (interval=%s)", modelsRefreshInterval)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			tryRefreshDevinModels(ctx, "periodic Devin model refresh")
-		}
-	}
+	devyreRefreshLoop(ctx, modelsRefreshInterval, "startup Devin model refresh", "periodic Devin model refresh", "Devin model", tryRefreshDevinModels, time.After)
 }
 
-func tryRefreshDevinModels(ctx context.Context, label string) {
+// tryRefreshDevinModels reports whether the remote catalog was fetched and taken.
+func tryRefreshDevinModels(ctx context.Context, label string) bool {
 	data, sourceURL := fetchDevinModelsFromRemote(ctx)
 	if data == nil {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data (embedded or cached fallback)", label)
-		return
+		return false
 	}
 
 	changed, err := loadDevinModelsFromBytes(data, sourceURL)
 	if err != nil {
 		log.Warnf("%s: fetched catalog rejected, keeping current data: %v", label, err)
-		return
+		return false
 	}
 	if !changed {
 		log.Infof("%s completed from %s, no changes detected", label, sourceURL)
-		return
+		return true
 	}
 	log.Infof("%s completed from %s, catalog updated", label, sourceURL)
+	return true
 }
 
 func fetchDevinModelsFromRemote(ctx context.Context) ([]byte, string) {

@@ -81,45 +81,22 @@ func StartModelsUpdater(ctx context.Context) {
 	})
 }
 
+// runModelsUpdater fetches models from remote at once and then periodically,
+// comparing with the current catalog and notifying the registered callback
+// when a provider changed (so auth registrations follow). devyre: a failed
+// fetch is tried again after a backoff (devyreRefreshLoop).
 func runModelsUpdater(ctx context.Context) {
-	tryStartupRefresh(ctx)
-	periodicRefresh(ctx)
+	devyreRefreshLoop(ctx, modelsRefreshInterval, "startup model refresh", "periodic model refresh", "model", tryRefreshModels, time.After)
 }
 
-func periodicRefresh(ctx context.Context) {
-	ticker := time.NewTicker(modelsRefreshInterval)
-	defer ticker.Stop()
-	log.Infof("periodic model refresh started (interval=%s)", modelsRefreshInterval)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			tryPeriodicRefresh(ctx)
-		}
-	}
-}
-
-// tryPeriodicRefresh fetches models from remote, compares with the current
-// catalog, and notifies the registered callback if any provider changed.
-func tryPeriodicRefresh(ctx context.Context) {
-	tryRefreshModels(ctx, "periodic model refresh")
-}
-
-// tryStartupRefresh fetches models from remote in the background during
-// process startup. It uses the same change detection as periodic refresh so
-// existing auth registrations can be updated after the callback is registered.
-func tryStartupRefresh(ctx context.Context) {
-	tryRefreshModels(ctx, "startup model refresh")
-}
-
-func tryRefreshModels(ctx context.Context, label string) {
+// tryRefreshModels reports whether the remote catalog was fetched and taken.
+func tryRefreshModels(ctx context.Context, label string) bool {
 	oldData := getModels()
 
 	parsed, url := fetchModelsFromRemote(ctx)
 	if parsed == nil {
 		log.Warnf("%s: fetch failed from all URLs, keeping current data", label)
-		return
+		return false
 	}
 
 	if len(parsed.Meta) == 0 && oldData != nil && len(oldData.Meta) > 0 {
@@ -136,11 +113,12 @@ func tryRefreshModels(ctx context.Context, label string) {
 
 	if len(changed) == 0 {
 		log.Infof("%s completed from %s, no changes detected", label, url)
-		return
+		return true
 	}
 
 	log.Infof("%s completed from %s, changes detected for providers: %v", label, url, changed)
 	notifyModelRefresh(changed)
+	return true
 }
 
 // fetchModelsFromRemote tries all remote URLs and returns the parsed model catalog
