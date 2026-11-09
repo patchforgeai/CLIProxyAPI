@@ -304,9 +304,18 @@ func TestDevyreCodexModels_RemovedCredentialsAreForgotten(t *testing.T) {
 func TestDevyreWithAccountCodexModels(t *testing.T) {
 	store := codexaccountmodels.Default()
 	t.Cleanup(func() { store.Retain(nil) })
-	catalog := []*ModelInfo{{ID: "gpt-6.1-sol", DisplayName: "catalog's"}}
-	if got := devyreWithAccountCodexModels("codex-none.json", catalog); len(got) != 1 {
+	image := internalregistry.WithCodexBuiltins(nil)[0]
+	catalog := []*ModelInfo{
+		{ID: "gpt-6.1-sol", DisplayName: "catalog's"},
+		{ID: "gpt-6.1-terra", DisplayName: "the catalog's guess"},
+		image,
+	}
+	if got := devyreWithAccountCodexModels("codex-none.json", catalog); len(got) != 3 {
 		t.Fatalf("without an answer the catalog stands: %v", got)
+	}
+	store.Set("codex-empty.json", codexaccountmodels.Learned{ClientVersion: "0.163.0", Entries: []map[string]any{}})
+	if got := devyreWithAccountCodexModels("codex-empty.json", catalog); len(got) != 3 {
+		t.Fatalf("an answer that lists nothing changes nothing: %v", got)
 	}
 	store.Set("codex-a.json", codexaccountmodels.Learned{
 		ClientVersion: "0.163.0",
@@ -316,8 +325,90 @@ func TestDevyreWithAccountCodexModels(t *testing.T) {
 		},
 	})
 	got := devyreWithAccountCodexModels("codex-a.json", catalog)
-	if len(got) != 2 || got[0].DisplayName != "catalog's" || got[1].ID != "gpt-7-from-openai" {
-		t.Fatalf("models = %+v, want the catalog's kept and the missing one added", got)
+	var ids []string
+	for _, model := range got {
+		ids = append(ids, model.ID)
+	}
+	if strings.Join(ids, ",") != "gpt-6.1-sol,"+image.ID+",gpt-7-from-openai" || got[0].DisplayName != "catalog's" {
+		t.Fatalf("models = %v, want the catalog's listed one, the image model, the missing one added, and the catalog's guess OpenAI does not list gone", ids)
+	}
+}
+
+// Vivy's account (2026-11-09): a free plan, whose catalog tier listed
+// gpt-6.1-terra, and OpenAI's own answer for it, which does not. Codex was
+// offered the model and every turn on it failed upstream; now the account does
+// not serve it, so routing refuses it at once and no list offers it.
+func TestRegisterModelsForAuth_CodexFreePlanServesWhatOpenAIListsOnly(t *testing.T) {
+	store := codexaccountmodels.Default()
+	t.Cleanup(func() { store.Retain(nil) })
+	service := &Service{cfg: &config.Config{}}
+	auth := &coreauth.Auth{
+		ID:         "codex-devyre-free.json",
+		Provider:   "codex",
+		Status:     coreauth.StatusActive,
+		Attributes: map[string]string{"auth_kind": "oauth", "plan_type": "free"},
+		Metadata:   map[string]any{"access_token": "token"},
+	}
+	registry := internalregistry.GetGlobalRegistry()
+	registry.UnregisterClient(auth.ID)
+	t.Cleanup(func() { registry.UnregisterClient(auth.ID) })
+	served := func() map[string]bool {
+		out := map[string]bool{}
+		for _, info := range registry.GetModelsForClient(auth.ID) {
+			if info != nil {
+				out[info.ID] = true
+			}
+		}
+		return out
+	}
+
+	// The catalog's guess for a free plan, as the remote catalog had it.
+	internalregistry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	service.registerModelsForAuth(context.Background(), auth)
+	before := served()
+
+	store.Set(auth.ID, codexaccountmodels.Learned{
+		ClientVersion: "0.163.0",
+		Entries: []map[string]any{
+			{"slug": "gpt-6-chat-thinking"}, {"slug": "gpt-reserve"}, {"slug": "gpt-6-luna"},
+			{"slug": "gpt-5.6-terra"}, {"slug": "gpt-5.6-luna"}, {"slug": "codex-auto-review"},
+		},
+	})
+	service.registerModelsForAuth(context.Background(), auth)
+	after := served()
+	listed := map[string]bool{
+		"gpt-6-chat-thinking": true, "gpt-reserve": true, "gpt-6-luna": true,
+		"gpt-5.6-terra": true, "gpt-5.6-luna": true, "codex-auto-review": true,
+	}
+	builtin := map[string]bool{}
+	for _, image := range internalregistry.WithCodexBuiltins(nil) {
+		builtin[image.ID] = true
+	}
+	dropped := 0
+	for model := range before {
+		if listed[model] || builtin[model] {
+			continue
+		}
+		if after[model] {
+			t.Fatalf("%s, the catalog's guess, is still served though OpenAI does not list it for the account", model)
+		}
+		dropped++
+	}
+	if dropped == 0 {
+		t.Fatalf("the catalog's free tier %v had no model OpenAI does not list: the test proves nothing", before)
+	}
+	for _, model := range []string{"gpt-6-luna", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-reserve"} {
+		if !after[model] {
+			t.Fatalf("%s, which OpenAI lists for the account, is not served: %v", model, after)
+		}
+	}
+	for _, image := range internalregistry.WithCodexBuiltins(nil) {
+		if before[image.ID] && !after[image.ID] {
+			t.Fatalf("the image model %s went with the catalog's guesses", image.ID)
+		}
+	}
+	if providers := util.GetProviderName("gpt-6.1-terra"); len(providers) != 0 {
+		t.Fatalf("gpt-6.1-terra still routes to %v", providers)
 	}
 }
 

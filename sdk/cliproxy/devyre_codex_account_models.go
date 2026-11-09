@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/codexaccountmodels"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
@@ -96,19 +97,49 @@ func (s *Service) devyreStartCodexAccountModels() {
 	go learner.Ensure(context.Background(), "")
 }
 
-// devyreWithAccountCodexModels adds to a Codex OAuth credential's catalog
-// models the models OpenAI lists for its account that the catalog lacks.
+// devyreWithAccountCodexModels makes a Codex OAuth credential's models the ones
+// OpenAI lists for its account, once OpenAI has answered: the plan's catalog
+// models OpenAI lists (with the catalog's description), the router's own image
+// models (registry.WithCodexBuiltins: served through the image tool, never in
+// OpenAI's Codex list), and every model OpenAI lists that the catalog lacks.
+//
+// The catalog's plan tiers are a third party's guess at what a plan offers,
+// and are wrong for some accounts: in November 2026 its free tier listed
+// gpt-6.1-terra, which OpenAI refuses for a free account ("The 'gpt-6.1-terra'
+// model is not supported when using Codex with a ChatGPT account."), so Codex
+// offered it, and every turn on it failed. Before OpenAI has answered, or when
+// its answer lists nothing, the catalog stands.
 func devyreWithAccountCodexModels(authID string, models []*ModelInfo) []*ModelInfo {
 	learned, ok := codexaccountmodels.Default().Get(authID)
 	if !ok || len(learned.Entries) == 0 {
 		return models
 	}
-	have := make(map[string]struct{}, len(models))
-	for _, model := range models {
+	listed := make(map[string]struct{}, len(learned.Entries))
+	for _, slug := range learned.Slugs() {
+		listed[strings.ToLower(slug)] = struct{}{}
+	}
+	builtin := make(map[string]struct{})
+	for _, model := range registry.WithCodexBuiltins(nil) {
 		if model != nil {
-			have[strings.ToLower(model.ID)] = struct{}{}
+			builtin[strings.ToLower(model.ID)] = struct{}{}
 		}
 	}
+	kept := make([]*ModelInfo, 0, len(models)+len(learned.Entries))
+	have := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		key := strings.ToLower(model.ID)
+		_, onList := listed[key]
+		_, isBuiltin := builtin[key]
+		if !onList && !isBuiltin {
+			continue
+		}
+		have[key] = struct{}{}
+		kept = append(kept, model)
+	}
+	models = kept
 	for _, info := range codexaccountmodels.ModelInfos(learned) {
 		key := strings.ToLower(info.ID)
 		if _, dup := have[key]; dup {
