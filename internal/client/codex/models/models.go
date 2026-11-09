@@ -211,7 +211,9 @@ func applyCodexClientNonTemplatePriorities(result []map[string]any, templates ma
 
 func loadCodexClientModelTemplates() (map[string]map[string]any, map[string]any, error) {
 	raw, revision := registry.GetCodexClientModelsSnapshot()
-	return loadCodexClientModelTemplatesSnapshot(raw, revision)
+	templates, defaultTemplate, err := loadCodexClientModelTemplatesSnapshot(raw, revision)
+	// devyre: OpenAI's own entries for the models the catalog has no template for.
+	return devyreWithAccountTemplates(templates), defaultTemplate, err
 }
 
 func loadCodexClientModelTemplatesSnapshot(raw []byte, revision uint64) (map[string]map[string]any, map[string]any, error) {

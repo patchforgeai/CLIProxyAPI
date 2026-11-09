@@ -208,6 +208,8 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.registerModelRefreshCallback()
+	// devyre: the models OpenAI offers each Codex account.
+	s.devyreStartCodexAccountModels()
 
 	select {
 	case <-ctx.Done():

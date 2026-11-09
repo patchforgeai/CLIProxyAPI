@@ -1,13 +1,13 @@
 package handlers
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/tidwall/sjson"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/codexaccountmodels"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/thinking"
@@ -198,6 +198,14 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
 	}
+	// devyre: a model OpenAI offers a Codex account but the catalog lacks is
+	// registered once OpenAI has been asked (devyre_codex_account_models.go).
+	if len(providers) == 0 && codexaccountmodels.Resolve(context.Background(), baseModel) {
+		providers = util.GetProviderName(baseModel)
+		if len(providers) == 0 && baseModel != resolvedModelName {
+			providers = util.GetProviderName(resolvedModelName)
+		}
+	}
 
 	if len(providers) == 0 {
 		// The client asked for a model this proxy cannot route. Report it as a request
@@ -214,7 +222,8 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 		}
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusBadRequest,
-			Error:      errors.New(body),
+			// devyre: typed, so the Responses websocket sends it (UnroutableModelError).
+			Error: NewUnroutableModelError(body),
 		}
 	}
 

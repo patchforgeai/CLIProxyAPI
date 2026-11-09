@@ -260,6 +260,10 @@ func shouldExposeResponsesUpstreamError(errMsg *interfaces.ErrorMessage) bool {
 	if coreauth.IsTerminalAuthError(errMsg.Error) {
 		return true
 	}
+	// devyre: no credential serves the model, which no reconnect can change.
+	if handlers.IsUnroutableModel(errMsg.Error) {
+		return true
+	}
 	return clienterror.IsRequestFault(responsesWebsocketErrorStatus(errMsg), errMsg.Error)
 }
 

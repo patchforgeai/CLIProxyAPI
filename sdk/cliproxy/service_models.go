@@ -149,6 +149,8 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		default:
 			models = registry.GetCodexProModels()
 		}
+		// devyre: and what OpenAI lists for this account that the catalog lacks.
+		models = devyreWithAccountCodexModels(a.ID, models)
 		models = applyExcludedModels(models, excluded)
 	case "kimi", "kimi-ai", "kimi.ai", "kimi.com":
 		models = registry.GetKimiModels()
