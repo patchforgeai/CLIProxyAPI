@@ -6,6 +6,20 @@ The design, the verified facts and the decisions behind this fork are in [PLAN.m
 
 ## What differs from upstream
 
+- **Native Claude Agent SDK forwarding.** The TypeScript SDK launches the real Claude Code
+  binary. Its `sdk-ts` entrypoint and optional `client-app/` suffix now take native forwarding
+  when the usual request signals match. Client versions are recognized by format, independently
+  of the synthetic baseline; native SDK/runtime headers keep their actual versions. This fixes
+  Fable 5.2 rejecting a real 2.1.321 client after the router rewrote it as 2.1.280. Authentication,
+  account identity and credential betas still come from the selected account; this classification
+  grants no access. Explicit device-profile stabilization remains an operator override.
+  No extra model calls or prompt material are added. The `devyre_claude_agent_sdk_test.go` tests
+  in the executor and its helpers cover streaming, Messages, token counting, OAuth/API keys,
+  subagents, cache markers, malformed envelopes and versions beyond the current release line.
+  Anvil also tests the real SDK/CLI through this binary against a local Messages stand-in on
+  both of Claude's release channels. Moving existing conversations off cloaking may rebuild
+  their prompt cache once; subsequent turns retain the client's cache placement.
+
 - **Embedded panel.** The panel is built into the binary and never downloaded or updated: a release of [the panel fork](https://github.com/Devyre/Cli-Proxy-API-Management-Center), which is upstream's panel plus chhoumann's quota ledger, a 7-day Claude headline with Fable hidden in the ledger, and a dark default theme. `update-panel.ps1` refreshes it, and `-tags devyre_nopanel` builds a server without it. It never serves the stock panel. See [Embedded panel](#embedded-panel).
 - **T3 Code hub contract.** `TestT3Hub_*` pin the deprecated `/v0/management` endpoints that T3 Code's "CLIProxyAPI hub" decodes (`auth-files`, `api-call`, `reset-quota`), plus `/v8/management/requests/api-call`, which the panel uses. The auth-files listing also reports a Codex plan as `id_token.chatgpt_plan_type`, the key T3 reads, next to upstream's `id_token.plan_type`.
 - **Quota readings and usage cache.** One in-memory store of quota readings, fed by response headers, by usage bodies passing through `api-call`, and by an idle-credential poller. A usage cache inside `APICall` keeps the panel, the T3 hub and the poller from tripping Claude's rate-limited usage endpoint. See [Routing and quota readings](#routing-and-quota-readings).
@@ -28,6 +42,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 |---|---|
 | `devyre/PLAN.md` | Implementation plan and decision log |
 | `devyre/README.md` | This file |
+| `internal/runtime/executor/devyre_claude_agent_sdk_test.go` | Native SDK forwarding through Messages, streaming and token counting, preserving identity, tools and cache markers with one upstream call |
+| `internal/runtime/executor/helps/devyre_claude_agent_sdk_test.go` | SDK envelope recognition, future and older client versions, malformed requests, native software headers |
 | `devyre/clients/codex-config.toml` | Optional Codex CLI provider |
 | `devyre/clients/powershell-profile.ps1` | Claude Code CLI wiring: `Enable-CpaPool`, `Disable-CpaPool`, `claude-direct`, `claudex` |
 | `devyre/clients/claude-pool.cmd` | `claude-pool`: one Claude Code run through the pool. Works in any shell and needs no PowerShell execution policy change |

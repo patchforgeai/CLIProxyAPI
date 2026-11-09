@@ -1376,7 +1376,7 @@ func resolveClaudeWirePolicy(cfg *config.Config, auth *cliproxyauth.Auth, apiKey
 	if confirmedClaudeCode {
 		// Native Claude Code is always a passthrough client. An operator-level
 		// "always" mode may cloak unknown callers, but must not overwrite a
-		// strongly confirmed CLI, sdk-cli, or claude-vscode fingerprint.
+		// confirmed native client, including the real CLI launched by the Agent SDK.
 		policy.Cloak = false
 		return policy, settings
 	}

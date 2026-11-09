@@ -933,6 +933,25 @@ The server fork moved the same day, to https://github.com/patchforgeai/CLIProxyA
 
 ---
 
+## 21. Native Agent SDK forwarding (2026-11-09)
+
+Anvil's Claude Code 2.1.321, run by Agent SDK 0.3.296, sends `sdk-ts` and an optional
+`client-app/anvil/<version>` suffix in its User-Agent. Rejecting that envelope made the router
+replace it with 2.1.280, which Anthropic refuses for Fable 5.2.
+
+Recognize the measured SDK surface using the existing request signals. Release numbers are
+client-owned, not evidence for or against a native request: preserve older and newer versions
+and let Anthropic enforce model compatibility. Keep the native SDK/runtime headers too, rather
+than mix a new CLI with the baseline's old software tuple. This changes no authentication or
+account selection. Anvil leaves optional device-profile stabilization off.
+
+Preserve the client's prompt, tools and cache markers, with no added model call, retry, polling
+or prompt. Cover the executor's three request paths with synthetic credentials and intercepted
+HTTP; run the actual SDK through the built router into a local API in Anvil's scheduled
+stable/latest contract job. A one-time live Fable 5.2 check on 2.1.321 succeeded with 392 input
+tokens and 4 output tokens ($0.003296 at list prices). Existing conversations may write their
+cache once as they leave the old rewritten shape.
+
 ## Appendix A — `devyre/deploy/config.template.yaml`
 
 ```yaml

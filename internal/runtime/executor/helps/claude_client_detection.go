@@ -29,7 +29,7 @@ const (
 var (
 	claudeCodeUserAgentPattern        = regexp.MustCompile(`(?i)^claude-cli/`)
 	claudeCodeUserAgentDetailsPattern = regexp.MustCompile(`(?i)^claude-cli/\S+\s+\(external,\s*([^,)]+)(?:,\s*agent-sdk/([^,)]+))?`)
-	claudeCodeNativeUserAgentPattern  = regexp.MustCompile(`(?i)^claude-cli/[0-9]+\.[0-9]+\.[0-9]+\s+\(external,\s*[^,)]+(?:,\s*agent-sdk/[0-9]+\.[0-9]+\.[0-9]+)?\)$`)
+	claudeCodeNativeUserAgentPattern  = regexp.MustCompile(`(?i)^claude-cli/[0-9]+\.[0-9]+\.[0-9]+\s+\(external,\s*[^,)]+(?:,\s*agent-sdk/[0-9]+\.[0-9]+\.[0-9]+)?(?:,\s*client-app/[^(),\s]+)?\)$`)
 )
 
 var claudeCodeSubclientByEntrypoint = map[string]string{
@@ -60,12 +60,13 @@ var claudeCodeSubclientByEntrypoint = map[string]string{
 	"claude-coworker-terminal":  "claude-coworker-terminal",
 }
 
-// Only product surfaces with verified 2.1.220 wire behavior are eligible for
-// pass-through. Other first-party-looking entrypoints are cloaked until their
-// CPA-reachable request shape has been captured and reviewed.
+// Only surfaces whose wire behavior has been verified are eligible for pass-through.
+// sdk-ts is the real Claude Code process launched by the TypeScript Agent SDK,
+// captured with 2.1.321 and SDK 0.3.296, including its optional client-app suffix.
 var nativeClaudeEntrypoints = map[string]bool{
 	"cli":           true,
 	"sdk-cli":       true,
+	"sdk-ts":        true,
 	"claude-vscode": true,
 }
 
@@ -133,8 +134,8 @@ type ClaudeCodeRequestDetection struct {
 // applies CPA's native-client policy. Standard Messages requests require all
 // four strong signals; count_tokens omits metadata.user_id. A separate narrow
 // profile recognizes measured native Haiku helper requests that intentionally
-// omit claude-code-20250219. Generic sdk-ts/sdk-py Agent SDK entrypoints remain
-// unconfirmed and receive CLI cloaking.
+// omit claude-code-20250219. This recognizes a request format, not authentication
+// or model entitlement: the selected credential and upstream own those decisions.
 func DetectClaudeCodeRequest(headers http.Header, payload []byte, countTokens bool, configs ...*config.Config) ClaudeCodeRequestDetection {
 	var cfg *config.Config
 	if len(configs) > 0 {
@@ -144,7 +145,7 @@ func DetectClaudeCodeRequest(headers http.Header, payload []byte, countTokens bo
 	entrypoint, agentSDKVersion := parseClaudeCodeUserAgentDetails(userAgent)
 	detection := ClaudeCodeRequestDetection{
 		XAppCLI:         headerValue(headers, "X-App") == "cli",
-		UserAgent:       plausibleClaudeCodeUserAgent(userAgent, cfg),
+		UserAgent:       plausibleClaudeCodeUserAgent(userAgent),
 		BetasPresent:    headerContainsClaudeCodeBeta(headers),
 		Entrypoint:      entrypoint,
 		Subclient:       claudeCodeSubclientByEntrypoint[entrypoint],
@@ -154,6 +155,9 @@ func DetectClaudeCodeRequest(headers http.Header, payload []byte, countTokens bo
 	metadataUserID := gjson.GetBytes(payload, "metadata.user_id")
 	detection.MetadataUserID = metadataUserID.Exists() && metadataUserID.Type == gjson.String && isValidUserID(metadataUserID.String())
 	detection.NativeClient = nativeClaudeEntrypoints[entrypoint]
+	if entrypoint == "sdk-ts" && agentSDKVersion == "" {
+		detection.NativeClient = false
+	}
 	standardSignals := detection.XAppCLI && detection.UserAgent && detection.BetasPresent && (countTokens || detection.MetadataUserID)
 	detection.HelperProfile = detection.NativeClient && matchesMeasuredClaudeCodeHelperProfile(headers, payload, countTokens, detection, cfg)
 	detection.StrongSignals = standardSignals || detection.HelperProfile
@@ -496,15 +500,17 @@ func claudeJSONObjectHasKeys(raw []byte, want []string) bool {
 	return errClosing == nil && closing == json.Delim('}') && keyIndex == len(want)
 }
 
-func plausibleClaudeCodeUserAgent(userAgent string, cfg *config.Config) bool {
+func plausibleClaudeCodeUserAgent(userAgent string) bool {
 	userAgent = strings.TrimSpace(userAgent)
 	if !claudeCodeUserAgentPattern.MatchString(userAgent) || !claudeCodeNativeUserAgentPattern.MatchString(userAgent) {
 		return false
 	}
-	candidate, okCandidate := parseClaudeCLIVersion(userAgent)
-	baseline, okBaseline := parseClaudeCLIVersion(defaultClaudeDeviceProfile(cfg).UserAgent)
-	// Patch releases (>= baseline.patch) within the release line preserve native passthrough.
-	return okCandidate && okBaseline && plausibleClaudeCLIVersion(candidate, baseline)
+	// A release number is not a wire-format signal. Preserve the version the
+	// client actually runs, including older versions: Anthropic decides whether
+	// that version supports the requested model. Coupling this to the synthetic
+	// profile silently downgrades new releases and upgrades old ones.
+	_, ok := parseClaudeCLIVersion(userAgent)
+	return ok
 }
 
 func parseClaudeCodeUserAgentDetails(userAgent string) (entrypoint, agentSDKVersion string) {
