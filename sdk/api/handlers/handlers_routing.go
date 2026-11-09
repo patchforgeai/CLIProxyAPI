@@ -7,6 +7,7 @@ import (
 
 	"github.com/tidwall/sjson"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/claudeaccountmodels"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/codexaccountmodels"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -201,6 +202,14 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	// devyre: a model OpenAI offers a Codex account but the catalog lacks is
 	// registered once OpenAI has been asked (devyre_codex_account_models.go).
 	if len(providers) == 0 && codexaccountmodels.Resolve(context.Background(), baseModel) {
+		providers = util.GetProviderName(baseModel)
+		if len(providers) == 0 && baseModel != resolvedModelName {
+			providers = util.GetProviderName(resolvedModelName)
+		}
+	}
+	// devyre: and one Anthropic offers a Claude account but the catalog lacks
+	// (devyre_claude_account_models.go).
+	if len(providers) == 0 && claudeaccountmodels.Resolve(context.Background(), baseModel) {
 		providers = util.GetProviderName(baseModel)
 		if len(providers) == 0 && baseModel != resolvedModelName {
 			providers = util.GetProviderName(resolvedModelName)

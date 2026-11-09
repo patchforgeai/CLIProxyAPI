@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/claudeaccountmodels"
 	claudemodels "github.com/router-for-me/CLIProxyAPI/v8/internal/client/claude/models"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
@@ -155,6 +156,12 @@ func rewriteClaudeDDModelInBody(rawJSON []byte) []byte {
 // Parameters:
 //   - c: The Gin context for the request.
 func (h *ClaudeCodeAPIHandler) ClaudeModels(c *gin.Context) {
+	// devyre: the Claude accounts' own lists first (internal/claudeaccountmodels).
+	ctx := context.Background()
+	if c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	claudeaccountmodels.Ensure(ctx)
 	disableCloaking := h.Cfg != nil && h.Cfg.ClaudeCode.DisableCloakingModelList
 	h.WriteModelListResponse(c, h.HandlerType(), claudemodels.BuildResponse(h.Models(), disableCloaking))
 }

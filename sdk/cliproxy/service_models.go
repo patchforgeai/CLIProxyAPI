@@ -114,13 +114,19 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
+		configuredModels := false
 		if entry := s.resolveConfigClaudeKey(a); entry != nil {
 			if len(entry.Models) > 0 {
 				models = buildClaudeConfigModels(entry)
+				configuredModels = true
 			}
 			if authKind == "apikey" {
 				excluded = entry.ExcludedModels
 			}
+		}
+		if !configuredModels {
+			// devyre: and what Anthropic lists for this account that the catalog lacks.
+			models = devyreWithAccountClaudeModels(a.ID, models)
 		}
 		models = applyExcludedModels(models, excluded)
 	case "codex":
