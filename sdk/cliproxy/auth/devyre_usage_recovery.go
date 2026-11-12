@@ -14,12 +14,31 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 )
 
+// claudeSharedWindows are the windows every model of a Claude subscription
+// counts against, by the status header that rejects each.
+var claudeSharedWindows = map[string]string{
+	"anthropic-ratelimit-unified-5h-status": "5h",
+	"anthropic-ratelimit-unified-7d-status": "7d",
+}
+
+// claudeUsage is one complete, fresh Claude usage response: every window it
+// lists, and the shared windows it reports as limits the account does not have
+// (quotareading.ClaudeUsageUnlimited), such as the 5-hour one of a plan
+// without it.
+type claudeUsage struct {
+	windows   []quotareading.Window
+	unlimited []string
+}
+
 // ReconcileClaudeUsage lifts only subscription-window cooldowns contradicted by
-// a complete, fresh usage response. started is the upstream call's start, not
-// its completion: a response racing a newer rejection must never erase it.
-// Cached responses, profile reads and partial usage variants must not call it.
-func (m *Manager) ReconcileClaudeUsage(observed *Auth, windows []quotareading.Window, started time.Time) {
-	if m == nil || observed == nil || started.IsZero() || !claudeUsageHealthy(windows, "") {
+// a complete, fresh usage response. windows are the windows it lists and
+// unlimited the shared ones it reports the account does not have. started is
+// the upstream call's start, not its completion: a response racing a newer
+// rejection must never erase it. Cached responses, profile reads and partial
+// usage variants must not call it.
+func (m *Manager) ReconcileClaudeUsage(observed *Auth, windows []quotareading.Window, unlimited []string, started time.Time) {
+	usage := claudeUsage{windows: windows, unlimited: unlimited}
+	if m == nil || observed == nil || started.IsZero() || !usage.healthy("") {
 		return
 	}
 	authID := observed.ID
@@ -33,7 +52,7 @@ func (m *Manager) ReconcileClaudeUsage(observed *Auth, windows []quotareading.Wi
 		return
 	}
 	shared := auth.Quota.Reason == "credential_quota" && quotaErrorOrNil(auth.LastError) &&
-		claudeSharedQuotaRecovered(auth, windows, started)
+		claudeSharedQuotaRecovered(auth, usage, started, now)
 	sharedDeadline := auth.Quota.NextRecoverAt
 	changed := shared
 	if shared {
@@ -43,14 +62,14 @@ func (m *Manager) ReconcileClaudeUsage(observed *Auth, windows []quotareading.Wi
 	}
 	for model, state := range auth.ModelStates {
 		if state == nil || state.Status == StatusDisabled || !state.UpdatedAt.Before(started) ||
-			!quotaErrorOrNil(state.LastError) || !claudeUsageHealthy(windows, model) {
+			!quotaErrorOrNil(state.LastError) || !usage.healthy(model) {
 			continue
 		}
 		// A shared rejection is also propagated to models that made no request.
 		// Their earlier, independent deadlines and non-quota errors still stand.
 		propagated := shared && state.LastError == nil && state.Quota.Reason == "credential_quota" &&
 			state.Quota.NextRecoverAt.Equal(sharedDeadline) && state.NextRetryAfter.Equal(sharedDeadline)
-		if propagated || (state.Quota.Reason == "quota" && state.Quota.ObservedAt.Equal(state.UpdatedAt) && claudeQuotaRecovered(state.Quota, windows, started, model)) {
+		if propagated || claudeRejectionRecovered(state, usage, started, model, now) {
 			resetModelState(state, now)
 			changed = true
 		}
@@ -94,75 +113,127 @@ func quotaErrorOrNil(err *Error) bool {
 	return err == nil || err.HTTPStatus == http.StatusTooManyRequests
 }
 
-func claudeSharedQuotaRecovered(auth *Auth, windows []quotareading.Window, started time.Time) bool {
-	// A token refresh or a concurrent success can update the account after its
-	// rejection. The originating model still records that rejection. Conversely,
-	// headers kept from an older request cannot explain a new ordinary 429.
+// claudeSharedQuotaRecovered reports whether the usage contradicts the
+// credential-wide block: a model's own last result was rejected on a shared
+// window, and every such window has room again.
+//
+// Each rejection of a shared window writes the credential-wide block over the
+// other models' states (reason "credential_quota") and keeps the later of the
+// deadlines, so when several models were rejected, as the requests in flight
+// are when an account runs out, the model holding the block's own deadline is
+// not the one whose state still reads "quota". Any model that carries its own
+// rejection is evidence of the block, whatever its state reads now. A token
+// refresh or a concurrent success can update the account after its rejection;
+// the originating model still records that rejection. Conversely, headers kept
+// from an older request cannot explain a new ordinary 429: that model's own
+// result dropped them (MarkResult).
+func claudeSharedQuotaRecovered(auth *Auth, usage claudeUsage, started, now time.Time) bool {
+	recovered := false
 	for _, state := range auth.ModelStates {
-		if state != nil && state.Quota.Reason == "quota" && quotaErrorOrNil(state.LastError) &&
-			state.Quota.NextRecoverAt.Equal(auth.Quota.NextRecoverAt) &&
-			state.Quota.ObservedAt.Equal(state.UpdatedAt) &&
-			claudeQuotaRecovered(state.Quota, windows, started, "") {
+		rejected, ok := claudeRejectedWindows(state, started, "", now)
+		if !ok {
+			continue
+		}
+		if !usage.hasRoom(rejected) {
+			return false
+		}
+		recovered = true
+	}
+	return recovered
+}
+
+// claudeRejectionRecovered reports whether the usage contradicts the model's
+// own subscription rejection: every window its last result was rejected on has
+// room again. That holds for a state a later rejection of another model wrote
+// the credential-wide block over too: its own rejection is still what its
+// signals record.
+func claudeRejectionRecovered(state *ModelState, usage claudeUsage, started time.Time, model string, now time.Time) bool {
+	rejected, ok := claudeRejectedWindows(state, started, model, now)
+	return ok && usage.hasRoom(rejected)
+}
+
+// claudeRejectedWindows lists the windows the model's own last result was
+// rejected on: the shared ones, and for a model with a weekly window of its own
+// (Fable) that one. ok is false when the state records no such rejection that
+// still holds: its cooldown is over, it is not a quota cooldown, or its signals
+// are not those of its last result, observed before the usage call started.
+func claudeRejectedWindows(state *ModelState, started time.Time, model string, now time.Time) (rejected []string, ok bool) {
+	if state == nil || !quotaErrorOrNil(state.LastError) {
+		return nil, false
+	}
+	quota := state.Quota
+	if !quota.Exceeded || (quota.Reason != "quota" && quota.Reason != "credential_quota") ||
+		!quota.NextRecoverAt.After(now) || quota.ObservedAt.IsZero() ||
+		!quota.ObservedAt.Equal(state.UpdatedAt) || !quota.ObservedAt.Before(started) {
+		return nil, false
+	}
+	family := quotareading.ModelFamily(model)
+	for name, status := range quota.Signals {
+		if !strings.EqualFold(status, "rejected") {
+			continue
+		}
+		name = strings.ToLower(name)
+		if id, shared := claudeSharedWindows[name]; shared {
+			rejected = append(rejected, id)
+		} else if name == "anthropic-ratelimit-unified-7d_oi-status" && family == "fable" {
+			rejected = append(rejected, "7d:fable")
+		}
+	}
+	return rejected, len(rejected) > 0
+}
+
+// healthy reports whether every window that applies to model has room, and the
+// response accounts for both shared windows: each is listed, or reported as a
+// limit the account does not have, and at least one is listed. A malformed or
+// incomplete response is not evidence of recovery, even when the windows it
+// does contain are empty.
+func (u claudeUsage) healthy(model string) bool {
+	family := quotareading.ModelFamily(model)
+	short, long := false, false
+	for _, window := range u.windows {
+		if window.Kind == quotareading.KindScoped && (family == "" || window.Model != family) {
+			continue
+		}
+		if !windowHasRoom(window) {
+			return false
+		}
+		short = short || window.ID == "5h"
+		long = long || window.ID == "7d"
+	}
+	return (short || long) && (short || u.unlimitedWindow("5h")) && (long || u.unlimitedWindow("7d"))
+}
+
+// hasRoom reports whether every window in ids has room again: listed below its
+// limit, or a shared window the account no longer has. A model's own window
+// must be listed: one the response leaves out says nothing of it.
+func (u claudeUsage) hasRoom(ids []string) bool {
+	for _, id := range ids {
+		if !u.windowHasRoom(id) {
+			return false
+		}
+	}
+	return true
+}
+
+func (u claudeUsage) windowHasRoom(id string) bool {
+	for _, window := range u.windows {
+		if window.ID == id {
+			return windowHasRoom(window)
+		}
+	}
+	return u.unlimitedWindow(id)
+}
+
+func (u claudeUsage) unlimitedWindow(id string) bool {
+	for _, unlimited := range u.unlimited {
+		if unlimited == id {
 			return true
 		}
 	}
 	return false
 }
 
-// Require both shared windows. A malformed or incomplete response is not
-// evidence of recovery, even when the windows it does contain are empty.
-func claudeUsageHealthy(windows []quotareading.Window, model string) bool {
-	family := quotareading.ModelFamily(model)
-	short, long := false, false
-	for _, window := range windows {
-		if window.Kind == quotareading.KindScoped && (family == "" || window.Model != family) {
-			continue
-		}
-		if math.IsNaN(window.UsedPercent) || math.IsInf(window.UsedPercent, 0) || window.UsedPercent < 0 || window.UsedPercent >= 100 {
-			return false
-		}
-		short = short || window.ID == "5h"
-		long = long || window.ID == "7d"
-	}
-	return short && long
-}
-
-func claudeQuotaRecovered(quota QuotaState, windows []quotareading.Window, started time.Time, model string) bool {
-	if !quota.Exceeded || (quota.Reason != "quota" && quota.Reason != "credential_quota") ||
-		quota.ObservedAt.IsZero() || !quota.ObservedAt.Before(started) {
-		return false
-	}
-	family := quotareading.ModelFamily(model)
-	rejected := false
-	for name, status := range quota.Signals {
-		if !strings.EqualFold(status, "rejected") {
-			continue
-		}
-		id := ""
-		switch strings.ToLower(name) {
-		case "anthropic-ratelimit-unified-5h-status":
-			id = "5h"
-		case "anthropic-ratelimit-unified-7d-status":
-			id = "7d"
-		case "anthropic-ratelimit-unified-7d_oi-status":
-			if family == "fable" {
-				id = "7d:fable"
-			}
-		}
-		if id == "" {
-			continue
-		}
-		found := false
-		for _, window := range windows {
-			if window.ID == id && window.UsedPercent >= 0 && window.UsedPercent < 100 {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-		rejected = true
-	}
-	return rejected
+func windowHasRoom(window quotareading.Window) bool {
+	return !math.IsNaN(window.UsedPercent) && !math.IsInf(window.UsedPercent, 0) &&
+		window.UsedPercent >= 0 && window.UsedPercent < 100
 }

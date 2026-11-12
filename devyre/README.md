@@ -97,6 +97,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/handlers/management/devyre_tailnet_auth_test.go` | Middleware, ban, `allow-remote` and session tests, a `/v8` config write round trip, and the debug decision lines as the log formatter renders them |
 | `internal/api/handlers/management/devyre_usage_cache.go` | Usage cache inside `APICall` |
 | `internal/api/handlers/management/devyre_usage_cache_test.go` | Usage cache tests: TTLs, single-flight, stale, backoff, bypass, query variants, writes |
+| `internal/api/handlers/management/devyre_usage_recovery_test.go` | Through `APICall` and the poller: a fresh usage response lifts a rejected subscription, a cached, stale, partial or malformed one does not |
 | `internal/auth/claude/devyre_redirect.go` | `LoopbackRedirectURI` (`http://localhost:<port>/callback`), `GenerateAuthURLWithRedirect`, `ExchangeCodeForTokensWithRedirect` |
 | `internal/auth/claude/devyre_redirect_test.go` | Only the redirect changes in the authorize URL; the exchange body carries the moved redirect |
 | `internal/auth/codex/devyre_redirect.go` | `LoopbackRedirectURI` (`http://127.0.0.1:<port>/auth/callback`), `GenerateAuthURLWithRedirect` (upstream already has `ExchangeCodeForTokensWithRedirect`) |
@@ -131,7 +132,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/managementasset/devyre_panel/panel.json` | Its version, source and sha256, written by `update-panel.ps1` |
 | `internal/managementasset/devyre_panel_test.go` | The record matches the file, the embedded bytes are the file, `devyre_nopanel` embeds nothing (`go list`), and neither the updater nor the downloader makes a request, writes a file or starts a goroutine |
 | `internal/managementasset/devyre_updater_test.go` | Pins upstream's dormant download source to the panel fork, never the stock panel |
-| `internal/quotareading/claude.go` | Claude header and usage-body parsers |
+| `internal/quotareading/claude.go` | Claude header and usage-body parsers; the shared windows a usage body reports the account does not have (`ClaudeUsageUnlimited`) |
 | `internal/quotareading/claude_test.go` | Claude parser tests |
 | `internal/quotareading/codex.go` | Codex header and usage-body parsers |
 | `internal/quotareading/codex_test.go` | Codex parser tests |
@@ -190,6 +191,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/devyre_transient_soft.go` | What a transient failure does to its credential under session affinity with expiring-first placement: the streaks per credential and model (`devyreTransientStore`), the soft first minute `MarkResult` asks about (`devyreSoftTransient`), and putting the session of a failed failover attempt back on its credential (`devyreKeepBoundSession`) |
 | `sdk/cliproxy/auth/devyre_transient_soft_test.go` | The streaks (soft for a minute, a quiet minute, a success, the bound size); through the conductor with expiring-first placement: one request's 529 leaves the credential's other sessions on it while new ones go elsewhere until it answers, a lone credential answering its client's retry, a session that tried every account kept where its cache is, a stream's session, a minute of failures cooling as upstream, round-robin placement unchanged; the selector leaving failing credentials out and a failing focus taking no sessions over |
 | `sdk/cliproxy/auth/devyre_transient_test.go` | Through the conductor with a fake executor and wait: each transient failure kind, the bounded retries, credential failures, sessionless and new sessions, a credential that cooled down, a cancelled request, count tokens, a stream's start, its bootstrap and output already sent |
+| `sdk/cliproxy/auth/devyre_usage_recovery.go` | `ReconcileClaudeUsage`: a fresh, complete Claude usage response lifts the subscription cooldowns it contradicts |
+| `sdk/cliproxy/auth/devyre_usage_recovery_test.go` | Recovery lifts a rejected subscription for every model, an account without a 5-hour limit, and several models rejected together in either order; it needs new, complete evidence, and keeps ordinary rate limits, unrelated model failures and a rejection that raced the usage call |
 | `sdk/cliproxy/auth/selector_expiring_first.go` | The `expiring-first` selector, its placement order, the focus, and leaving out credentials that failed transiently a moment ago |
 | `sdk/cliproxy/auth/selector_expiring_first_test.go` | Selector tests, including session affinity |
 | `sdk/cliproxy/devyre_codex_account_models.go` | The learner: asks OpenAI for every Codex OAuth credential at once, one lookup at a time, at start, before a Codex client's model list and when a request names an unknown model; keeps a failed credential's answer, registers a changed one again; `devyreWithAccountCodexModels` makes a credential's models what OpenAI lists for its account (with the router's image models) |
@@ -354,6 +357,23 @@ and credential availability, the scheduler, the registry and persisted cooldowns
 windows must have room, and every rejected window must now be reported as available. The
 credential's generation and registration must still match the snapshot taken before the
 usage call; a rejection or replacement during that call wins even on the same clock tick.
+
+A shared window the response reports as a limit the account does not have counts as room: a
+plan without a 5-hour limit answers `five_hour: null` (`quotareading.ClaudeUsageUnlimited`),
+and its usage lists the weekly window alone. A window the response leaves out says nothing,
+and at least one shared window must be listed. Before, both had to be listed, so such an
+account stayed blocked until its old reset time whatever its usage said.
+
+The evidence of a credential-wide block is any model whose own last result was rejected on a
+shared window, while that rejection's cooldown still runs. When an account runs out, the
+requests in flight on it are rejected, often for more than one model: each rejection writes
+the credential-wide block over the other models' states (`credential_quota`) and keeps the
+later of the deadlines, each of which has its own fuzz. So the model whose state still reads
+`quota` need not hold the block's deadline, and the models rejected before it read
+`credential_quota` with an error of their own. Recovery used to ask for one model with both,
+found none in half the orders, and otherwise left the models rejected first blocked. Now each
+model that carries its own subscription rejection is evidence of the block, and is lifted when
+the usage contradicts the windows it was rejected on.
 
 Only actual fresh usage responses qualify, from management refresh or the idle poller.
 Cache hits, stale fallbacks, profile reads and partial query variants cannot lift a limit.

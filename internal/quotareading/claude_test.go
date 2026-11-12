@@ -266,3 +266,33 @@ func TestQuotaReadingFromClaudeUsageRejectsInvalidBodies(t *testing.T) {
 		}
 	}
 }
+
+func TestQuotaReadingClaudeUsageUnlimited(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"both limits", `{"five_hour":{"utilization":10},"seven_day":{"utilization":20}}`, nil},
+		{"no 5-hour limit", `{"five_hour":null,"seven_day":{"utilization":20}}`, []string{"5h"}},
+		{"no weekly limit", `{"five_hour":{"utilization":10},"seven_day":null}`, []string{"7d"}},
+		{"neither", `{"five_hour":null,"seven_day":null}`, []string{"5h", "7d"}},
+		{"a member left out says nothing", `{"seven_day":{"utilization":20}}`, nil},
+		{"a model's own window is never one", `{"five_hour":{"utilization":10},"seven_day":{"utilization":20},"seven_day_opus":null,"iguana_necktie":null}`, nil},
+		{"not an object", `[null]`, nil},
+		{"malformed", `{"five_hour":`, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ClaudeUsageUnlimited([]byte(tc.body))
+			if len(got) != len(tc.want) {
+				t.Fatalf("unlimited = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("unlimited = %v, want %v", got, tc.want)
+				}
+			}
+		})
+	}
+}

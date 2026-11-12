@@ -657,7 +657,7 @@ func (c *usageCache) recordReadings(req usageRequest, body string, now, started 
 	}
 	c.store().Replace(req.authID, req.provider, windows, now)
 	if req.target.endpoint == usageEndpointClaudeUsage && req.manager != nil {
-		req.manager.ReconcileClaudeUsage(req.observed, windows, started)
+		req.manager.ReconcileClaudeUsage(req.observed, windows, quotareading.ClaudeUsageUnlimited([]byte(body)), started)
 	}
 }
 

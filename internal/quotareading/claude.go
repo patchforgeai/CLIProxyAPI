@@ -94,6 +94,28 @@ func FromClaudeUsage(body []byte, observedAt time.Time) ([]Window, error) {
 	return claudeUsageWindowsFrom(root, observedAt), nil
 }
 
+// ClaudeUsageUnlimited lists the shared windows ("5h", "7d") a GET
+// /api/oauth/usage body reports as limits the account does not have: their
+// member is null, as five_hour is for a plan without a 5-hour limit. A member
+// the body leaves out says nothing, and neither does a body that is not a JSON
+// object.
+func ClaudeUsageUnlimited(body []byte) []string {
+	root, err := parseUsageObject(body, "claude")
+	if err != nil {
+		return nil
+	}
+	var unlimited []string
+	for _, spec := range claudeUsageWindows {
+		if spec.kind == KindScoped {
+			continue
+		}
+		if member := root.Get(spec.name); member.Exists() && member.Type == gjson.Null {
+			unlimited = append(unlimited, spec.id)
+		}
+	}
+	return unlimited
+}
+
 // claudeUsageWindowsFrom implements FromClaudeUsage on a parsed JSON object.
 func claudeUsageWindowsFrom(root gjson.Result, observedAt time.Time) []Window {
 	byID := make(map[string]Window)

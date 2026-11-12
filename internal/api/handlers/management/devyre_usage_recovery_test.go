@@ -107,3 +107,16 @@ func TestClaudeUsagePollRecoversRejectedSubscription(t *testing.T) {
 	hs.handler.pollUsage(context.Background(), hs.cache, quotaPoll{auth: auth, url: url, target: hs.cache.targets[url]}, config.UsageCacheConfig{})
 	assertUsageBlocked(t, hs, false)
 }
+
+// A plan without a 5-hour limit reports five_hour as null. Its fresh usage
+// lifts a rejection as any account's does.
+func TestClaudeUsageRefreshRecoversAnAccountWithoutAFiveHourLimit(t *testing.T) {
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	blockUsageAccount(t, hs)
+	hs.clock.mu.Lock()
+	hs.clock.now = time.Now().Add(time.Second)
+	hs.clock.mu.Unlock()
+	hs.upstream.respondJSON(usageTestClaudeUsagePath, http.StatusOK, `{"five_hour":null,"seven_day":{"utilization":0,"resets_at":null}}`)
+	hs.refresh(t, hs.claude, usageTestClaudeUsagePath)
+	assertUsageBlocked(t, hs, false)
+}

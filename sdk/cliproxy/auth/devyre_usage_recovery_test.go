@@ -53,8 +53,37 @@ func recoveredUsage() []quotareading.Window {
 }
 
 func reconcileUsage(m *Manager, id string, windows []quotareading.Window, started time.Time) {
+	reconcileUsageWithout(m, id, windows, nil, started)
+}
+
+// reconcileUsageWithout reconciles a usage response that reports the shared
+// windows in unlimited as limits the account does not have.
+func reconcileUsageWithout(m *Manager, id string, windows []quotareading.Window, unlimited []string, started time.Time) {
 	observed, _ := m.GetByID(id)
-	m.ReconcileClaudeUsage(observed, windows, started)
+	m.ReconcileClaudeUsage(observed, windows, unlimited, started)
+}
+
+// rejectSharedWindow fails a request for model on a rejected shared window, as
+// Anthropic answers one once a subscription window is spent: the headers name
+// the window, and the cooldown runs to its reset plus the fuzz each rejection
+// draws for itself.
+func rejectSharedWindow(m *Manager, id, model, window string, fuzz time.Duration) {
+	ctx := logging.WithResponseHeadersHolder(context.Background())
+	reset := time.Now().Add(24 * time.Hour)
+	logging.SetResponseHeaders(ctx, http.Header{
+		"Anthropic-Ratelimit-Unified-Status":                {"rejected"},
+		"Anthropic-Ratelimit-Unified-" + window + "-Status": {"rejected"},
+		"Anthropic-Ratelimit-Unified-" + window + "-Reset":  {strconv.FormatInt(reset.Unix(), 10)},
+	})
+	delay := 24*time.Hour + fuzz
+	m.MarkResult(ctx, Result{AuthID: id, Provider: "claude", Model: model, CredentialScope: true,
+		RetryAfter: &delay, Error: &Error{HTTPStatus: 429, Message: "subscription window rejected"}})
+}
+
+func blockedForModel(m *Manager, id, model string) bool {
+	auth, _ := m.GetByID(id)
+	blocked, _, _ := isAuthBlockedForModel(auth, model, time.Now())
+	return blocked
 }
 
 func TestClaudeUsageRecoveryPreservesRejectionDuringRefresh(t *testing.T) {
@@ -63,7 +92,7 @@ func TestClaudeUsageRecoveryPreservesRejectionDuringRefresh(t *testing.T) {
 	observed, _ := m.GetByID(id)
 	// Even if both results share a clock tick, the generation distinguishes them.
 	rejectSubscription(m, id, "claude-opus-5-5", true)
-	m.ReconcileClaudeUsage(observed, recoveredUsage(), time.Now().Add(time.Second))
+	m.ReconcileClaudeUsage(observed, recoveredUsage(), nil, time.Now().Add(time.Second))
 	after, _ := m.GetByID(id)
 	if blocked, _, _ := isAuthBlockedForModel(after, "claude-opus-5-5", time.Now()); !blocked {
 		t.Fatal("a response racing a new rejection cleared it")
@@ -118,13 +147,14 @@ func TestClaudeUsageRecoveryAfterConcurrentSuccess(t *testing.T) {
 }
 
 func TestClaudeUsageRecoveryNeedsNewCompleteEvidence(t *testing.T) {
-	for _, scenario := range []string{"older", "same instant", "missing weekly", "still exhausted", "ordinary rate limit", "disabled", "auth error", "billing error", "permission error"} {
+	for _, scenario := range []string{"older", "same instant", "missing weekly", "missing 5-hour", "no window listed", "still exhausted", "ordinary rate limit", "rejection over", "disabled", "auth error", "billing error", "permission error"} {
 		t.Run(scenario, func(t *testing.T) {
 			m, id := recoveryManager(t)
 			rejectSubscription(m, id, "claude-opus-5-5", true)
 			auth, _ := m.GetByID(id)
 			started := auth.UpdatedAt.Add(time.Second)
 			windows := recoveredUsage()
+			var unlimited []string
 			switch scenario {
 			case "older":
 				started = auth.UpdatedAt.Add(-time.Second)
@@ -132,6 +162,16 @@ func TestClaudeUsageRecoveryNeedsNewCompleteEvidence(t *testing.T) {
 				started = auth.UpdatedAt
 			case "missing weekly":
 				windows = windows[:1]
+			case "missing 5-hour":
+				// Left out, not reported as a limit the account does not have.
+				windows = windows[1:]
+			case "no window listed":
+				windows, unlimited = nil, []string{"5h", "7d"}
+			case "rejection over":
+				// The model's own rejection ran out: it explains no block that still holds.
+				m.mu.Lock()
+				m.auths[id].ModelStates["claude-opus-5-5"].Quota.NextRecoverAt = time.Now().Add(-time.Minute)
+				m.mu.Unlock()
 			case "still exhausted":
 				windows[1].UsedPercent = 100
 			case "ordinary rate limit":
@@ -147,7 +187,7 @@ func TestClaudeUsageRecoveryNeedsNewCompleteEvidence(t *testing.T) {
 				status := map[string]int{"auth error": 401, "billing error": 402, "permission error": 403}[scenario]
 				m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: "claude-opus-5-5", Error: &Error{HTTPStatus: status}})
 			}
-			reconcileUsage(m, id, windows, started)
+			reconcileUsageWithout(m, id, windows, unlimited, started)
 			after, _ := m.GetByID(id)
 			if blocked, _, _ := isAuthBlockedForModel(after, "claude-opus-5-5", time.Now()); !blocked {
 				t.Fatal("insufficient recovery evidence unblocked the account")
@@ -189,5 +229,77 @@ func TestClaudeUsageRecoveryRequiresTheRejectedScopedWindow(t *testing.T) {
 	after, _ = m.GetByID(id)
 	if blocked, _, _ := isAuthBlockedForModel(after, "claude-fable-5-1", time.Now()); blocked {
 		t.Fatal("recovered scoped window did not lift its limit")
+	}
+}
+
+// A plan without a 5-hour limit reports five_hour as null: its usage lists the
+// weekly window alone. Requiring both windows to be listed kept such an account
+// blocked until its old reset time, whatever its usage said.
+func TestClaudeUsageRecoveryOfAnAccountWithoutAShortWindow(t *testing.T) {
+	weekly := []quotareading.Window{{ID: "7d", Kind: quotareading.KindLong, UsedPercent: 0}}
+	for _, window := range []string{"7d", "5h"} {
+		t.Run(window+" rejected", func(t *testing.T) {
+			m, id := recoveryManager(t)
+			// Rejected on the weekly window, or on the 5-hour one before the plan lost that limit.
+			rejectSharedWindow(m, id, "claude-opus-5-5", window, 0)
+			reconcileUsageWithout(m, id, weekly, []string{"5h"}, time.Now().Add(time.Second))
+			if blockedForModel(m, id, "claude-opus-5-5") {
+				t.Fatal("an account without a 5-hour limit stayed blocked after its usage read as started over")
+			}
+		})
+	}
+}
+
+// When an account runs out, every request in flight on it is rejected, often
+// for more than one model. Each rejection writes the credential-wide block
+// over the other models' states and keeps the later deadline (each draws its
+// own fuzz), so the model whose state still reads "quota" need not hold the
+// block's deadline, and the others read "credential_quota" with an error of
+// their own. Recovery used to find no evidence then, or left the models
+// rejected first blocked.
+func TestClaudeUsageRecoveryAfterSeveralModelsWereRejected(t *testing.T) {
+	for _, order := range []string{"later deadline last", "earlier deadline last"} {
+		t.Run(order, func(t *testing.T) {
+			m, id := recoveryManager(t)
+			ctx := context.Background()
+			// A model that only ever succeeded receives the block as propagated.
+			m.MarkResult(ctx, Result{AuthID: id, Provider: "claude", Model: "claude-fable-5-1", Success: true})
+			first, last := 5*time.Second, 25*time.Second
+			if order == "earlier deadline last" {
+				first, last = last, first
+			}
+			rejectSharedWindow(m, id, "claude-opus-5-5", "7d", first)
+			time.Sleep(2 * time.Millisecond)
+			rejectSharedWindow(m, id, "claude-sonnet-5-5", "7d", last)
+			models := []string{"claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1"}
+			for _, model := range models {
+				if !blockedForModel(m, id, model) {
+					t.Fatalf("precondition: %s is not blocked", model)
+				}
+			}
+			reconcileUsage(m, id, recoveredUsage(), time.Now().Add(time.Second))
+			for _, model := range models {
+				if _, err := m.Execute(ctx, []string{"claude"}, cliproxyexecutor.Request{Model: model}, cliproxyexecutor.Options{}); err != nil {
+					t.Errorf("recovered account could not serve %s: %v", model, err)
+				}
+			}
+		})
+	}
+}
+
+// A model rejected with the others and then again by an ordinary limit keeps
+// that later block: the usage says nothing of a per-minute limit. The account
+// and the other model come back.
+func TestClaudeUsageRecoveryKeepsALaterOrdinaryLimitAmongSeveralModels(t *testing.T) {
+	m, id := recoveryManager(t)
+	rejectSharedWindow(m, id, "claude-opus-5-5", "7d", 5*time.Second)
+	rejectSharedWindow(m, id, "claude-sonnet-5-5", "7d", 25*time.Second)
+	m.MarkResult(context.Background(), Result{AuthID: id, Provider: "claude", Model: "claude-sonnet-5-5", Error: &Error{HTTPStatus: 429, Message: "requests per minute"}})
+	reconcileUsage(m, id, recoveredUsage(), time.Now().Add(time.Second))
+	if blockedForModel(m, id, "claude-opus-5-5") {
+		t.Fatal("the recovered model is still blocked")
+	}
+	if !blockedForModel(m, id, "claude-sonnet-5-5") {
+		t.Fatal("usage cleared a later ordinary rate limit")
 	}
 }
