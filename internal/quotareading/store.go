@@ -16,6 +16,9 @@ const maxResetRollForward = 100 * 365 * 24 * time.Hour
 type Store struct {
 	mu      sync.RWMutex
 	entries map[string]*storeEntry
+	// resets is when each credential's quota last started over (Reset): nothing
+	// observed at or before it describes the credential any more.
+	resets map[string]time.Time
 }
 
 type storeEntry struct {
@@ -27,7 +30,7 @@ var defaultStore = NewStore()
 
 // NewStore returns an empty store.
 func NewStore() *Store {
-	return &Store{entries: make(map[string]*storeEntry)}
+	return &Store{entries: make(map[string]*storeEntry), resets: make(map[string]time.Time)}
 }
 
 // Default returns the process-wide store.
@@ -81,11 +84,52 @@ func (s *Store) Replace(authID, provider string, ws []Window, observedAt time.Ti
 	}
 }
 
+// Reset records that the quota of authID started over at at: a reset its
+// provider granted, or a cooldown an operator cleared. Every stored window
+// observed at or before at is removed, later Puts of such windows are ignored,
+// and Effective ignores header signals observed at or before at, so a reading
+// from before the reset can neither gate nor rank the credential. The
+// credential has no reading until a newer observation arrives. An earlier at
+// than the one recorded changes nothing.
+func (s *Store) Reset(authID string, at time.Time) {
+	if s == nil || authID == "" || at.IsZero() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !at.After(s.resets[authID]) {
+		return
+	}
+	s.resets[authID] = at
+	entry := s.entries[authID]
+	if entry == nil {
+		return
+	}
+	for id, stored := range entry.windows {
+		if !stored.ObservedAt.After(at) {
+			delete(entry.windows, id)
+		}
+	}
+	if len(entry.windows) == 0 {
+		delete(s.entries, authID)
+	}
+}
+
+// supersededLocked reports whether an observation of authID at observedAt is
+// from before the credential's quota last started over. Callers hold s.mu.
+func (s *Store) supersededLocked(authID string, observedAt time.Time) bool {
+	reset, ok := s.resets[authID]
+	return ok && !observedAt.After(reset)
+}
+
 // putLocked implements Put. Callers hold s.mu for writing.
 func (s *Store) putLocked(authID, provider string, ws []Window) {
 	entry := s.entries[authID]
 	for _, window := range ws {
 		if window.ID == "" || math.IsNaN(window.UsedPercent) {
+			continue
+		}
+		if s.supersededLocked(authID, window.ObservedAt) {
 			continue
 		}
 		window.UsedPercent = clampPercent(window.UsedPercent)
@@ -119,7 +163,8 @@ func (s *Store) Get(authID string) Reading {
 	return reading
 }
 
-// Forget removes every reading of authID.
+// Forget removes everything kept for authID: its readings, and when its quota
+// last started over.
 func (s *Store) Forget(authID string) {
 	if s == nil {
 		return
@@ -127,9 +172,12 @@ func (s *Store) Forget(authID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.entries, authID)
+	delete(s.resets, authID)
 }
 
-// Snapshot returns copies of all readings sorted by AuthID.
+// Snapshot returns copies of all readings sorted by AuthID. A credential kept
+// only for when its quota last started over (Reset) is listed without windows,
+// so whoever forgets removed credentials forgets it too.
 func (s *Store) Snapshot() []Reading {
 	if s == nil {
 		return nil
@@ -140,8 +188,24 @@ func (s *Store) Snapshot() []Reading {
 	for authID, entry := range s.entries {
 		readings = append(readings, Reading{AuthID: authID, Provider: entry.provider, Windows: entry.sortedWindows()})
 	}
+	for authID := range s.resets {
+		if s.entries[authID] == nil {
+			readings = append(readings, Reading{AuthID: authID})
+		}
+	}
 	sort.Slice(readings, func(i, j int) bool { return readings[i].AuthID < readings[j].AuthID })
 	return readings
+}
+
+// superseded reports whether an observation of authID at observedAt is from
+// before the credential's quota last started over.
+func (s *Store) superseded(authID string, observedAt time.Time) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.supersededLocked(authID, observedAt)
 }
 
 func (e *storeEntry) sortedWindows() []Window {
@@ -159,7 +223,9 @@ func (e *storeEntry) sortedWindows() []Window {
 // Effective merges the stored windows of authID with the windows parsed from
 // its current header signals. Per window ID the newest ObservedAt wins; on a
 // tie the header window wins, the same newer-or-equal rule Put applies. When
-// provider is empty, the stored provider selects the signal parser.
+// provider is empty, the stored provider selects the signal parser. Signals
+// observed at or before the credential's quota last started over (Reset) are
+// ignored, as the store ignores such windows.
 //
 // The merged windows are then normalized for now: a window whose ResetsAt is
 // set and not after now has already reset, so UsedPercent becomes 0 and
@@ -171,7 +237,10 @@ func Effective(st *Store, authID, provider string, signals map[string]string, si
 		provider = reading.Provider
 	}
 	reading.Provider = provider
-	headerWindows := FromSignals(provider, signals, signalsAt)
+	var headerWindows []Window
+	if !st.superseded(authID, signalsAt) {
+		headerWindows = FromSignals(provider, signals, signalsAt)
+	}
 	if len(headerWindows) > 0 {
 		byID := make(map[string]Window, len(reading.Windows)+len(headerWindows))
 		for _, window := range reading.Windows {

@@ -87,6 +87,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/handlers/management/devyre_oauth_redirect_test.go` | Through `StartOAuthV8`: the default redirects unchanged, the moved ones per provider, every refused value and the `is_webui` combination, a Codex exchange that uses the moved redirect, and a service that cannot move it |
 | `internal/api/handlers/management/devyre_quota_observer.go` | Idle-credential usage poller; also forgets the readings and the focus of removed credentials |
 | `internal/api/handlers/management/devyre_quota_observer_test.go` | Poller scheduling, min-gap, backoff and pruning tests |
+| `internal/api/handlers/management/devyre_quota_reset.go` | `devyreQuotaReset`: a cooldown reset also forgets the credential's readings from before it and takes its cached usage for stale |
+| `internal/api/handlers/management/devyre_quota_reset_test.go` | Through `ResetQuota`: the readings and the rejection's header signals gone, the next usage read sent upstream and recorded, another credential untouched; a usage refresh lifting an account without a 5-hour limit |
 | `internal/api/handlers/management/devyre_routing_config_test.go` | The routing blocks survive `/v8/management` config writes |
 | `internal/api/handlers/management/devyre_routing_focus.go` | `GET`, `PUT` and `DELETE /v8/management/routing/focus`; `SetRoutingFocusStore`; `forgetRemovedFocus` for the observer |
 | `internal/api/handlers/management/devyre_routing_focus_test.go` | Focus endpoints: lookups by ID and file name, replacing per provider, deletes by name and provider, every refusal, only existing credentials listed, the file written, and the observer forgetting removed credentials' focus |
@@ -137,13 +139,14 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/quotareading/codex.go` | Codex header and usage-body parsers |
 | `internal/quotareading/codex_test.go` | Codex parser tests |
 | `internal/quotareading/contract_test.go` | Pins the package API the selector, cache and poller use |
+| `internal/quotareading/devyre_reset_test.go` | `Store.Reset`: what was read before a quota started over is gone and stays out, later readings count, the reset goes with its credential; `ClaudeUsageUnlimited` |
 | `internal/quotareading/evaluate.go` | Gating and urgency (`Evaluate`), headroom (`EvaluateHeadroom`) |
 | `internal/quotareading/evaluate_test.go` | Gating, ranking and headroom tests |
 | `internal/quotareading/helpers_test.go` | Shared test helpers |
 | `internal/quotareading/parse.go` | Shared parsing, `FromUsageBody` and `UsageSnapshot` |
 | `internal/quotareading/parse_test.go` | Parsing tests |
 | `internal/quotareading/reading.go` | Readings model: `Window`, `Kind`, `Reading` |
-| `internal/quotareading/store.go` | Readings store: `Put`, `Replace`, `Effective` |
+| `internal/quotareading/store.go` | Readings store: `Put`, `Replace`, `Reset`, `Effective` |
 | `internal/quotareading/store_test.go` | Store tests |
 | `internal/registry/devyre_catalog_retry.go` | `devyreRefreshLoop`: the remote model catalogs' download at start and then every interval, a failed one tried again after a minute, doubling up to the interval (`devyreCatalogRetry`) |
 | `internal/registry/devyre_catalog_retry_test.go` | The backoff's waits; the loop with a timer the test fires: a failed start retried in a minute, doubled, the interval after a success, the backoff starting over, the loop ending with its context |
@@ -217,6 +220,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `config.example.yaml` | A `devyre:` comment above `disable-control-panel` says the panel is built in, so `disable-auto-update-panel` and `panel-github-repository` have no effect, and `panel-github-repository` names the panel fork; a commented `management.tailnet-auth` block with every setting off; `routing:` documents `expiring-first`, a commented `session-affinity-persist` (whose comment also names `claude-continuity.json`), and the `expiring-first` (gate, headroom, log) and `quota-observation` blocks; `upstream.claude` documents a commented `mcp-alias-secret`. |
 | `go.mod`, `go.sum` | `golang.org/x/net` at least v0.60.0, `golang.org/x/crypto` v0.57.0, `golang.org/x/text` v0.42.0 and `github.com/go-git/go-git/v6` v6.0.0-alpha.5, `github.com/andybalholm/brotli` v1.2.7 and `github.com/klauspost/compress` v1.20.3: the releases that fix GO-2026-6603, -6610, -6611, -6612, -6617, -6629, -6354, -6355, -6213, -6214, -6888 and -6865, which govulncheck found the server reaching. On a conflict take the newer of upstream's version and ours. |
 | `internal/api/handlers/management/api_tools.go` | Three hunks hook the usage cache into `APICall`: a lookup after `auth_index` and `url` are parsed, complete or fail after the upstream call, and a record on success. `/v0` and `/v8` share this handler. |
+| `internal/api/handlers/management/quota.go` | One line in `ResetQuota`, after upstream reset the cooldown: `h.devyreQuotaReset(updated)` forgets the credential's readings from before it (`devyre_quota_reset.go`). |
 | `internal/api/handlers/management/auth_files.go` | `extractCodexIDTokenClaims` also emits `chatgpt_plan_type`, the key T3 Code reads. `listAuthFilesFromDisk` reads through `authseal.ReadFile`, and `buildAuthFileEntryLocked` lists `account_uuid` (`devyreAddAccountUUID`). |
 | `internal/api/handlers/management/auth_files_crud.go` | `DownloadAuthFile` and `buildAuthFromFileData` read through `authseal.ReadFile`, `writeAuthFile` writes through `authseal.WriteFile`. |
 | `internal/api/handlers/management/auth_files_fields.go` | `setSourceAuthFileDisabled` reads and writes through `authseal`, `mergeExistingAuthFileMetadata` and `saveTokenRecord` read through `authseal.ReadFile`. |
@@ -346,6 +350,34 @@ The endpoints need the management key (or passwordless trust) and exist only on 
 - Send the request header `X-CPA-Usage-Cache: refresh` to skip a fresh cached body. It is honored once the last upstream call for that URL is at least 30 seconds old; inside that floor the cache answers.
 - The Claude usage URL with a query string, such as the panel's reset-grant check `?cedar_ember=1&skip_spend=1`, is cached under its full URL for 5 minutes, for up to 4 distinct query strings per credential. Further query strings are not cached: each request for one goes upstream (`miss`). Either way the call counts toward the poller's 10-minute Claude gap and shares the credential's 429 backoff, because Anthropic limits the endpoint per account whatever the query.
 - A successful `POST`, `PUT`, `PATCH` or `DELETE` through `api-call` for a credential, such as a redeemed reset, makes that credential's cached responses stale, so the next read shows the new state. A Claude backoff still holds.
+
+### A cooldown reset forgets the readings before it
+
+`POST /v8/management/routing/cooldown/reset` (and `/v0/management/reset-quota`) with
+`{"auth_index": "..."}` says a credential's quota started over: a client redeemed a reset its
+provider granted, or an operator cleared a cooldown they know to be wrong. Upstream clears
+the conductor's cooldown, so requests may go to the credential again. The fork also drops
+what it read of the credential's quota before (`devyre_quota_reset.go`,
+`quotareading.Store.Reset`):
+
+- every stored window observed at or before the reset, and any such window recorded later (a
+  usage read that was on its way);
+- the header signals of the credential's last response, which for a rejected credential read
+  `rejected` until its next response: `quotareading.Effective` ignores signals observed at or
+  before the reset;
+- its cached usage, as a write through `api-call` does, so the next usage read goes upstream.
+
+Without this the selector kept gating the credential on a window that read exhausted, and
+`quota-readings` kept listing it at its limit, until it served a request or its usage was
+read again, which Claude may refuse for minutes after a reset (the usage endpoint is rate
+limited per account). The credential has no reading until the next observation, and one
+without readings has headroom. The reset restores no quota at the provider: a credential
+that is still limited there answers 429 to its next request and cools down again.
+
+A cooldown lasts until its deadline, in memory unless `save-cooldown-status` keeps it across
+restarts, and nothing asks the provider meanwhile. So a client that redeems a reset calls this
+endpoint; usage recovery (below) covers a reset redeemed elsewhere and a restored plan, once a
+fresh usage response arrives.
 
 ### Claude subscription recovery
 

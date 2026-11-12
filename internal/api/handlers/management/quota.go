@@ -60,6 +60,8 @@ func (h *Handler) ResetQuota(c *gin.Context) {
 		return
 	}
 	updated.EnsureIndex()
+	// devyre: what was read of its quota before no longer describes it (devyre_quota_reset.go).
+	h.devyreQuotaReset(updated)
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":     "ok",
