@@ -98,6 +98,70 @@ func codexUsageWindowsFrom(root gjson.Result, observedAt time.Time) []Window {
 	return windows
 }
 
+// CodexUsageHasRoom reports whether a GET /backend-api/wham/usage body says the
+// account is at none of its limits, so that a request ChatGPT rejected for a
+// usage limit before would be served now. That takes all of:
+//
+//   - rate_limit lists at least one window, is not limit_reached and not
+//     disallowed, and every window it lists is below 100 percent used;
+//   - every entry of additional_rate_limits (a model's own limit, such as
+//     GPT-5.3-Codex-Spark's) says the same of its own rate_limit, where it has
+//     one. Which limit rejected a request is not known afterwards, so one of
+//     them still reached leaves the question open.
+//
+// A window without a usable used_percent, a body that is not the endpoint's
+// usage shape, and anything malformed is no evidence of room. The code-review
+// limit and the credits take no part: they reject no model request.
+func CodexUsageHasRoom(body []byte) bool {
+	root, err := parseUsageObject(body, "codex")
+	if err != nil {
+		return false
+	}
+	rateLimit := jsonFirst(root, "rate_limit", "rateLimit")
+	if !rateLimit.IsObject() {
+		return false
+	}
+	if windows, ok := codexRateLimitRoom(rateLimit); !ok || windows == 0 {
+		return false
+	}
+	room := true
+	jsonFirst(root, "additional_rate_limits", "additionalRateLimits").ForEach(func(_, entry gjson.Result) bool {
+		limit := jsonFirst(entry, "rate_limit", "rateLimit")
+		if !limit.IsObject() {
+			// The entry itself holds the limit where it is keyed by its name (the
+			// websocket's shape); one with no limit of its own lists nothing.
+			limit = entry
+		}
+		if limit.IsObject() {
+			_, room = codexRateLimitRoom(limit)
+		}
+		return room
+	})
+	return room
+}
+
+// codexRateLimitRoom reads one rate_limit object: how many windows it lists,
+// and whether it leaves room: not limit_reached, not disallowed, and every
+// listed window with a used_percent below 100.
+func codexRateLimitRoom(rateLimit gjson.Result) (windows int, ok bool) {
+	if jsonFirst(rateLimit, "limit_reached", "limitReached").Type == gjson.True ||
+		jsonFirst(rateLimit, "allowed").Type == gjson.False {
+		return 0, false
+	}
+	for _, id := range codexWindowIDs {
+		entry := jsonFirst(rateLimit, id+"_window", id+"Window")
+		if !entry.IsObject() {
+			continue
+		}
+		used, known := usedPercentValue(jsonFinite(jsonFirst(entry, "used_percent", "usedPercent")))
+		if !known || used >= 100 {
+			return windows, false
+		}
+		windows++
+	}
+	return windows, true
+}
+
 // codexWindow classifies a Codex window by length: up to 24 hours gates, longer
 // ranks. With an unknown length, primary is the short and secondary the long window.
 func codexWindow(id string, used float64, resetsAt time.Time, length time.Duration, observedAt time.Time, source Source) Window {

@@ -83,6 +83,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/devyre_tailnet_auth_test.go` | Full-stack `tailnet-auth` tests through the real server and config loader: session endpoint, token-bearing routes, CORS, proxy principal, `/v1/ws`, framing, the tailnet name on the API port, the rendered proxy debug lines |
 | `internal/api/handlers/management/devyre_auth_files.go` | `devyreAddAccountUUID`: the auth-file listing's `account_uuid` |
 | `internal/api/handlers/management/devyre_auth_seal_test.go` | With a key, through the routes: an upload stored sealed, the listing's `account_uuid`, a download answering the JSON, a status change written sealed |
+| `internal/api/handlers/management/devyre_codex_recovery_test.go` | Through `APICall` and the poller: a fresh usage response lifts a ChatGPT account's usage-limit hold; one that shows a limit reached anywhere, a cached one and a malformed one do not; a per-minute rate limit stands; another account's usage lifts nothing |
 | `internal/api/handlers/management/devyre_oauth_redirect.go` | `redirect_port` on the Claude and Codex OAuth starts: parsing, the refusals, and the redirect-aware authorize URL and exchange |
 | `internal/api/handlers/management/devyre_oauth_redirect_test.go` | Through `StartOAuthV8`: the default redirects unchanged, the moved ones per provider, every refused value and the `is_webui` combination, a Codex exchange that uses the moved redirect, and a service that cannot move it |
 | `internal/api/handlers/management/devyre_quota_observer.go` | Idle-credential usage poller; also forgets the readings and the focus of removed credentials |
@@ -136,7 +137,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/managementasset/devyre_updater_test.go` | Pins upstream's dormant download source to the panel fork, never the stock panel |
 | `internal/quotareading/claude.go` | Claude header and usage-body parsers; the shared windows a usage body reports the account does not have (`ClaudeUsageUnlimited`) |
 | `internal/quotareading/claude_test.go` | Claude parser tests |
-| `internal/quotareading/codex.go` | Codex header and usage-body parsers |
+| `internal/quotareading/codex.go` | Codex header and usage-body parsers; whether a usage body shows the account at none of its limits (`CodexUsageHasRoom`) |
 | `internal/quotareading/codex_test.go` | Codex parser tests |
 | `internal/quotareading/contract_test.go` | Pins the package API the selector, cache and poller use |
 | `internal/quotareading/devyre_reset_test.go` | `Store.Reset`: what was read before a quota started over is gone and stays out, later readings count, the reset goes with its credential; `ClaudeUsageUnlimited` |
@@ -181,6 +182,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/api/handlers/openai/devyre_responses_interrupt.go` | `devyreInterruptResponse`: the interrupt through the Codex executor, or answered locally, never with an error; the connection's live credential check |
 | `sdk/api/handlers/openai/devyre_responses_interrupt_test.go` | In both modes: what Codex does on a steer (the interrupt unchanged on the upstream socket, its zero-output end passed through, the next create on the same socket, no error); interrupts before any response, after one ended and for an unknown id, answered without reaching upstream; the disabled-credential refusal |
 | `sdk/auth/devyre_filestore_seal_test.go` | The store with a key: a sign-in's file and a refresh's written sealed and listed back, an unchanged save not written, another key's file replaced by a save, nothing sealed listed without the key |
+| `sdk/cliproxy/auth/devyre_codex_recovery_test.go` | ChatGPT recovery lifts the credential-wide usage-limit block for every model, several models rejected together in either order, and a model-scoped usage limit; it needs new evidence and a response with room, keeps a per-minute rate limit, a model at capacity and a rejection that raced the usage call, and each provider's response lifts its own holds alone |
 | `sdk/cliproxy/auth/devyre_focus.go` | `devyreFocusTakesOver`: whether session affinity gives a bound session up to a usable focus |
 | `sdk/cliproxy/auth/devyre_focus_test.go` | The focus in the selector (urgency, 5h, 7d and model-scoped gates, tiers, other providers, ends, rotation, the `focus` log reason) and under session affinity (explicit sessions, the fallback key, LCP, the log line, through the manager) |
 | `sdk/cliproxy/auth/devyre_placement.go` | What `SessionAffinitySelector` tells its fallback about a pick (new placement or failover, the credential left, the active bindings), the bindings a credential failure suspended, whether a subagent joins its parent's credential, and `CarrySessionBindings` for a rebuilt selector |
@@ -194,7 +196,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/devyre_transient_soft.go` | What a transient failure does to its credential under session affinity with expiring-first placement: the streaks per credential and model (`devyreTransientStore`), the soft first minute `MarkResult` asks about (`devyreSoftTransient`), and putting the session of a failed failover attempt back on its credential (`devyreKeepBoundSession`) |
 | `sdk/cliproxy/auth/devyre_transient_soft_test.go` | The streaks (soft for a minute, a quiet minute, a success, the bound size); through the conductor with expiring-first placement: one request's 529 leaves the credential's other sessions on it while new ones go elsewhere until it answers, a lone credential answering its client's retry, a session that tried every account kept where its cache is, a stream's session, a minute of failures cooling as upstream, round-robin placement unchanged; the selector leaving failing credentials out and a failing focus taking no sessions over |
 | `sdk/cliproxy/auth/devyre_transient_test.go` | Through the conductor with a fake executor and wait: each transient failure kind, the bounded retries, credential failures, sessionless and new sessions, a credential that cooled down, a cancelled request, count tokens, a stream's start, its bootstrap and output already sent |
-| `sdk/cliproxy/auth/devyre_usage_recovery.go` | `ReconcileClaudeUsage`: a fresh, complete Claude usage response lifts the subscription cooldowns it contradicts |
+| `sdk/cliproxy/auth/devyre_usage_recovery.go` | `ReconcileClaudeUsage` and `ReconcileCodexUsage`: a fresh, complete usage response lifts the quota cooldowns it contradicts |
 | `sdk/cliproxy/auth/devyre_usage_recovery_test.go` | Recovery lifts a rejected subscription for every model, an account without a 5-hour limit, and several models rejected together in either order; it needs new, complete evidence, and keeps ordinary rate limits, unrelated model failures and a rejection that raced the usage call |
 | `sdk/cliproxy/auth/selector_expiring_first.go` | The `expiring-first` selector, its placement order, the focus, and leaving out credentials that failed transiently a moment ago |
 | `sdk/cliproxy/auth/selector_expiring_first_test.go` | Selector tests, including session affinity |
@@ -376,8 +378,8 @@ that is still limited there answers 429 to its next request and cools down again
 
 A cooldown lasts until its deadline, in memory unless `save-cooldown-status` keeps it across
 restarts, and nothing asks the provider meanwhile. So a client that redeems a reset calls this
-endpoint; usage recovery (below) covers a reset redeemed elsewhere and a restored plan, once a
-fresh usage response arrives.
+endpoint; usage recovery (below, for Claude and for ChatGPT) covers a reset redeemed elsewhere
+and a restored plan, once a fresh usage response arrives.
 
 ### Claude subscription recovery
 
@@ -413,6 +415,39 @@ Ordinary rate limits, billing, authentication and unrelated model errors are pre
 A model's new 429 drops its previous response's passive signals before observing its own:
 older subscription headers must not make a later per-minute limit look recoverable.
 The credential's passive signals continue to feed the usage meters.
+
+### ChatGPT usage recovery
+
+ChatGPT refuses a request of an account at a limit with the error type `usage_limit_reached`,
+and upstream then blocks the whole credential until the reset that refusal named (the requested
+model alone under `upstream.codex.model-level-cooling`). Nothing lifted that block before its
+deadline: a reset credit redeemed in the ChatGPT app or in Codex, which starts the limits over
+at once, left the credential out of use until the old time, or the next start. The usage cache
+showed the new usage meanwhile.
+
+A fresh, complete `/wham/usage` response now lifts it (`ReconcileCodexUsage`), from a management
+refresh or the idle poller, which reads an idle ChatGPT credential every 5 minutes, when the
+response shows the account at none of its limits (`quotareading.CodexUsageHasRoom`):
+
+- `rate_limit` lists at least one window, is not `limit_reached` and not disallowed, and every
+  window it lists is below 100 percent used;
+- every entry of `additional_rate_limits`, a model's own limit such as GPT-5.3-Codex-Spark's,
+  says the same of its own `rate_limit`. Which limit refused a request is not known afterwards
+  (the refusal names none), so one of them still reached leaves the block: lifting it on the
+  main windows alone would let the next request for that model block the credential again.
+
+A window without a usable `used_percent`, a body that is not the endpoint's shape and a
+malformed one are no evidence. The code-review limit and the credits take no part.
+
+The evidence of the block is a model whose own last result was that refusal (a 429 whose body
+names `usage_limit_reached`, as `isCodexUsageLimitError` reads it), recorded before the usage
+call started, while its cooldown still runs. The block, that model's cooldown and the states
+the block was propagated to are lifted; when several models were refused as the account ran
+out, each is. A later per-minute rate limit, a model at capacity and any other failure of a
+model replace that evidence and stand: the account's usage says nothing of them. The guards
+are Claude's: the credential must not have changed since the usage call started, a cached or
+stale response lifts nothing, and a disabled credential or one whose sign-in failed stays as it
+is. Each provider's response lifts its own credentials alone.
 
 ## How to run
 

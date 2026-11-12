@@ -656,8 +656,15 @@ func (c *usageCache) recordReadings(req usageRequest, body string, now, started 
 		return
 	}
 	c.store().Replace(req.authID, req.provider, windows, now)
-	if req.target.endpoint == usageEndpointClaudeUsage && req.manager != nil {
+	if req.manager == nil {
+		return
+	}
+	// A fresh, complete usage body can lift a cooldown before its old deadline.
+	switch req.target.endpoint {
+	case usageEndpointClaudeUsage:
 		req.manager.ReconcileClaudeUsage(req.observed, windows, quotareading.ClaudeUsageUnlimited([]byte(body)), started)
+	case usageEndpointCodexUsage:
+		req.manager.ReconcileCodexUsage(req.observed, quotareading.CodexUsageHasRoom([]byte(body)), started)
 	}
 }
 

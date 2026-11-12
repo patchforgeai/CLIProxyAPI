@@ -247,6 +247,59 @@ func TestQuotaReadingFromCodexUsage(t *testing.T) {
 	}
 }
 
+func TestQuotaReadingCodexUsageHasRoom(t *testing.T) {
+	const room = `{"used_percent": 12, "limit_window_seconds": 18000, "reset_after_seconds": 600}`
+	const spent = `{"used_percent": 100, "limit_window_seconds": 18000, "reset_after_seconds": 600}`
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"the panel's fixture: a weekly window with room, a model's own limit with room", codexUsageFixture, true},
+		{"both windows with room", `{"rate_limit": {"primary_window": ` + room + `, "secondary_window": ` + room + `}}`, true},
+		{"camel case", `{"rateLimit": {"allowed": true, "limitReached": false, "primaryWindow": {"usedPercent": 3}}}`, true},
+		{"a window at its limit", `{"rate_limit": {"primary_window": ` + room + `, "secondary_window": ` + spent + `}}`, false},
+		{"over its limit", `{"rate_limit": {"primary_window": {"used_percent": 140}}}`, false},
+		{"limit reached", `{"rate_limit": {"limit_reached": true, "primary_window": ` + room + `}}`, false},
+		{"not allowed", `{"rate_limit": {"allowed": false, "primary_window": ` + room + `}}`, false},
+		{"no window listed", `{"rate_limit": {"allowed": true, "limit_reached": false, "primary_window": null}}`, false},
+		{"a window without its usage", `{"rate_limit": {"primary_window": {"limit_window_seconds": 18000}}}`, false},
+		{"a window with a usage that is no number", `{"rate_limit": {"primary_window": {"used_percent": 1e400}}}`, false},
+		{"no rate limit", `{"plan_type": "free", "rate_limit": null}`, false},
+		{
+			"a model's own limit reached",
+			`{"rate_limit": {"primary_window": ` + room + `}, "additional_rate_limits": [{"limit_name": "GPT-5.3-Codex-Spark", "rate_limit": {"limit_reached": true, "primary_window": ` + room + `}}]}`,
+			false,
+		},
+		{
+			"a model's own window at its limit, the second listed",
+			`{"rate_limit": {"primary_window": ` + room + `}, "additional_rate_limits": [{"limit_name": "a", "rate_limit": {"primary_window": ` + room + `}}, {"limit_name": "b", "rate_limit": {"primary_window": ` + spent + `}}]}`,
+			false,
+		},
+		{
+			"a model without a limit of its own reported",
+			`{"rate_limit": {"primary_window": ` + room + `}, "additional_rate_limits": [{"limit_name": "a", "rate_limit": null}]}`,
+			true,
+		},
+		{
+			"additional limits keyed by name, as the websocket shapes them",
+			`{"rate_limit": {"primary_window": ` + room + `}, "additionalRateLimits": {"GPT-5.3-Codex-Spark": {"allowed": true, "limit_reached": true}}}`,
+			false,
+		},
+		{"the code-review limit takes no part", `{"rate_limit": {"primary_window": ` + room + `}, "code_review_rate_limit": {"limit_reached": true, "primary_window": ` + spent + `}}`, true},
+		{"not an object", `[1, 2]`, false},
+		{"malformed", `{"rate_limit": `, false},
+		{"empty", ``, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CodexUsageHasRoom([]byte(tc.body)); got != tc.want {
+				t.Fatalf("CodexUsageHasRoom = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestQuotaReadingFromCodexUsageRejectsInvalidBodies(t *testing.T) {
 	for _, body := range []string{``, `{`, `[1,2]`, `42`} {
 		if got, err := FromCodexUsage([]byte(body), testNow); err == nil {

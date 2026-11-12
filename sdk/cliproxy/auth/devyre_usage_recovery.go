@@ -12,6 +12,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
+	"github.com/tidwall/gjson"
 )
 
 // claudeSharedWindows are the windows every model of a Claude subscription
@@ -30,51 +31,30 @@ type claudeUsage struct {
 	unlimited []string
 }
 
-// ReconcileClaudeUsage lifts only subscription-window cooldowns contradicted by
-// a complete, fresh usage response. windows are the windows it lists and
-// unlimited the shared ones it reports the account does not have. started is
-// the upstream call's start, not its completion: a response racing a newer
-// rejection must never erase it. Cached responses, profile reads and partial
-// usage variants must not call it.
-func (m *Manager) ReconcileClaudeUsage(observed *Auth, windows []quotareading.Window, unlimited []string, started time.Time) {
-	usage := claudeUsage{windows: windows, unlimited: unlimited}
-	if m == nil || observed == nil || started.IsZero() || !usage.healthy("") {
+// reconcileUsage lifts the quota cooldowns of the registered credential behind
+// observed that a fresh usage response contradicts, and publishes the change
+// to both selection paths and the persisted cooldowns. lift decides under the
+// manager's lock: it clears what the response contradicts and reports whether
+// it cleared anything. started is the upstream call's start, not its
+// completion: a response racing a newer rejection must never erase it, so the
+// credential must not have changed since observed was read, even on the same
+// clock tick. A disabled credential and one whose sign-in failed stay as they
+// are.
+func (m *Manager) reconcileUsage(observed *Auth, provider string, started time.Time, lift func(auth *Auth, now time.Time) bool) {
+	if m == nil || observed == nil || started.IsZero() {
 		return
 	}
 	authID := observed.ID
 	now := time.Now()
 	m.mu.Lock()
 	auth := m.auths[authID]
-	if auth == nil || auth.Provider != "claude" || auth.Disabled || auth.Status == StatusDisabled ||
+	if auth == nil || auth.Provider != provider || auth.Disabled || auth.Status == StatusDisabled ||
 		hasUnauthorizedAuthFailure(auth) || !auth.UpdatedAt.Before(started) ||
 		auth.Generation != observed.Generation || auth.RegistrationEpoch != observed.RegistrationEpoch {
 		m.mu.Unlock()
 		return
 	}
-	shared := auth.Quota.Reason == "credential_quota" && quotaErrorOrNil(auth.LastError) &&
-		claudeSharedQuotaRecovered(auth, usage, started, now)
-	sharedDeadline := auth.Quota.NextRecoverAt
-	changed := shared
-	if shared {
-		applyCooldownFields(&auth.Quota, QuotaState{})
-		auth.NextRetryAfter = time.Time{}
-		auth.Unavailable = false
-	}
-	for model, state := range auth.ModelStates {
-		if state == nil || state.Status == StatusDisabled || !state.UpdatedAt.Before(started) ||
-			!quotaErrorOrNil(state.LastError) || !usage.healthy(model) {
-			continue
-		}
-		// A shared rejection is also propagated to models that made no request.
-		// Their earlier, independent deadlines and non-quota errors still stand.
-		propagated := shared && state.LastError == nil && state.Quota.Reason == "credential_quota" &&
-			state.Quota.NextRecoverAt.Equal(sharedDeadline) && state.NextRetryAfter.Equal(sharedDeadline)
-		if propagated || claudeRejectionRecovered(state, usage, started, model, now) {
-			resetModelState(state, now)
-			changed = true
-		}
-	}
-	if !changed {
+	if !lift(auth, now) {
 		m.mu.Unlock()
 		return
 	}
@@ -107,6 +87,134 @@ func (m *Manager) ReconcileClaudeUsage(observed *Auth, windows []quotareading.Wi
 		m.scheduler.upsertAuth(snapshot)
 	}
 	m.persistCooldownStates(context.Background())
+}
+
+// liftSharedQuota clears the credential-wide block and returns the deadline it
+// held, by which the states it was propagated to are told (propagatedQuota).
+func liftSharedQuota(auth *Auth) time.Time {
+	deadline := auth.Quota.NextRecoverAt
+	applyCooldownFields(&auth.Quota, QuotaState{})
+	auth.NextRetryAfter = time.Time{}
+	auth.Unavailable = false
+	return deadline
+}
+
+// propagatedQuota reports whether a model's state holds nothing but the
+// credential-wide block a rejection of another model wrote over it: it made no
+// rejected request of its own, and its deadline is the block's. Its earlier,
+// independent deadlines and its own errors still stand.
+func propagatedQuota(state *ModelState, sharedDeadline time.Time) bool {
+	return state.LastError == nil && state.Quota.Reason == "credential_quota" &&
+		state.Quota.NextRecoverAt.Equal(sharedDeadline) && state.NextRetryAfter.Equal(sharedDeadline)
+}
+
+// ReconcileClaudeUsage lifts only subscription-window cooldowns contradicted by
+// a complete, fresh usage response. windows are the windows it lists and
+// unlimited the shared ones it reports the account does not have. started is
+// the upstream call's start (reconcileUsage). Cached responses, profile reads
+// and partial usage variants must not call it.
+func (m *Manager) ReconcileClaudeUsage(observed *Auth, windows []quotareading.Window, unlimited []string, started time.Time) {
+	usage := claudeUsage{windows: windows, unlimited: unlimited}
+	if !usage.healthy("") {
+		return
+	}
+	m.reconcileUsage(observed, "claude", started, func(auth *Auth, now time.Time) bool {
+		shared := auth.Quota.Reason == "credential_quota" && quotaErrorOrNil(auth.LastError) &&
+			claudeSharedQuotaRecovered(auth, usage, started, now)
+		changed := shared
+		var sharedDeadline time.Time
+		if shared {
+			sharedDeadline = liftSharedQuota(auth)
+		}
+		for model, state := range auth.ModelStates {
+			if state == nil || state.Status == StatusDisabled || !state.UpdatedAt.Before(started) ||
+				!quotaErrorOrNil(state.LastError) || !usage.healthy(model) {
+				continue
+			}
+			// A shared rejection is also propagated to models that made no request.
+			if (shared && propagatedQuota(state, sharedDeadline)) || claudeRejectionRecovered(state, usage, started, model, now) {
+				resetModelState(state, now)
+				changed = true
+			}
+		}
+		return changed
+	})
+}
+
+// ReconcileCodexUsage lifts the usage-limit cooldowns of a ChatGPT account
+// after a complete, fresh usage response: call it for such a response only,
+// never for a cached one. room is whether the response reports the account at
+// none of its limits (quotareading.CodexUsageHasRoom); without it nothing is
+// lifted. started is the upstream call's start (reconcileUsage).
+//
+// ChatGPT rejects a request of an account at a limit with the error type
+// usage_limit_reached, which blocks the whole credential until the reset the
+// rejection named (unless upstream.codex.model-level-cooling scopes it to the
+// model). A model whose own last result was such a rejection is the evidence
+// of the block: the block and that model's cooldown are lifted, with the states
+// the block was propagated to. A later per-minute rate limit, a model at
+// capacity and any other failure of a model replace that evidence and stand, as
+// they say nothing of the account's usage.
+func (m *Manager) ReconcileCodexUsage(observed *Auth, room bool, started time.Time) {
+	if !room {
+		return
+	}
+	m.reconcileUsage(observed, "codex", started, func(auth *Auth, now time.Time) bool {
+		shared := false
+		if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && quotaErrorOrNil(auth.LastError) {
+			for _, state := range auth.ModelStates {
+				if codexUsageLimitRejected(state, started, now) {
+					shared = true
+					break
+				}
+			}
+		}
+		changed := shared
+		var sharedDeadline time.Time
+		if shared {
+			sharedDeadline = liftSharedQuota(auth)
+		}
+		for _, state := range auth.ModelStates {
+			if state == nil || state.Status == StatusDisabled {
+				continue
+			}
+			if (shared && propagatedQuota(state, sharedDeadline)) || codexUsageLimitRejected(state, started, now) {
+				resetModelState(state, now)
+				changed = true
+			}
+		}
+		return changed
+	})
+}
+
+// codexUsageLimitRejected reports whether the model's own last result was
+// ChatGPT's usage-limit rejection, recorded before the usage call started, and
+// its cooldown still runs. That holds for a state a later rejection of another
+// model wrote the credential-wide block over too: its own rejection is still
+// its last error.
+func codexUsageLimitRejected(state *ModelState, started, now time.Time) bool {
+	if state == nil || !codexUsageLimitError(state.LastError) || !state.UpdatedAt.Before(started) {
+		return false
+	}
+	quota := state.Quota
+	return quota.Exceeded && (quota.Reason == "quota" || quota.Reason == "credential_quota") &&
+		quota.NextRecoverAt.After(now)
+}
+
+// codexUsageLimitError reports whether err is ChatGPT's refusal of a request
+// for the account's usage limit: a 429 whose body names the type
+// usage_limit_reached, as the Codex executor reads it (isCodexUsageLimitError).
+// A per-minute rate limit and a model at capacity are 429s of another type.
+func codexUsageLimitError(err *Error) bool {
+	if err == nil || err.HTTPStatus != http.StatusTooManyRequests || !gjson.Valid(err.Message) {
+		return false
+	}
+	for _, path := range []string{"error.type", "type"} {
+		if strings.EqualFold(strings.TrimSpace(gjson.Get(err.Message, path).String()), "usage_limit_reached") {
+			return true
+		}
+	}
+	return false
 }
 
 func quotaErrorOrNil(err *Error) bool {
