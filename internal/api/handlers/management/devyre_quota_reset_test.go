@@ -4,12 +4,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/quotareading"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	log "github.com/sirupsen/logrus"
 )
 
 const exhaustedClaudeUsage = `{"five_hour":{"utilization":20,"resets_at":"2099-01-01T00:00:00Z"},"seven_day":{"utilization":100,"resets_at":"2099-01-01T00:00:00Z"}}`
@@ -99,5 +101,55 @@ func TestCooldownResetLeavesOtherCredentialsAlone(t *testing.T) {
 	}
 	if result := hs.get(t, other, path); result.label() != usageCacheHit || hs.upstream.callCount(path) != calls {
 		t.Fatalf("the other credential's usage: label %q, %d upstream calls, want a hit and %d", result.label(), hs.upstream.callCount(path), calls)
+	}
+}
+
+// logMessages collects the messages the standard logger writes during a test.
+type logMessages struct {
+	mu       sync.Mutex
+	messages []string
+}
+
+func (l *logMessages) Levels() []log.Level { return log.AllLevels }
+
+func (l *logMessages) Fire(entry *log.Entry) error {
+	l.mu.Lock()
+	l.messages = append(l.messages, entry.Message)
+	l.mu.Unlock()
+	return nil
+}
+
+// with returns the messages that hold every part.
+func (l *logMessages) with(parts ...string) []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var matched []string
+	for _, message := range l.messages {
+		holds := true
+		for _, part := range parts {
+			holds = holds && strings.Contains(message, part)
+		}
+		if holds {
+			matched = append(matched, message)
+		}
+	}
+	return matched
+}
+
+// The log says that a cooldown reset put the credential back in use: a hold
+// that ends before its time is otherwise not told from one nobody touched.
+func TestCooldownResetIsSaidInTheLog(t *testing.T) {
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	blockUsageAccount(t, hs)
+	said := &logMessages{}
+	logger := log.StandardLogger()
+	previous := logger.ReplaceHooks(make(log.LevelHooks))
+	logger.AddHook(said)
+	t.Cleanup(func() { logger.ReplaceHooks(previous) })
+
+	resetCooldown(t, hs, hs.claude)
+
+	if lines := said.with("quota: back in use", "provider=claude", "by=reset"); len(lines) != 1 {
+		t.Fatalf("lines for the reset = %q, want one", lines)
 	}
 }

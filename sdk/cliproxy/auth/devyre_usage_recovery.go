@@ -33,14 +33,16 @@ type claudeUsage struct {
 
 // reconcileUsage lifts the quota cooldowns of the registered credential behind
 // observed that a fresh usage response contradicts, and publishes the change
-// to both selection paths and the persisted cooldowns. lift decides under the
-// manager's lock: it clears what the response contradicts and reports whether
-// it cleared anything. started is the upstream call's start, not its
-// completion: a response racing a newer rejection must never erase it, so the
-// credential must not have changed since observed was read, even on the same
-// clock tick. A disabled credential and one whose sign-in failed stay as they
-// are.
-func (m *Manager) reconcileUsage(observed *Auth, provider string, started time.Time, lift func(auth *Auth, now time.Time) bool) {
+// to both selection paths and the persisted cooldowns. room is whether the
+// response shows room at every limit; without it nothing is lifted. lift
+// decides under the manager's lock: it clears what the response contradicts
+// and reports whether it cleared anything. started is the upstream call's
+// start, not its completion: a response racing a newer rejection must never
+// erase it, so the credential must not have changed since observed was read,
+// even on the same clock tick. A disabled credential and one whose sign-in
+// failed stay as they are. The log says when a hold is lifted, and why one a
+// limit still runs for was kept (devyre_quota_log.go).
+func (m *Manager) reconcileUsage(observed *Auth, provider string, room bool, started time.Time, lift func(auth *Auth, now time.Time) bool) {
 	if m == nil || observed == nil || started.IsZero() {
 		return
 	}
@@ -49,13 +51,27 @@ func (m *Manager) reconcileUsage(observed *Auth, provider string, started time.T
 	m.mu.Lock()
 	auth := m.auths[authID]
 	if auth == nil || auth.Provider != provider || auth.Disabled || auth.Status == StatusDisabled ||
-		hasUnauthorizedAuthFailure(auth) || !auth.UpdatedAt.Before(started) ||
-		auth.Generation != observed.Generation || auth.RegistrationEpoch != observed.RegistrationEpoch {
+		hasUnauthorizedAuthFailure(auth) {
 		m.mu.Unlock()
 		return
 	}
-	if !lift(auth, now) {
+	kept := ""
+	switch {
+	case !room:
+		kept = quotaKeptNoRoom
+	case !auth.UpdatedAt.Before(started) || auth.Generation != observed.Generation ||
+		auth.RegistrationEpoch != observed.RegistrationEpoch:
+		kept = quotaKeptChanged
+	case !lift(auth, now):
+		kept = quotaKeptNoEvidence
+	}
+	if kept != "" {
+		var held *Auth
+		if quotaHoldRuns(auth, now) {
+			held = auth.Clone()
+		}
 		m.mu.Unlock()
+		devyreLogQuotaKept(held, kept, now)
 		return
 	}
 	// Drop the aggregate of the model quotas we just cleared before rebuilding it.
@@ -87,6 +103,7 @@ func (m *Manager) reconcileUsage(observed *Auth, provider string, started time.T
 		m.scheduler.upsertAuth(snapshot)
 	}
 	m.persistCooldownStates(context.Background())
+	DevyreLogQuotaLifted(snapshot, "usage")
 }
 
 // liftSharedQuota clears the credential-wide block and returns the deadline it
@@ -115,10 +132,7 @@ func propagatedQuota(state *ModelState, sharedDeadline time.Time) bool {
 // and partial usage variants must not call it.
 func (m *Manager) ReconcileClaudeUsage(observed *Auth, windows []quotareading.Window, unlimited []string, started time.Time) {
 	usage := claudeUsage{windows: windows, unlimited: unlimited}
-	if !usage.healthy("") {
-		return
-	}
-	m.reconcileUsage(observed, "claude", started, func(auth *Auth, now time.Time) bool {
+	m.reconcileUsage(observed, "claude", usage.healthy(""), started, func(auth *Auth, now time.Time) bool {
 		shared := auth.Quota.Reason == "credential_quota" && quotaErrorOrNil(auth.LastError) &&
 			claudeSharedQuotaRecovered(auth, usage, started, now)
 		changed := shared
@@ -156,10 +170,7 @@ func (m *Manager) ReconcileClaudeUsage(observed *Auth, windows []quotareading.Wi
 // capacity and any other failure of a model replace that evidence and stand, as
 // they say nothing of the account's usage.
 func (m *Manager) ReconcileCodexUsage(observed *Auth, room bool, started time.Time) {
-	if !room {
-		return
-	}
-	m.reconcileUsage(observed, "codex", started, func(auth *Auth, now time.Time) bool {
+	m.reconcileUsage(observed, "codex", room, started, func(auth *Auth, now time.Time) bool {
 		shared := false
 		if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && quotaErrorOrNil(auth.LastError) {
 			for _, state := range auth.ModelStates {

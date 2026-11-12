@@ -188,6 +188,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/devyre_placement.go` | What `SessionAffinitySelector` tells its fallback about a pick (new placement or failover, the credential left, the active bindings), the bindings a credential failure suspended, whether a subagent joins its parent's credential, and `CarrySessionBindings` for a rebuilt selector |
 | `sdk/cliproxy/auth/devyre_placement_test.go` | Stay power and its pools, a herd of failovers spreading over the credentials, the 429 retry through the conductor as a failover, released and removed bindings, forks and non-fork subagents, a failover that goes to a usable focus, the bounded suspended bindings, the active binding count |
 | `sdk/cliproxy/auth/devyre_priority.go` | Exports the selectors' priority and availability rules, and the expiring-first view of a credential and the placement order, for the readings endpoint |
+| `sdk/cliproxy/auth/devyre_quota_log.go` | The log's quota lines: `devyreLogQuotaHold` (a rejection that holds a credential or a model back: on which windows, until when), `DevyreLogQuotaLifted` (a hold lifted, by a usage reading or a reset) and `devyreLogQuotaKept` (why a fresh usage reading left a hold standing) |
+| `sdk/cliproxy/auth/devyre_quota_log_test.go` | The lines as the log formatter writes them: the windows a Claude and a ChatGPT rejection name, credential and model scope, an ordinary rate limit, a provider's value that is no plain name left out, nothing for a result that holds nothing back, a hold lifted by usage and by a reset, and each reason a hold is kept |
 | `sdk/cliproxy/auth/devyre_session_cache.go` | The fork's views of a `SessionCache`: active bindings per credential, the keys bound to a credential, the live bindings and their restore with absolute expiries |
 | `sdk/cliproxy/auth/devyre_session_cache_test.go` | Restoring bindings (expired, conflicting and live keys, the capacity, absolute expiries) and carrying them into a rebuilt selector with a new TTL |
 | `sdk/cliproxy/auth/devyre_session_persist.go` | `SessionPersistence`: the bindings in `session-affinity.json`, loaded at start and saved when they changed, at most every 30 seconds, and on close |
@@ -271,7 +273,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `sdk/auth/filestore.go` | `Save` reads and writes a metadata-only auth through `authseal` (a sealed file it cannot open is replaced like a missing one), and `readAuthFiles` reads through `authseal.ReadFile`. |
 | `sdk/auth/manager.go` | `Login` reads the existing file through `authseal.ReadFile`. |
 | `sdk/cliproxy/auth/conductor.go` | The `devyre` field (`devyreManagerState`) on `Manager`. |
-| `sdk/cliproxy/auth/conductor_cooldown.go` | `MarkResult` hands each result to `devyreSoftTransient` right after the result policy; when that keeps a transient failure soft, it has recorded the failure and `MarkResult` returns. |
+| `sdk/cliproxy/auth/conductor_cooldown.go` | `MarkResult` hands each result to `devyreSoftTransient` right after the result policy; when that keeps a transient failure soft, it has recorded the failure and `MarkResult` returns. After it has applied a result, one line hands the credential as it left it to `devyreLogQuotaHold` (`devyre_quota_log.go`). |
 | `sdk/cliproxy/auth/conductor_execution.go` | `executeMixedOnce` and `executeCountMixedOnce` hand a failed attempt to `devyreRetryTransient` right after the 401 refresh, and return when the request ended during its wait. |
 | `sdk/cliproxy/auth/conductor_stream.go` | `executeStreamWithModelPool` takes a `devyreTransientRetry` budget per attempt and hands a failed start to `retryStart` and a failed bootstrap to `retryBootstrap`, each right after the 401 refresh. |
 | `sdk/cliproxy/auth/selector.go` | Three conditions in `SessionAffinitySelector`, where it reuses a binding (the explicit-session cache hit, the fallback-key cache hit and the LCP match in `pickLCP`), also ask `devyreFocusTakesOver`; a yes treats the bound credential as unavailable, so the upstream reselect-and-rebind path runs. `SessionAffinitySelector` carries a `devyre` field (`devyreAffinityState`). `Pick` hands its fallback a placement through the context (`withPlacement`): a failover when the bound credential is unavailable (`devyreFailover`) or when a credential failure suspended the binding (`devyrePlacementFor`), a new placement otherwise; its `bind` ends a suspended binding, the failover lines name `from=` and the pick's `reason=`, and a subagent that says it is not a fork takes its parent's binding only with headroom (`devyreJoinsParent`). `extractExplicitSessionIDs` records the agent type the request names in its metadata (`devyreSetAgentType`). A cache hit, and a fork or alias joining its parent's binding, mark the request's metadata with that credential (`devyreMarkBound`) for the transient retries. `OnResult` suspends the binding it removes for a credential failure (`devyreSuspend`), and `InvalidateAuth` the bindings of the removed credential (`devyreSuspendAuth`). |
@@ -380,6 +382,41 @@ A cooldown lasts until its deadline, in memory unless `save-cooldown-status` kee
 restarts, and nothing asks the provider meanwhile. So a client that redeems a reset calls this
 endpoint; usage recovery (below, for Claude and for ChatGPT) covers a reset redeemed elsewhere
 and a restored plan, once a fresh usage response arrives.
+
+### The log says what holds a credential back
+
+Upstream logs a rejection as `upstream execution failed ... err=<body>` and, for Claude,
+`parsed Anthropic rate limit reset headers`, whose rejected windows and deadline are logrus
+fields: the log formatter prints the message and a fixed list of field names, and those are not
+among them. Neither line says what the router did with the rejection, and nothing said that a
+hold ended early, or why a usage reading left it standing. A report of sessions that fail for
+usage could not be read from `main.log`. Three lines, with their values in the message as the
+selector's lines have them (`devyre_quota_log.go`):
+
+```
+quota: held | provider=claude auth=<identity> model=claude-opus-5-5 scope=credential rejected=7d claim=seven_day until=2026-11-14T10:00:00Z in=71h59m0s
+quota: back in use | provider=claude auth=<identity> by=usage
+quota: hold kept | provider=codex auth=<identity> why="its usage does not show room at every limit"
+```
+
+- **held**: a 429 put the credential (`scope=credential`) or the requested model
+  (`scope=model`) in a quota cooldown, until `until`. `rejected` names the limit windows the
+  provider rejected it on, as the quota readings name them: Claude's by the status headers that
+  say `rejected` (`5h`, `7d`, `7d:fable`, `overage`; `unified` when only the overall status
+  does), with the representative claim it names; ChatGPT's by the windows its headers report
+  full (`primary`, `secondary`), else `usage_limit` for its usage-limit error; `none` for a
+  rejection that names no window, an ordinary rate limit. Nothing is said of a 429 that held
+  nothing back.
+- **back in use**: a hold ended before its deadline, `by=usage` (a fresh usage response
+  contradicted the rejection, recovery below) or `by=reset` (a cooldown reset a client asked
+  for, above).
+- **hold kept**: a fresh usage response reached a credential a limit holds back and lifted
+  nothing: `its usage does not show room at every limit`, `its usage contradicts no rejection
+  on record` (the hold is not one the usage speaks of: an ordinary rate limit, a rejection
+  whose own evidence a later result replaced), or `it changed while its usage was read`.
+
+What a provider sends reaches a line only as one of those fixed names, or, for Claude's claim,
+when it is a plain name: it cannot break a line or forge a field.
 
 ### Claude subscription recovery
 

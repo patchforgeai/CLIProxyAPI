@@ -32,4 +32,5 @@ func (h *Handler) devyreQuotaReset(auth *coreauth.Auth) {
 	now := cache.now()
 	cache.invalidate(strings.TrimSpace(auth.Index), now)
 	cache.store().Reset(auth.ID, now)
+	coreauth.DevyreLogQuotaLifted(auth, "reset")
 }

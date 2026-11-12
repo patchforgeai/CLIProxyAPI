@@ -1034,6 +1034,8 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		}
 	}
 	m.mu.Unlock()
+	// devyre: the log says which limit holds the credential back, and until when (devyre_quota_log.go).
+	devyreLogQuotaHold(ctx, result, authSnapshot, modelKey)
 	if m.scheduler != nil && authSnapshot != nil {
 		var targetModels []string
 		if !result.CredentialScope && modelKey != "" {
