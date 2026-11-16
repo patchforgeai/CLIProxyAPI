@@ -88,8 +88,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/handlers/management/devyre_oauth_redirect_test.go` | Through `StartOAuthV8`: the default redirects unchanged, the moved ones per provider, every refused value and the `is_webui` combination, a Codex exchange that uses the moved redirect, and a service that cannot move it |
 | `internal/api/handlers/management/devyre_quota_observer.go` | Idle-credential usage poller; also forgets the readings and the focus of removed credentials |
 | `internal/api/handlers/management/devyre_quota_observer_test.go` | Poller scheduling, min-gap, backoff and pruning tests |
-| `internal/api/handlers/management/devyre_quota_reset.go` | `devyreQuotaReset`: a cooldown reset also forgets the credential's readings from before it and takes its cached usage for stale |
-| `internal/api/handlers/management/devyre_quota_reset_test.go` | Through `ResetQuota`: the readings and the rejection's header signals gone, the next usage read sent upstream and recorded, another credential untouched; a usage refresh lifting an account without a 5-hour limit |
+| `internal/api/handlers/management/devyre_quota_reset.go` | `devyreResetAt` and `devyreQuotaReset`: a cooldown reset may name when the quota started over (`observed_before`); a quota rejection since then keeps every hold (`kept`), else the holds go with the readings observed up to then, and the cached usage is taken for stale |
+| `internal/api/handlers/management/devyre_quota_reset_test.go` | Through `ResetQuota`: the readings and the rejection's header signals gone, the next usage read sent upstream and recorded, another credential untouched; a usage refresh lifting an account without a 5-hour limit; a reset that names a time before a later rejection kept and said so, one after it lifting the hold, a reading made after that time kept, a time it cannot read refused |
 | `internal/api/handlers/management/devyre_routing_config_test.go` | The routing blocks survive `/v8/management` config writes |
 | `internal/api/handlers/management/devyre_routing_focus.go` | `GET`, `PUT` and `DELETE /v8/management/routing/focus`; `SetRoutingFocusStore`; `forgetRemovedFocus` for the observer |
 | `internal/api/handlers/management/devyre_routing_focus_test.go` | Focus endpoints: lookups by ID and file name, replacing per provider, deletes by name and provider, every refusal, only existing credentials listed, the file written, and the observer forgetting removed credentials' focus |
@@ -194,6 +194,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/devyre_priority.go` | Exports the selectors' priority and availability rules, and the expiring-first view of a credential and the placement order, for the readings endpoint |
 | `sdk/cliproxy/auth/devyre_quota_log.go` | The log's quota lines: `devyreLogQuotaHold` (a rejection that holds a credential or a model back: on which windows, until when), `DevyreLogQuotaLifted` (the credential takes requests again, by a usage reading or a reset), `devyreLogModelsLifted` (some models' own holds ended while a credential-wide block still holds it) and `devyreLogQuotaKept` (why a fresh usage reading or a reset left a hold standing) |
 | `sdk/cliproxy/auth/devyre_quota_log_test.go` | The lines as the log formatter writes them: the windows a Claude and a ChatGPT rejection name, credential and model scope, an ordinary rate limit, a provider's value that is no plain name left out, nothing for a result that holds nothing back, a hold lifted by usage and by a reset, and each reason a hold is kept |
+| `sdk/cliproxy/auth/devyre_reset_since.go` | `DevyreRejectedSince`: whether the provider refused one of a credential's requests on its quota after a time, which a cooldown reset that names when the quota started over leaves standing; `DevyreLogResetKept` |
+| `sdk/cliproxy/auth/devyre_reset_since_test.go` | A rejection after the time told from one before it, an unknown credential and a failure that is no quota rejection |
 | `sdk/cliproxy/auth/devyre_session_cache.go` | The fork's views of a `SessionCache`: active bindings per credential, the keys bound to a credential, the live bindings and their restore with absolute expiries |
 | `sdk/cliproxy/auth/devyre_session_cache_test.go` | Restoring bindings (expired, conflicting and live keys, the capacity, absolute expiries) and carrying them into a rebuilt selector with a new TTL |
 | `sdk/cliproxy/auth/devyre_session_persist.go` | `SessionPersistence`: the bindings in `session-affinity.json`, loaded at start and saved when they changed, at most every 30 seconds, and on close |
@@ -228,7 +230,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `config.example.yaml` | A `devyre:` comment above `disable-control-panel` says the panel is built in, so `disable-auto-update-panel` and `panel-github-repository` have no effect, and `panel-github-repository` names the panel fork; a commented `management.tailnet-auth` block with every setting off; `routing:` documents `expiring-first`, a commented `session-affinity-persist` (whose comment also names `claude-continuity.json`), and the `expiring-first` (gate, headroom, log) and `quota-observation` blocks; `upstream.claude` documents a commented `mcp-alias-secret`. |
 | `go.mod`, `go.sum` | `golang.org/x/net` at least v0.60.0, `golang.org/x/crypto` v0.57.0, `golang.org/x/text` v0.42.0 and `github.com/go-git/go-git/v6` v6.0.0-alpha.5, `github.com/andybalholm/brotli` v1.2.7 and `github.com/klauspost/compress` v1.20.3: the releases that fix GO-2026-6603, -6610, -6611, -6612, -6617, -6629, -6354, -6355, -6213, -6214, -6888 and -6865, which govulncheck found the server reaching. On a conflict take the newer of upstream's version and ours. |
 | `internal/api/handlers/management/api_tools.go` | Three hunks hook the usage cache into `APICall`: a lookup after `auth_index` and `url` are parsed, complete or fail after the upstream call, and a record on success. `/v0` and `/v8` share this handler. |
-| `internal/api/handlers/management/quota.go` | One line in `ResetQuota`, after upstream reset the cooldown: `h.devyreQuotaReset(updated)` forgets the credential's readings from before it (`devyre_quota_reset.go`). |
+| `internal/api/handlers/management/quota.go` | Two hunks in `ResetQuota`: the body's `observed_before`, read by `h.devyreResetAt`, which may answer `kept` before upstream resets anything; and after upstream reset the cooldown, `h.devyreQuotaReset(updated, resetAt)` forgets the credential's readings up to that time (`devyre_quota_reset.go`). |
 | `internal/api/handlers/management/auth_files.go` | `extractCodexIDTokenClaims` also emits `chatgpt_plan_type`, the key T3 Code reads. `listAuthFilesFromDisk` reads through `authseal.ReadFile`, and `buildAuthFileEntryLocked` lists `account_uuid` (`devyreAddAccountUUID`). |
 | `internal/api/handlers/management/auth_files_crud.go` | `DownloadAuthFile` and `buildAuthFromFileData` read through `authseal.ReadFile`, `writeAuthFile` writes through `authseal.WriteFile`. |
 | `internal/api/handlers/management/auth_files_fields.go` | `setSourceAuthFileDisabled` reads and writes through `authseal`, `mergeExistingAuthFileMetadata` and `saveTokenRecord` read through `authseal.ReadFile`. |
@@ -409,6 +411,16 @@ A cooldown lasts until its deadline, in memory unless `save-cooldown-status` kee
 restarts, and nothing asks the provider meanwhile. So a client that redeems a reset calls this
 endpoint; usage recovery (below, for Claude and for ChatGPT) covers a reset redeemed elsewhere
 and a restored plan, once a fresh usage response arrives.
+
+The body may also name when the quota started over, `observed_before` (RFC 3339; never read
+as later than now). A reset used on one computer reaches the routers of the account's other
+computers as soon as they can be told, which for one that was away is once it is back: its
+credential may have run out again meanwhile, and that rejection is newer news than the reset.
+So when the provider refused one of the credential's requests on its quota after that time
+(`DevyreRejectedSince`), the reset changes nothing, answers `"status": "kept"` and logs
+`hold kept` with `it was refused for its quota after its limits started over`; otherwise it
+lifts the holds and drops the readings observed up to that time, and later ones stand. A
+router without this field resets as before, which costs at most one rejected request.
 
 ### The log says what holds a credential back
 

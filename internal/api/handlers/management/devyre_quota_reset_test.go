@@ -153,3 +153,102 @@ func TestCooldownResetIsSaidInTheLog(t *testing.T) {
 		t.Fatalf("lines for the reset = %q, want one", lines)
 	}
 }
+
+// resetCooldownAt posts a cooldown reset that says when the credential's quota
+// started over, as Anvil does with a reset used on another computer of the
+// account, and returns the answer.
+func resetCooldownAt(t *testing.T, hs *usageCacheHarness, auth *coreauth.Auth, observedBefore string) *httptest.ResponseRecorder {
+	t.Helper()
+	hs.router.POST("/v8/management/routing/cooldown/reset", hs.handler.ResetQuota)
+	body := `{"auth_index":"` + auth.Index + `","observed_before":"` + observedBefore + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/v8/management/routing/cooldown/reset", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	hs.router.ServeHTTP(recorder, req)
+	return recorder
+}
+
+// clockAhead puts the harness clock, which the readings are stamped by, just
+// ahead of the time the manager stamps results by.
+func clockAhead(hs *usageCacheHarness) {
+	hs.clock.mu.Lock()
+	hs.clock.now = time.Now().Add(time.Second)
+	hs.clock.mu.Unlock()
+}
+
+// A reset used on another computer reaches this router once it can be told,
+// for a computer that was away once it is back. A rejection the provider made
+// after the reset is newer news than the reset: the account ran out again. The
+// reset then leaves the hold as it is and says so.
+func TestCooldownResetLearnedLateLeavesARejectionMadeSince(t *testing.T) {
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	startedOver := time.Now().Add(-time.Minute)
+	blockUsageAccount(t, hs)
+	clockAhead(hs)
+	said := &logMessages{}
+	logger := log.StandardLogger()
+	previous := logger.ReplaceHooks(make(log.LevelHooks))
+	logger.AddHook(said)
+	t.Cleanup(func() { logger.ReplaceHooks(previous) })
+
+	answer := resetCooldownAt(t, hs, hs.claude, startedOver.UTC().Format(time.RFC3339Nano))
+
+	if answer.Code != http.StatusOK || !strings.Contains(answer.Body.String(), `"status":"kept"`) {
+		t.Fatalf("cooldown reset answered %d %s, want 200 and kept", answer.Code, answer.Body.String())
+	}
+	assertUsageBlocked(t, hs, true)
+	if lines := said.with("quota: hold kept", `why="it was refused for its quota after its limits started over"`); len(lines) != 1 {
+		t.Fatalf("lines for the kept reset = %q, want one", lines)
+	}
+	if lines := said.with("quota: back in use"); len(lines) != 0 {
+		t.Fatalf("a kept hold was said to be back in use: %q", lines)
+	}
+}
+
+// A reset that names a time after the rejection lifts the hold, as one that
+// names none does.
+func TestCooldownResetLearnedLateLiftsTheHoldsFromBefore(t *testing.T) {
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	blockUsageAccount(t, hs)
+	startedOver := time.Now()
+	clockAhead(hs)
+
+	answer := resetCooldownAt(t, hs, hs.claude, startedOver.UTC().Format(time.RFC3339Nano))
+
+	if answer.Code != http.StatusOK || !strings.Contains(answer.Body.String(), `"status":"ok"`) {
+		t.Fatalf("cooldown reset answered %d %s, want 200 and ok", answer.Code, answer.Body.String())
+	}
+	assertUsageBlocked(t, hs, false)
+}
+
+// The readings the reset drops are those observed up to the time it names: one
+// read after it is newer than the reset and stands.
+func TestCooldownResetKeepsAReadingMadeAfterTheTimeItNames(t *testing.T) {
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	startedOver := time.Now()
+	clockAhead(hs)
+	hs.upstream.respondJSON(usageTestClaudeUsagePath, http.StatusOK, exhaustedClaudeUsage)
+	hs.get(t, hs.claude, usageTestClaudeUsagePath)
+
+	answer := resetCooldownAt(t, hs, hs.claude, startedOver.UTC().Format(time.RFC3339Nano))
+
+	if answer.Code != http.StatusOK {
+		t.Fatalf("cooldown reset answered %d %s", answer.Code, answer.Body.String())
+	}
+	if kept := hs.readings.Get(hs.claude.ID); len(kept.Windows) != 2 {
+		t.Fatalf("readings after the reset = %+v, want the two read after the time it names", kept.Windows)
+	}
+}
+
+// A time that is not RFC 3339 is refused, and nothing is reset.
+func TestCooldownResetRefusesATimeItCannotRead(t *testing.T) {
+	hs := newUsageCacheHarness(t, config.RoutingConfig{})
+	blockUsageAccount(t, hs)
+
+	answer := resetCooldownAt(t, hs, hs.claude, "yesterday")
+
+	if answer.Code != http.StatusBadRequest {
+		t.Fatalf("cooldown reset answered %d %s, want 400", answer.Code, answer.Body.String())
+	}
+	assertUsageBlocked(t, hs, true)
+}
