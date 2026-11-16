@@ -119,11 +119,33 @@ func devyreRejectedWindows(result Result, headers http.Header, now time.Time) st
 // DevyreLogQuotaLifted says that a credential a limit held back takes requests
 // again, and by what: "usage" for a fresh usage response that contradicted the
 // rejection (reconcileUsage), "reset" for a cooldown reset a client asked for.
+// It is said only once no credential-wide block holds the credential: a model's
+// own hold that ended while one still does is devyreLogModelsLifted's.
 func DevyreLogQuotaLifted(auth *Auth, by string) {
 	if auth == nil {
 		return
 	}
 	log.Infof("quota: back in use | provider=%s auth=%s by=%s", auth.Provider, formatAuthIdentity(auth, auth.Provider), by)
+}
+
+// devyreLogModelsLifted says that the holds of some of a credential's models
+// ended while a credential-wide block still holds it back from every model.
+// Before, that read "back in use", and the credential took no request.
+func devyreLogModelsLifted(auth *Auth, models []string, by string) {
+	if auth == nil || len(models) == 0 {
+		return
+	}
+	named := make([]string, 0, len(models))
+	for _, model := range models {
+		if safe := logSafeToken(model); safe != "" {
+			named = append(named, safe)
+		}
+	}
+	if len(named) == 0 {
+		named = append(named, "-")
+	}
+	log.Infof("quota: models back in use | provider=%s auth=%s models=%s by=%s", auth.Provider,
+		formatAuthIdentity(auth, auth.Provider), strings.Join(named, ","), by)
 }
 
 // devyreLogQuotaKept says why a fresh usage response left a credential's hold

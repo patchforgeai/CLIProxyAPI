@@ -49,6 +49,11 @@ func isOverageOrFableOnlyRejection(headers http.Header, status5h, status7d, stat
 	if status5h == "rejected" || status7d == "rejected" {
 		return false
 	}
+	// devyre: a claim on the model's own weekly allowance holds the model alone, unless a shared
+	// window is reported full (devyre_claude_model_allowance.go).
+	if devyreModelAllowanceRejection(headers, status5h, status7d) {
+		return true
+	}
 
 	overageStatus := strings.ToLower(strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Overage-Status")))
 	overageDisabledReason := strings.TrimSpace(getHeaderCaseInsensitive(headers, "Anthropic-Ratelimit-Unified-Overage-Disabled-Reason"))

@@ -7,6 +7,7 @@ import (
 	"context"
 	"math"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -31,18 +32,30 @@ type claudeUsage struct {
 	unlimited []string
 }
 
+// quotaLift is what a fresh usage response lifted of a credential's holds: the
+// credential-wide block, and the models whose states were cleared.
+type quotaLift struct {
+	credential bool
+	models     []string
+}
+
+func (l quotaLift) lifted() bool {
+	return l.credential || len(l.models) > 0
+}
+
 // reconcileUsage lifts the quota cooldowns of the registered credential behind
 // observed that a fresh usage response contradicts, and publishes the change
 // to both selection paths and the persisted cooldowns. room is whether the
 // response shows room at every limit; without it nothing is lifted. lift
 // decides under the manager's lock: it clears what the response contradicts
-// and reports whether it cleared anything. started is the upstream call's
-// start, not its completion: a response racing a newer rejection must never
-// erase it, so the credential must not have changed since observed was read,
-// even on the same clock tick. A disabled credential and one whose sign-in
-// failed stay as they are. The log says when a hold is lifted, and why one a
-// limit still runs for was kept (devyre_quota_log.go).
-func (m *Manager) reconcileUsage(observed *Auth, provider string, room bool, started time.Time, lift func(auth *Auth, now time.Time) bool) {
+// and reports what it cleared. started is the upstream call's start, not its
+// completion: a response racing a newer rejection must never erase it, so the
+// credential must not have changed since observed was read, even on the same
+// clock tick. A disabled credential and one whose sign-in failed stay as they
+// are. The log says when a hold is lifted, and why one a limit still runs for
+// was kept (devyre_quota_log.go): the credential is said to be back in use only
+// once no credential-wide block holds it.
+func (m *Manager) reconcileUsage(observed *Auth, provider string, room bool, started time.Time, lift func(auth *Auth, now time.Time) quotaLift) {
 	if m == nil || observed == nil || started.IsZero() {
 		return
 	}
@@ -56,14 +69,17 @@ func (m *Manager) reconcileUsage(observed *Auth, provider string, room bool, sta
 		return
 	}
 	kept := ""
+	var lifted quotaLift
 	switch {
 	case !room:
 		kept = quotaKeptNoRoom
 	case !auth.UpdatedAt.Before(started) || auth.Generation != observed.Generation ||
 		auth.RegistrationEpoch != observed.RegistrationEpoch:
 		kept = quotaKeptChanged
-	case !lift(auth, now):
-		kept = quotaKeptNoEvidence
+	default:
+		if lifted = lift(auth, now); !lifted.lifted() {
+			kept = quotaKeptNoEvidence
+		}
 	}
 	if kept != "" {
 		var held *Auth
@@ -87,6 +103,7 @@ func (m *Manager) reconcileUsage(observed *Auth, provider string, room bool, sta
 	auth.Generation++
 	auth.UpdatedAt = now
 	snapshot := auth.Clone()
+	wholeHeld := credentialQuotaHoldRuns(snapshot, now)
 	m.mu.Unlock()
 
 	// Publish the same generation to both selection paths. An execution result
@@ -103,7 +120,20 @@ func (m *Manager) reconcileUsage(observed *Auth, provider string, room bool, sta
 		m.scheduler.upsertAuth(snapshot)
 	}
 	m.persistCooldownStates(context.Background())
+	if wholeHeld {
+		// Some models' own holds ended, the credential-wide block the usage did not
+		// contradict still stands: the credential takes no request yet.
+		devyreLogModelsLifted(snapshot, lifted.models, "usage")
+		devyreLogQuotaKept(snapshot, quotaKeptNoEvidence, now)
+		return
+	}
 	DevyreLogQuotaLifted(snapshot, "usage")
+}
+
+// credentialQuotaHoldRuns reports whether a credential-wide quota block still
+// holds the credential back from every model.
+func credentialQuotaHoldRuns(auth *Auth, now time.Time) bool {
+	return auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && auth.Quota.NextRecoverAt.After(now)
 }
 
 // liftSharedQuota clears the credential-wide block and returns the deadline it
@@ -132,10 +162,10 @@ func propagatedQuota(state *ModelState, sharedDeadline time.Time) bool {
 // and partial usage variants must not call it.
 func (m *Manager) ReconcileClaudeUsage(observed *Auth, windows []quotareading.Window, unlimited []string, started time.Time) {
 	usage := claudeUsage{windows: windows, unlimited: unlimited}
-	m.reconcileUsage(observed, "claude", usage.healthy(""), started, func(auth *Auth, now time.Time) bool {
+	m.reconcileUsage(observed, "claude", usage.healthy(""), started, func(auth *Auth, now time.Time) quotaLift {
 		shared := auth.Quota.Reason == "credential_quota" && quotaErrorOrNil(auth.LastError) &&
 			claudeSharedQuotaRecovered(auth, usage, started, now)
-		changed := shared
+		lifted := quotaLift{credential: shared}
 		var sharedDeadline time.Time
 		if shared {
 			sharedDeadline = liftSharedQuota(auth)
@@ -148,10 +178,11 @@ func (m *Manager) ReconcileClaudeUsage(observed *Auth, windows []quotareading.Wi
 			// A shared rejection is also propagated to models that made no request.
 			if (shared && propagatedQuota(state, sharedDeadline)) || claudeRejectionRecovered(state, usage, started, model, now) {
 				resetModelState(state, now)
-				changed = true
+				lifted.models = append(lifted.models, model)
 			}
 		}
-		return changed
+		sort.Strings(lifted.models)
+		return lifted
 	})
 }
 
@@ -170,7 +201,7 @@ func (m *Manager) ReconcileClaudeUsage(observed *Auth, windows []quotareading.Wi
 // capacity and any other failure of a model replace that evidence and stand, as
 // they say nothing of the account's usage.
 func (m *Manager) ReconcileCodexUsage(observed *Auth, room bool, started time.Time) {
-	m.reconcileUsage(observed, "codex", room, started, func(auth *Auth, now time.Time) bool {
+	m.reconcileUsage(observed, "codex", room, started, func(auth *Auth, now time.Time) quotaLift {
 		shared := false
 		if auth.Quota.Exceeded && auth.Quota.Reason == "credential_quota" && quotaErrorOrNil(auth.LastError) {
 			for _, state := range auth.ModelStates {
@@ -180,21 +211,22 @@ func (m *Manager) ReconcileCodexUsage(observed *Auth, room bool, started time.Ti
 				}
 			}
 		}
-		changed := shared
+		lifted := quotaLift{credential: shared}
 		var sharedDeadline time.Time
 		if shared {
 			sharedDeadline = liftSharedQuota(auth)
 		}
-		for _, state := range auth.ModelStates {
+		for model, state := range auth.ModelStates {
 			if state == nil || state.Status == StatusDisabled {
 				continue
 			}
 			if (shared && propagatedQuota(state, sharedDeadline)) || codexUsageLimitRejected(state, started, now) {
 				resetModelState(state, now)
-				changed = true
+				lifted.models = append(lifted.models, model)
 			}
 		}
-		return changed
+		sort.Strings(lifted.models)
+		return lifted
 	})
 }
 
@@ -233,8 +265,9 @@ func quotaErrorOrNil(err *Error) bool {
 }
 
 // claudeSharedQuotaRecovered reports whether the usage contradicts the
-// credential-wide block: a model's own last result was rejected on a shared
-// window, and every such window has room again.
+// credential-wide block: a model's own last result was a rejection that blocks
+// the credential, and every shared window that block depends on has room again
+// (claudeCredentialWindows).
 //
 // Each rejection of a shared window writes the credential-wide block over the
 // other models' states (reason "credential_quota") and keeps the later of the
@@ -249,17 +282,67 @@ func quotaErrorOrNil(err *Error) bool {
 func claudeSharedQuotaRecovered(auth *Auth, usage claudeUsage, started, now time.Time) bool {
 	recovered := false
 	for _, state := range auth.ModelStates {
-		rejected, ok := claudeRejectedWindows(state, started, "", now)
+		windows, ok := claudeCredentialWindows(state, started, now)
 		if !ok {
 			continue
 		}
-		if !usage.hasRoom(rejected) {
+		if !usage.hasRoom(windows) {
 			return false
 		}
 		recovered = true
 	}
 	return recovered
 }
+
+// claudeBothSharedWindows are the windows every model of a Claude subscription
+// counts against.
+var claudeBothSharedWindows = []string{"5h", "7d"}
+
+// claudeCredentialWindows lists the shared windows a credential-wide block set
+// by the model's own last result depends on: the shared windows it was rejected
+// on. A rejection that named none of them, but named a model's own weekly
+// allowance (the 7d_oi window, or a claim quotareading.ClaudeAllowanceFamily
+// knows) or overage, blocked the credential only because the 429 left the
+// shared windows' room unconfirmed (helps/devyre_claude_model_allowance.go): it
+// depends on both shared windows, whose room a fresh usage response confirms.
+// Before, such a block was no evidence of anything: on 2026-11-16 a usage reading
+// lifted Fable's own hold on an account whose limits a reset had just started
+// over, kept the block that stopped its every other model, and logged the
+// account back in use. ok is false when the state records no rejection that
+// still holds, or one this code cannot tie to any window (an ordinary rate
+// limit, a bare unified rejection).
+func claudeCredentialWindows(state *ModelState, started, now time.Time) (windows []string, ok bool) {
+	signals, ok := claudeOwnRejection(state, started, now)
+	if !ok {
+		return nil, false
+	}
+	unconfirmed := false
+	for name, value := range signals {
+		name = strings.ToLower(name)
+		if name == claudeClaimSignal {
+			unconfirmed = unconfirmed || quotareading.ClaudeAllowanceFamily(value) != ""
+			continue
+		}
+		if !strings.EqualFold(value, "rejected") {
+			continue
+		}
+		if id, shared := claudeSharedWindows[name]; shared {
+			windows = append(windows, id)
+		} else if name == claudeFableStatusSignal || name == claudeOverageStatusSignal {
+			unconfirmed = true
+		}
+	}
+	if len(windows) == 0 && unconfirmed {
+		windows = claudeBothSharedWindows
+	}
+	return windows, len(windows) > 0
+}
+
+const (
+	claudeClaimSignal         = "anthropic-ratelimit-unified-representative-claim"
+	claudeFableStatusSignal   = "anthropic-ratelimit-unified-7d_oi-status"
+	claudeOverageStatusSignal = "anthropic-ratelimit-unified-overage-status"
+)
 
 // claudeRejectionRecovered reports whether the usage contradicts the model's
 // own subscription rejection: every window its last result was rejected on has
@@ -277,6 +360,29 @@ func claudeRejectionRecovered(state *ModelState, usage claudeUsage, started time
 // still holds: its cooldown is over, it is not a quota cooldown, or its signals
 // are not those of its last result, observed before the usage call started.
 func claudeRejectedWindows(state *ModelState, started time.Time, model string, now time.Time) (rejected []string, ok bool) {
+	signals, ok := claudeOwnRejection(state, started, now)
+	if !ok {
+		return nil, false
+	}
+	family := quotareading.ModelFamily(model)
+	for name, status := range signals {
+		if !strings.EqualFold(status, "rejected") {
+			continue
+		}
+		name = strings.ToLower(name)
+		if id, shared := claudeSharedWindows[name]; shared {
+			rejected = append(rejected, id)
+		} else if name == claudeFableStatusSignal && family == "fable" {
+			rejected = append(rejected, "7d:fable")
+		}
+	}
+	return rejected, len(rejected) > 0
+}
+
+// claudeOwnRejection returns the signals of the model's own last result when
+// that was a quota rejection whose cooldown still runs, observed before the
+// usage call started; ok is false otherwise.
+func claudeOwnRejection(state *ModelState, started, now time.Time) (map[string]string, bool) {
 	if state == nil || !quotaErrorOrNil(state.LastError) {
 		return nil, false
 	}
@@ -286,19 +392,7 @@ func claudeRejectedWindows(state *ModelState, started time.Time, model string, n
 		!quota.ObservedAt.Equal(state.UpdatedAt) || !quota.ObservedAt.Before(started) {
 		return nil, false
 	}
-	family := quotareading.ModelFamily(model)
-	for name, status := range quota.Signals {
-		if !strings.EqualFold(status, "rejected") {
-			continue
-		}
-		name = strings.ToLower(name)
-		if id, shared := claudeSharedWindows[name]; shared {
-			rejected = append(rejected, id)
-		} else if name == "anthropic-ratelimit-unified-7d_oi-status" && family == "fable" {
-			rejected = append(rejected, "7d:fable")
-		}
-	}
-	return rejected, len(rejected) > 0
+	return quota.Signals, true
 }
 
 // healthy reports whether every window that applies to model has room, and the

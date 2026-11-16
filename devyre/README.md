@@ -140,6 +140,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/quotareading/codex.go` | Codex header and usage-body parsers; whether a usage body shows the account at none of its limits (`CodexUsageHasRoom`) |
 | `internal/quotareading/codex_test.go` | Codex parser tests |
 | `internal/quotareading/contract_test.go` | Pins the package API the selector, cache and poller use |
+| `internal/quotareading/devyre_claude_allowance.go` | `ClaudeAllowanceFamily`: the model family whose own weekly allowance a Claude representative claim names (`seven_day_overage_included` Fable's, `seven_day_opus`, `seven_day_sonnet`) |
 | `internal/quotareading/devyre_reset_test.go` | `Store.Reset`: what was read before a quota started over is gone and stays out, later readings count, the reset goes with its credential; `ClaudeUsageUnlimited` |
 | `internal/quotareading/evaluate.go` | Gating and urgency (`Evaluate`), headroom (`EvaluateHeadroom`) |
 | `internal/quotareading/evaluate_test.go` | Gating, ranking and headroom tests |
@@ -163,6 +164,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/runtime/executor/devyre_codex_interrupt_test.go` | Against a scripted upstream: the frame forwarded byte for byte and the socket kept for the next request after a zero-output interrupted end; nothing written for a response that ended, an unknown one or a missing session, with the local answers; the disabled-credential refusal; only the router's own interrupt exempting an empty end, and the bounded history; and in the duplex, the interrupt from its input and from the reader path, the duplex settling and taking the next create |
 | `internal/runtime/executor/helps/devyre_claude_continuity.go` | `ClaudeContinuityPersistence`: each cloaked Claude conversation's continuity (its pinned date, previous message and request, prompt id) in `claude-continuity.json`, loaded at start and saved when it changed, at most every 30 seconds, and on close |
 | `internal/runtime/executor/helps/devyre_claude_continuity_test.go` | With a fake timer: save and restore (the first day kept on a later one, the new process's commits applied), no timer while nothing changed, the flush on close, expired, malformed and repeated entries, corrupt and foreign files, live conversations kept, the capacity bound, the atomic replace, one persistence attached at a time |
+| `internal/runtime/executor/helps/devyre_claude_model_allowance.go` | `devyreModelAllowanceRejection`: a 429 whose claim names a model's own weekly allowance, with neither shared window reported at its limit, holds that model alone ([A model's own allowance holds that model alone](#a-models-own-allowance-holds-that-model-alone)) |
+| `internal/runtime/executor/helps/devyre_claude_model_allowance_test.go` | Fable, Opus and Sonnet claims with the shared windows unreported, allowed or at half read as the model's own; a shared window reported full, unreadable or in an unknown status, and the shared limits' own claims, read as the credential's; no credential deadline for a model's own |
 | `internal/tailnetauth/decide.go` | The trust decision: `Decide`, a pure function of the policy and the request (the request carries the OS lookup of its peer's user, asked only when a local decision depends on it) |
 | `internal/tailnetauth/decide_test.go` | Table tests for every rule of the decision, local trust bound to a direct peer of the server's own user |
 | `internal/tailnetauth/peer.go` | `PeerRunsAsThisUser`: whether the process at the other end of a loopback connection runs as the server's OS user; the `/proc/net/tcp` parser |
@@ -185,10 +188,11 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/devyre_codex_recovery_test.go` | ChatGPT recovery lifts the credential-wide usage-limit block for every model, several models rejected together in either order, and a model-scoped usage limit; it needs new evidence and a response with room, keeps a per-minute rate limit, a model at capacity and a rejection that raced the usage call, and each provider's response lifts its own holds alone |
 | `sdk/cliproxy/auth/devyre_focus.go` | `devyreFocusTakesOver`: whether session affinity gives a bound session up to a usable focus |
 | `sdk/cliproxy/auth/devyre_focus_test.go` | The focus in the selector (urgency, 5h, 7d and model-scoped gates, tiers, other providers, ends, rotation, the `focus` log reason) and under session affinity (explicit sessions, the fallback key, LCP, the log line, through the manager) |
+| `sdk/cliproxy/auth/devyre_model_allowance_recovery_test.go` | A credential-wide hold a Fable-only rejection set, as 2026-11-16's were, lifted by a usage reading with room in both shared windows: every other model served, Fable held while its own window is spent; kept with a shared window spent and for a rejection no window explains; `back in use` said only once the credential is |
 | `sdk/cliproxy/auth/devyre_placement.go` | What `SessionAffinitySelector` tells its fallback about a pick (new placement or failover, the credential left, the active bindings), the bindings a credential failure suspended, whether a subagent joins its parent's credential, and `CarrySessionBindings` for a rebuilt selector |
 | `sdk/cliproxy/auth/devyre_placement_test.go` | Stay power and its pools, a herd of failovers spreading over the credentials, the 429 retry through the conductor as a failover, released and removed bindings, forks and non-fork subagents, a failover that goes to a usable focus, the bounded suspended bindings, the active binding count |
 | `sdk/cliproxy/auth/devyre_priority.go` | Exports the selectors' priority and availability rules, and the expiring-first view of a credential and the placement order, for the readings endpoint |
-| `sdk/cliproxy/auth/devyre_quota_log.go` | The log's quota lines: `devyreLogQuotaHold` (a rejection that holds a credential or a model back: on which windows, until when), `DevyreLogQuotaLifted` (a hold lifted, by a usage reading or a reset) and `devyreLogQuotaKept` (why a fresh usage reading left a hold standing) |
+| `sdk/cliproxy/auth/devyre_quota_log.go` | The log's quota lines: `devyreLogQuotaHold` (a rejection that holds a credential or a model back: on which windows, until when), `DevyreLogQuotaLifted` (the credential takes requests again, by a usage reading or a reset), `devyreLogModelsLifted` (some models' own holds ended while a credential-wide block still holds it) and `devyreLogQuotaKept` (why a fresh usage reading or a reset left a hold standing) |
 | `sdk/cliproxy/auth/devyre_quota_log_test.go` | The lines as the log formatter writes them: the windows a Claude and a ChatGPT rejection name, credential and model scope, an ordinary rate limit, a provider's value that is no plain name left out, nothing for a result that holds nothing back, a hold lifted by usage and by a reset, and each reason a hold is kept |
 | `sdk/cliproxy/auth/devyre_session_cache.go` | The fork's views of a `SessionCache`: active bindings per credential, the keys bound to a credential, the live bindings and their restore with absolute expiries |
 | `sdk/cliproxy/auth/devyre_session_cache_test.go` | Restoring bindings (expired, conflicting and live keys, the capacity, absolute expiries) and carrying them into a rebuilt selector with a new TTL |
@@ -198,7 +202,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/devyre_transient_soft.go` | What a transient failure does to its credential under session affinity with expiring-first placement: the streaks per credential and model (`devyreTransientStore`), the soft first minute `MarkResult` asks about (`devyreSoftTransient`), and putting the session of a failed failover attempt back on its credential (`devyreKeepBoundSession`) |
 | `sdk/cliproxy/auth/devyre_transient_soft_test.go` | The streaks (soft for a minute, a quiet minute, a success, the bound size); through the conductor with expiring-first placement: one request's 529 leaves the credential's other sessions on it while new ones go elsewhere until it answers, a lone credential answering its client's retry, a session that tried every account kept where its cache is, a stream's session, a minute of failures cooling as upstream, round-robin placement unchanged; the selector leaving failing credentials out and a failing focus taking no sessions over |
 | `sdk/cliproxy/auth/devyre_transient_test.go` | Through the conductor with a fake executor and wait: each transient failure kind, the bounded retries, credential failures, sessionless and new sessions, a credential that cooled down, a cancelled request, count tokens, a stream's start, its bootstrap and output already sent |
-| `sdk/cliproxy/auth/devyre_usage_recovery.go` | `ReconcileClaudeUsage` and `ReconcileCodexUsage`: a fresh, complete usage response lifts the quota cooldowns it contradicts |
+| `sdk/cliproxy/auth/devyre_usage_recovery.go` | `ReconcileClaudeUsage` and `ReconcileCodexUsage`: a fresh, complete usage response lifts the quota cooldowns it contradicts; a credential-wide Claude hold depends on the shared windows its rejection named, or on both when it named only a model's own allowance or overage (`claudeCredentialWindows`) |
 | `sdk/cliproxy/auth/devyre_usage_recovery_test.go` | Recovery lifts a rejected subscription for every model, an account without a 5-hour limit, and several models rejected together in either order; it needs new, complete evidence, and keeps ordinary rate limits, unrelated model failures and a rejection that raced the usage call |
 | `sdk/cliproxy/auth/selector_expiring_first.go` | The `expiring-first` selector, its placement order, the focus, and leaving out credentials that failed transiently a moment ago |
 | `sdk/cliproxy/auth/selector_expiring_first_test.go` | Selector tests, including session affinity |
@@ -257,6 +261,8 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/runtime/executor/claude_executor_test.go` | `TestResolveClaudeMCPAliasOptions` passes a nil config to `resolveClaudeMCPAliasOptions`. |
 | `internal/runtime/executor/claude_executor_tokens.go` | Passes `e.cfg` to `resolveClaudeMCPAliasOptions`. |
 | `internal/runtime/executor/helps/claude_diagnostics.go` | `claudeDiagnosticsState` carries `devyrePersistence`, and `BeginClaudeContinuity`, `PinClaudeSessionDate` (when it pins) and `CommitClaudeContinuity` end their change with `devyreContinuityChangedLocked()`, so every change to the continuity schedules a save. |
+| `internal/runtime/executor/helps/claude_ratelimit.go` | `isOverageOrFableOnlyRejection` answers yes, right after its shared-window check, for a rejection `devyreModelAllowanceRejection` reads as the model's own (`devyre_claude_model_allowance.go`): it is then neither credential-wide nor given the allowance's long deadline. |
+| `internal/runtime/executor/helps/claude_ratelimit_test.go` | The `missing utilization` case of `TestClaudeHeadersIndicateUnifiedRateLimitRejection_OverageRejection_UtilizationBoundaries` expects the model's own rejection: a 5-hour window the 429 reports nothing of is none every model shares. |
 | `internal/runtime/executor/codex_websockets_duplex.go` | A `response.interrupt` case next to `response.steer` in the writer's switch hands the frame to `devyreDuplexInterrupt` instead of the `default:` rejection. |
 | `internal/runtime/executor/codex_websockets_session.go` | The `devyre` field (`devyreCodexResponses`) on `codexWebsocketSession`, and one line in `readUpstreamLoop` that calls `devyreObserveUpstream` for every text frame before any request reads it. |
 | `internal/runtime/executor/codex_websockets_stream.go` | The per-response read loop's empty `response.incomplete` check skips the end of a response this router interrupted (`devyreInterruptedEnd`). |
@@ -355,6 +361,27 @@ The endpoints need the management key (or passwordless trust) and exist only on 
 - The Claude usage URL with a query string, such as the panel's reset-grant check `?cedar_ember=1&skip_spend=1`, is cached under its full URL for 5 minutes, for up to 4 distinct query strings per credential. Further query strings are not cached: each request for one goes upstream (`miss`). Either way the call counts toward the poller's 10-minute Claude gap and shares the credential's 429 backoff, because Anthropic limits the endpoint per account whatever the query.
 - A successful `POST`, `PUT`, `PATCH` or `DELETE` through `api-call` for a credential, such as a redeemed reset, makes that credential's cached responses stale, so the next read shows the new state. A Claude backoff still holds.
 
+### A model's own allowance holds that model alone
+
+Anthropic names the limit that refused a request in its representative claim. Three claims are a
+model's own weekly allowance: `seven_day_overage_included` (Fable's, its window `7d_oi`,
+`7d:fable`), `seven_day_opus` and `seven_day_sonnet`. Claude Code calls them the Fable, Opus and
+Sonnet limits, and when one is used up it offers to switch off the model: the account's other
+models still serve. Upstream reads a Fable or overage rejection as the model's own only when the
+429 also confirms both shared windows below their limit (a status of allowed, or a utilization
+below 1), and any other claim as the whole credential's. A 429 that left out the shared windows'
+status and utilization, as Anthropic does for a window it says nothing of, therefore held the
+whole credential, every model, until the allowance reset: on 2026-11-16 six of an owner's seven
+accounts stopped serving Opus and Sonnet for days on their Fable allowance alone, while their
+shared windows had room (`quota: held ... scope=credential rejected=7d:fable,overage
+claim=seven_day_overage_included`).
+
+Now a 429 whose claim names a model's own allowance, with neither shared window reported at its
+limit, holds that model alone (`devyreModelAllowanceRejection`): it backs off on its own, and the
+reading of its window gates the model on that credential until the window resets, as upstream
+treats a confirmed Fable-only rejection. A shared window reported rejected, at a utilization of
+1 or more, unreadable or in a status this code does not know keeps the whole credential held.
+
 ### A cooldown reset forgets the readings before it
 
 `POST /v8/management/routing/cooldown/reset` (and `/v0/management/reset-quota`) with
@@ -407,7 +434,8 @@ quota: hold kept | provider=codex auth=<identity> why="its usage does not show r
   full (`primary`, `secondary`), else `usage_limit` for its usage-limit error; `none` for a
   rejection that names no window, an ordinary rate limit. Nothing is said of a 429 that held
   nothing back.
-- **back in use**: a hold ended before its deadline, `by=usage` (a fresh usage response
+- **back in use**: the credential takes requests again before its hold's deadline, `by=usage`
+  (a fresh usage response
   contradicted the rejection, recovery below) or `by=reset` (a cooldown reset a client asked
   for, above).
 - **hold kept**: a fresh usage response reached a credential a limit holds back and lifted
@@ -417,6 +445,11 @@ quota: hold kept | provider=codex auth=<identity> why="its usage does not show r
 
 What a provider sends reaches a line only as one of those fixed names, or, for Claude's claim,
 when it is a plain name: it cannot break a line or forge a field.
+
+`back in use` is said only once no credential-wide block holds the credential. When a usage
+reading ends some models' own holds while a block it does not contradict still stands, the
+log says `quota: models back in use | ... models=<models> by=usage` and why the credential is
+still held. Before 2026-11-16 that read `back in use`, and the credential took no request.
 
 ### Claude subscription recovery
 
@@ -452,6 +485,16 @@ Ordinary rate limits, billing, authentication and unrelated model errors are pre
 A model's new 429 drops its previous response's passive signals before observing its own:
 older subscription headers must not make a later per-minute limit look recoverable.
 The credential's passive signals continue to feed the usage meters.
+
+A rejection that named none of the shared windows but named a model's own allowance or
+overage, which the router held credential-wide only because the 429 left the shared windows'
+room unconfirmed (above, "A model's own allowance holds that model alone"), is evidence of a
+block that depends on both shared windows: a fresh reading with room in both lifts it, and the
+model's own hold stays while its window is spent (`claudeCredentialWindows`). Before
+2026-11-16 such a block was no evidence of anything: a reading after a usage reset lifted
+Fable's own hold, kept the block that stopped every other model until its old deadline, and
+logged the account back in use. A rejection no window explains (only the overall status says
+`rejected`) is still none.
 
 ### ChatGPT usage recovery
 
