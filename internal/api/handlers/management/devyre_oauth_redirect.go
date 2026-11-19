@@ -12,12 +12,13 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 )
 
-// devyreRedirectPortQuery is the opt-in query parameter of the Claude and Codex OAuth starts
-// (GET /v8/management/oauth/auth-url?provider=claude|codex&redirect_port=<port>, and the
-// deprecated /v0 routes, which share the handlers). With it, the authorize URL and the token
-// exchange use a loopback redirect on that port instead of the provider's fixed one (54545,
-// 1455), so a caller that runs its own callback listener on an OS-assigned port never collides
-// with another program holding the fixed port. Without it nothing changes.
+// devyreRedirectPortQuery is the opt-in query parameter of the Claude, Codex and Antigravity
+// OAuth starts (GET /v8/management/oauth/auth-url?provider=claude|codex|antigravity&
+// redirect_port=<port>, and the deprecated /v0 routes, which share the handlers). With it, the
+// authorize URL and the token exchange use a loopback redirect on that port instead of the
+// provider's fixed one (54545, 1455, 51121), so a caller that runs its own callback listener on an
+// OS-assigned port never collides with another program holding the fixed port. Without it nothing
+// changes.
 const devyreRedirectPortQuery = "redirect_port"
 
 // devyreOAuthRedirect reads redirect_port. It returns "" when the parameter is absent (the

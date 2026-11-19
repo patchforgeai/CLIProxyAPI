@@ -381,7 +381,14 @@ func (h *Handler) RequestAntigravityToken(c *gin.Context) {
 		return
 	}
 
-	redirectURI := fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
+	// devyre: a caller's own loopback listener (redirect_port), else the fixed port.
+	redirectURI, okRedirect := devyreOAuthRedirect(c, antigravity.LoopbackRedirectURI)
+	if !okRedirect {
+		return
+	}
+	if redirectURI == "" {
+		redirectURI = fmt.Sprintf("http://localhost:%d/oauth-callback", antigravity.CallbackPort)
+	}
 	authURL := authSvc.BuildAuthURL(state, redirectURI)
 
 	RegisterOAuthSession(state, "antigravity")

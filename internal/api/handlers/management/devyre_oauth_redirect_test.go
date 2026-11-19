@@ -63,9 +63,22 @@ func TestDevyreRedirectPortClaude(t *testing.T) {
 	}
 }
 
+func TestDevyreRedirectPortAntigravity(t *testing.T) {
+	router, _ := devyreOAuthRouter(t)
+
+	status, redirect, _ := devyreOAuthStart(t, router, "provider=antigravity")
+	if status != http.StatusOK || redirect != "http://localhost:51121/oauth-callback" {
+		t.Fatalf("without redirect_port: %d %q, want upstream's fixed redirect", status, redirect)
+	}
+	status, redirect, _ = devyreOAuthStart(t, router, "provider=antigravity&redirect_port=51234")
+	if status != http.StatusOK || redirect != "http://localhost:51234/oauth-callback" {
+		t.Fatalf("with redirect_port: %d %q", status, redirect)
+	}
+}
+
 func TestDevyreRedirectPortRefusesBadValues(t *testing.T) {
 	router, _ := devyreOAuthRouter(t)
-	for _, provider := range []string{"claude", "codex"} {
+	for _, provider := range []string{"claude", "codex", "antigravity"} {
 		for _, value := range []string{"", "0", "65536", "-1", "+80", "80x", "1e3", "%2051234", "123456", "0x50"} {
 			status, message, _ := devyreOAuthStart(t, router, "provider="+provider+"&redirect_port="+value)
 			if status != http.StatusBadRequest || message != "invalid redirect_port" {
