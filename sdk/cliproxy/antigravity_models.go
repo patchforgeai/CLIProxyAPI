@@ -403,8 +403,8 @@ func (s *Service) asyncProbeAntigravityCapabilities(ctx context.Context, auth *c
 	if auth == nil || auth.ID == "" || auth.Disabled {
 		return
 	}
-	// devyre: the account models learner asks Google for this account itself,
-	// and its answer carries the web-search hints (devyre_antigravity_account_models.go).
+	// devyre: once the account models learner has an answer for this account,
+	// the registration applied its web-search hints (devyre_antigravity_account_models.go).
 	if s.devyreAntigravityLearnerProbes(auth) {
 		return
 	}

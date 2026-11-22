@@ -134,7 +134,7 @@ func TestDevyreAntigravityAccountModel_UpstreamGetsTheVariant(t *testing.T) {
 		{name: "a family at its level, streamed", model: "gemini-4-carbon", level: "MEDIUM", want: "gemini-4-carbon-medium", stream: true},
 		{name: "a suffix names the level", model: "gemini-4-neon(medium)", level: "LOW", want: "gemini-4-neon-medium"},
 		{name: "a retired model", model: "gemini-3.7-flash", level: "LOW", want: "gemini-3.8-flash-low"},
-		{name: "a name without its level suffix", model: "gemini-3.1-pro", want: "gemini-3.1-pro-high"},
+		{name: "a name without its level suffix", model: "gemini-3.1-pro", want: "gemini-3.1-pro-low"},
 		{name: "an id passes as it is", model: "gemini-4-neon-high", level: "LOW", want: "gemini-4-neon-high"},
 		{name: "an account without routes", model: "gemini-4-neon", level: "LOW", want: "gemini-4-neon", auth: devyreAntigravityAuth("ag-devyre-no-routes.json", server.URL)},
 	} {

@@ -1,7 +1,7 @@
 {
   "models": {
-    "gemini-4-carbon-low": {
-      "displayName": "Gemini 4 Carbon (Low)",
+    "chat_20706": {
+      "displayName": "chat_20706",
       "supportsImages": true,
       "supportsThinking": true,
       "thinkingBudget": 65535,
@@ -14,7 +14,123 @@
         "remainingFraction": 0.83,
         "resetTime": "2026-11-21T19:00:00Z"
       },
-      "model": "MODEL_GEMINI_4_CARBON_LOW",
+      "model": "MODEL_CHAT_20706",
+      "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+      "modelProvider": "MODEL_PROVIDER_GOOGLE",
+      "supportsVideo": true,
+      "supportsPdf": true,
+      "supportedMimeTypes": {
+        "image/png": true,
+        "application/pdf": true
+      }
+    },
+    "claude-sonnet-5-5": {
+      "displayName": "Claude Sonnet 5.5",
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingBudget": 64000,
+      "minThinkingBudget": 1024,
+      "maxTokens": 1000000,
+      "maxOutputTokens": 128000,
+      "tokenizerType": "LLAMA_WITH_SPECIAL",
+      "quotaInfo": {
+        "remainingFraction": 1,
+        "resetTime": "2026-11-21T19:00:00Z"
+      },
+      "model": "MODEL_CLAUDE_SONNET_5_5",
+      "apiProvider": "API_PROVIDER_ANTHROPIC_VERTEX",
+      "modelProvider": "MODEL_PROVIDER_ANTHROPIC"
+    },
+    "gemini-3.5-flash-lite": {
+      "displayName": "Gemini 3.5 Flash Lite",
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingBudget": 65535,
+      "minThinkingBudget": 1,
+      "recommended": true,
+      "maxTokens": 1048576,
+      "maxOutputTokens": 65535,
+      "tokenizerType": "LLAMA_WITH_SPECIAL",
+      "quotaInfo": {
+        "remainingFraction": 0.83,
+        "resetTime": "2026-11-21T19:00:00Z"
+      },
+      "model": "MODEL_GEMINI_3_5_FLASH_LITE",
+      "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+      "modelProvider": "MODEL_PROVIDER_GOOGLE",
+      "supportsVideo": true,
+      "supportsPdf": true,
+      "supportedMimeTypes": {
+        "image/png": true,
+        "application/pdf": true
+      }
+    },
+    "gemini-3.6-flash-high": {
+      "displayName": "Gemini 3.6 Flash (High)",
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingBudget": 65535,
+      "minThinkingBudget": 1,
+      "recommended": true,
+      "maxTokens": 1048576,
+      "maxOutputTokens": 65536,
+      "tokenizerType": "LLAMA_WITH_SPECIAL",
+      "quotaInfo": {
+        "remainingFraction": 0.83,
+        "resetTime": "2026-11-21T19:00:00Z"
+      },
+      "model": "MODEL_GEMINI_3_6_FLASH_HIGH",
+      "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+      "modelProvider": "MODEL_PROVIDER_GOOGLE",
+      "supportsVideo": true,
+      "supportsPdf": true,
+      "supportedMimeTypes": {
+        "image/png": true,
+        "application/pdf": true
+      },
+      "thinkingLevel": "HIGH",
+      "disabled": true
+    },
+    "gemini-3.7-flash-high": {
+      "displayName": "Gemini 3.7 Flash (High)",
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingBudget": 65535,
+      "minThinkingBudget": 1,
+      "recommended": true,
+      "maxTokens": 1048576,
+      "maxOutputTokens": 65536,
+      "tokenizerType": "LLAMA_WITH_SPECIAL",
+      "quotaInfo": {
+        "remainingFraction": 0.83,
+        "resetTime": "2026-11-21T19:00:00Z"
+      },
+      "model": "MODEL_GEMINI_3_7_FLASH_HIGH",
+      "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+      "modelProvider": "MODEL_PROVIDER_GOOGLE",
+      "supportsVideo": true,
+      "supportsPdf": true,
+      "supportedMimeTypes": {
+        "image/png": true,
+        "application/pdf": true
+      },
+      "thinkingLevel": "HIGH"
+    },
+    "gemini-3.7-flash-low": {
+      "displayName": "Gemini 3.7 Flash (Low)",
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingBudget": 65535,
+      "minThinkingBudget": 1,
+      "recommended": true,
+      "maxTokens": 1048576,
+      "maxOutputTokens": 65536,
+      "tokenizerType": "LLAMA_WITH_SPECIAL",
+      "quotaInfo": {
+        "remainingFraction": 0.83,
+        "resetTime": "2026-11-21T19:00:00Z"
+      },
+      "model": "MODEL_GEMINI_3_7_FLASH_LOW",
       "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
       "modelProvider": "MODEL_PROVIDER_GOOGLE",
       "supportsVideo": true,
@@ -25,8 +141,8 @@
       },
       "thinkingLevel": "LOW"
     },
-    "gemini-4-carbon-medium": {
-      "displayName": "Gemini 4 Carbon (Medium)",
+    "gemini-3.8-flash-high": {
+      "displayName": "Gemini 3.8 Flash",
       "supportsImages": true,
       "supportsThinking": true,
       "thinkingBudget": 65535,
@@ -39,32 +155,7 @@
         "remainingFraction": 0.83,
         "resetTime": "2026-11-21T19:00:00Z"
       },
-      "model": "MODEL_GEMINI_4_CARBON_MEDIUM",
-      "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
-      "modelProvider": "MODEL_PROVIDER_GOOGLE",
-      "supportsVideo": true,
-      "supportsPdf": true,
-      "supportedMimeTypes": {
-        "image/png": true,
-        "application/pdf": true
-      },
-      "thinkingLevel": "MEDIUM"
-    },
-    "gemini-4-carbon-high": {
-      "displayName": "Gemini 4 Carbon (High)",
-      "supportsImages": true,
-      "supportsThinking": true,
-      "thinkingBudget": 65535,
-      "minThinkingBudget": 1,
-      "recommended": true,
-      "maxTokens": 1048576,
-      "maxOutputTokens": 65536,
-      "tokenizerType": "LLAMA_WITH_SPECIAL",
-      "quotaInfo": {
-        "remainingFraction": 0.83,
-        "resetTime": "2026-11-21T19:00:00Z"
-      },
-      "model": "MODEL_GEMINI_4_CARBON_HIGH",
+      "model": "MODEL_GEMINI_3_8_FLASH_HIGH",
       "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
       "modelProvider": "MODEL_PROVIDER_GOOGLE",
       "supportsVideo": true,
@@ -125,31 +216,6 @@
       },
       "thinkingLevel": "MEDIUM"
     },
-    "gemini-3.8-flash-high": {
-      "displayName": "Gemini 3.8 Flash (High)",
-      "supportsImages": true,
-      "supportsThinking": true,
-      "thinkingBudget": 65535,
-      "minThinkingBudget": 1,
-      "recommended": true,
-      "maxTokens": 1048576,
-      "maxOutputTokens": 65536,
-      "tokenizerType": "LLAMA_WITH_SPECIAL",
-      "quotaInfo": {
-        "remainingFraction": 0.83,
-        "resetTime": "2026-11-21T19:00:00Z"
-      },
-      "model": "MODEL_GEMINI_3_8_FLASH_HIGH",
-      "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
-      "modelProvider": "MODEL_PROVIDER_GOOGLE",
-      "supportsVideo": true,
-      "supportsPdf": true,
-      "supportedMimeTypes": {
-        "image/png": true,
-        "application/pdf": true
-      },
-      "thinkingLevel": "HIGH"
-    },
     "gemini-3.8-flash-tiered": {
       "displayName": "Gemini 3.8 Flash (Tiered)",
       "supportsImages": true,
@@ -173,56 +239,6 @@
         "image/png": true,
         "application/pdf": true
       }
-    },
-    "gemini-3.5-flash-lite": {
-      "displayName": "Gemini 3.5 Flash Lite",
-      "supportsImages": true,
-      "supportsThinking": true,
-      "thinkingBudget": 65535,
-      "minThinkingBudget": 1,
-      "recommended": true,
-      "maxTokens": 1048576,
-      "maxOutputTokens": 65535,
-      "tokenizerType": "LLAMA_WITH_SPECIAL",
-      "quotaInfo": {
-        "remainingFraction": 0.83,
-        "resetTime": "2026-11-21T19:00:00Z"
-      },
-      "model": "MODEL_GEMINI_3_5_FLASH_LITE",
-      "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
-      "modelProvider": "MODEL_PROVIDER_GOOGLE",
-      "supportsVideo": true,
-      "supportsPdf": true,
-      "supportedMimeTypes": {
-        "image/png": true,
-        "application/pdf": true
-      }
-    },
-    "gemini-3.6-flash-high": {
-      "displayName": "Gemini 3.6 Flash (High)",
-      "supportsImages": true,
-      "supportsThinking": true,
-      "thinkingBudget": 65535,
-      "minThinkingBudget": 1,
-      "recommended": true,
-      "maxTokens": 1048576,
-      "maxOutputTokens": 65536,
-      "tokenizerType": "LLAMA_WITH_SPECIAL",
-      "quotaInfo": {
-        "remainingFraction": 0.83,
-        "resetTime": "2026-11-21T19:00:00Z"
-      },
-      "model": "MODEL_GEMINI_3_6_FLASH_HIGH",
-      "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
-      "modelProvider": "MODEL_PROVIDER_GOOGLE",
-      "supportsVideo": true,
-      "supportsPdf": true,
-      "supportedMimeTypes": {
-        "image/png": true,
-        "application/pdf": true
-      },
-      "thinkingLevel": "HIGH",
-      "disabled": true
     },
     "gemini-4-argon-preview": {
       "displayName": "Gemini 4 Argon (Preview)",
@@ -250,6 +266,81 @@
       "isInternal": true,
       "preview": true
     },
+    "gemini-4-carbon-high": {
+      "displayName": "Gemini 4 Carbon (High)",
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingBudget": 65535,
+      "minThinkingBudget": 1,
+      "recommended": true,
+      "maxTokens": 1048576,
+      "maxOutputTokens": 65536,
+      "tokenizerType": "LLAMA_WITH_SPECIAL",
+      "quotaInfo": {
+        "remainingFraction": 0.83,
+        "resetTime": "2026-11-21T19:00:00Z"
+      },
+      "model": "MODEL_GEMINI_4_CARBON_HIGH",
+      "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+      "modelProvider": "MODEL_PROVIDER_GOOGLE",
+      "supportsVideo": true,
+      "supportsPdf": true,
+      "supportedMimeTypes": {
+        "image/png": true,
+        "application/pdf": true
+      },
+      "thinkingLevel": "HIGH"
+    },
+    "gemini-4-carbon-low": {
+      "displayName": "Gemini 4 Carbon (Low)",
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingBudget": 65535,
+      "minThinkingBudget": 1,
+      "recommended": true,
+      "maxTokens": 1048576,
+      "maxOutputTokens": 65536,
+      "tokenizerType": "LLAMA_WITH_SPECIAL",
+      "quotaInfo": {
+        "remainingFraction": 0.83,
+        "resetTime": "2026-11-21T19:00:00Z"
+      },
+      "model": "MODEL_GEMINI_4_CARBON_LOW",
+      "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+      "modelProvider": "MODEL_PROVIDER_GOOGLE",
+      "supportsVideo": true,
+      "supportsPdf": true,
+      "supportedMimeTypes": {
+        "image/png": true,
+        "application/pdf": true
+      },
+      "thinkingLevel": "LOW"
+    },
+    "gemini-4-carbon-medium": {
+      "displayName": "Gemini 4 Carbon (Medium)",
+      "supportsImages": true,
+      "supportsThinking": true,
+      "thinkingBudget": 65535,
+      "minThinkingBudget": 1,
+      "recommended": true,
+      "maxTokens": 1048576,
+      "maxOutputTokens": 65536,
+      "tokenizerType": "LLAMA_WITH_SPECIAL",
+      "quotaInfo": {
+        "remainingFraction": 0.83,
+        "resetTime": "2026-11-21T19:00:00Z"
+      },
+      "model": "MODEL_GEMINI_4_CARBON_MEDIUM",
+      "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
+      "modelProvider": "MODEL_PROVIDER_GOOGLE",
+      "supportsVideo": true,
+      "supportsPdf": true,
+      "supportedMimeTypes": {
+        "image/png": true,
+        "application/pdf": true
+      },
+      "thinkingLevel": "MEDIUM"
+    },
     "tab_flash_lite_preview": {
       "displayName": "Tab Flash Lite",
       "supportsImages": true,
@@ -273,47 +364,6 @@
         "image/png": true,
         "application/pdf": true
       }
-    },
-    "chat_20706": {
-      "displayName": "chat_20706",
-      "supportsImages": true,
-      "supportsThinking": true,
-      "thinkingBudget": 65535,
-      "minThinkingBudget": 1,
-      "recommended": true,
-      "maxTokens": 1048576,
-      "maxOutputTokens": 65536,
-      "tokenizerType": "LLAMA_WITH_SPECIAL",
-      "quotaInfo": {
-        "remainingFraction": 0.83,
-        "resetTime": "2026-11-21T19:00:00Z"
-      },
-      "model": "MODEL_CHAT_20706",
-      "apiProvider": "API_PROVIDER_GOOGLE_GEMINI",
-      "modelProvider": "MODEL_PROVIDER_GOOGLE",
-      "supportsVideo": true,
-      "supportsPdf": true,
-      "supportedMimeTypes": {
-        "image/png": true,
-        "application/pdf": true
-      }
-    },
-    "claude-sonnet-5-5": {
-      "displayName": "Claude Sonnet 5.5",
-      "supportsImages": true,
-      "supportsThinking": true,
-      "thinkingBudget": 64000,
-      "minThinkingBudget": 1024,
-      "maxTokens": 1000000,
-      "maxOutputTokens": 128000,
-      "tokenizerType": "LLAMA_WITH_SPECIAL",
-      "quotaInfo": {
-        "remainingFraction": 1,
-        "resetTime": "2026-11-21T19:00:00Z"
-      },
-      "model": "MODEL_CLAUDE_SONNET_5_5",
-      "apiProvider": "API_PROVIDER_ANTHROPIC_VERTEX",
-      "modelProvider": "MODEL_PROVIDER_ANTHROPIC"
     }
   },
   "defaultAgentModelId": "gemini-4-carbon-high",
@@ -372,6 +422,11 @@
       "newModelId": "gemini-3.6-flash-high",
       "oldModelEnum": "MODEL_GEMINI_3_6_FLASH",
       "newModelEnum": "MODEL_GEMINI_3_6_FLASH_HIGH"
+    },
+    "gemini-3.7-flash-low": {
+      "newModelId": "gemini-3.8-flash-low",
+      "oldModelEnum": "MODEL_GEMINI_3_7_FLASH_LOW",
+      "newModelEnum": "MODEL_GEMINI_3_8_FLASH_LOW"
     }
   },
   "tieredModelIds": {

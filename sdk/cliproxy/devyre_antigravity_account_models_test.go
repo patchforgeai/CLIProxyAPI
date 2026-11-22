@@ -146,7 +146,7 @@ func idleAntigravity(t *testing.T, l *devyreAntigravityModelLearner) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		l.mu.Lock()
-		done, again := l.running, l.again
+		done, again := l.running, l.follow
 		l.mu.Unlock()
 		if done == nil && !again {
 			return
@@ -211,7 +211,7 @@ func TestDevyreAntigravityModels_StaleAnswersRefreshBehindTheList(t *testing.T) 
 	close(gate)
 	idleAntigravity(t, l)
 	learned, _ := l.store.Get("ag-a.json")
-	if len(learned.Answer.Served()) != 9 {
+	if len(learned.Answer.Served()) != 8 {
 		t.Fatalf("served = %v, want the refreshed answer", learned.Answer.ServedIDs())
 	}
 	if _, registered := f.snapshot(); len(registered) != 2 {
@@ -396,6 +396,9 @@ func TestDevyreAntigravityModels_RemovedCredentialsAreForgotten(t *testing.T) {
 	l := f.learner()
 	l.Ensure(context.Background())
 	l.store.SetRoutes("ag-b.json", []antigravityaccountmodels.Route{{Name: "gemini-4-neon", Default: "gemini-4-neon-xhigh"}})
+	l.mu.Lock()
+	l.failed["ag-b.json"] = devyreAntigravityFailure{at: f.now, credential: "old"}
+	l.mu.Unlock()
 	f.mu.Lock()
 	f.credentials = f.credentials[:1]
 	f.mu.Unlock()
@@ -407,6 +410,12 @@ func TestDevyreAntigravityModels_RemovedCredentialsAreForgotten(t *testing.T) {
 	}
 	if _, ok := l.store.Route("ag-b.json", "gemini-4-neon"); ok {
 		t.Fatal("a removed credential's names are dropped")
+	}
+	l.mu.Lock()
+	_, failedKept := l.failed["ag-b.json"]
+	l.mu.Unlock()
+	if failedKept {
+		t.Fatal("a removed credential's failure is dropped")
 	}
 
 	// A credential without an access token keeps what it learned, unasked.
@@ -586,11 +595,11 @@ func TestRegisterModelsForAuth_AntigravityServesWhatGoogleListsPerAccount(t *tes
 	service.registerModelsForAuth(context.Background(), full)
 	service.registerModelsForAuth(context.Background(), free)
 
-	wantFull := "claude-opus-5-5-high,claude-sonnet-5-5,gemini-3.1-pro,gemini-3.1-pro-high,gemini-3.5-flash-lite,gemini-3.7-flash,gemini-3.7-flash-high,gemini-3.8-flash,gemini-3.8-flash-high,gemini-3.8-flash-low,gemini-3.8-flash-medium,gemini-3.8-flash-tiered,gemini-4-carbon,gemini-4-carbon-high,gemini-4-carbon-low,gemini-4-carbon-medium,gemini-4-neon,gemini-4-neon-high,gemini-4-neon-low,gemini-4-neon-medium,gemini-4-neon-xhigh,gpt-oss-120b-medium"
+	wantFull := "claude-opus-5-5-high,gemini-3.1-pro,gemini-3.1-pro-low,gemini-3.5-flash-lite,gemini-3.7-flash,gemini-3.7-flash-high,gemini-3.7-flash-low,gemini-3.8-flash,gemini-3.8-flash-high,gemini-3.8-flash-low,gemini-3.8-flash-medium,gemini-3.8-flash-tiered,gemini-4-carbon,gemini-4-carbon-high,gemini-4-carbon-low,gemini-4-carbon-medium,gemini-4-neon,gemini-4-neon-high,gemini-4-neon-low,gemini-4-neon-medium,gemini-4-neon-xhigh,gemini-pro-agent,gpt-oss-120b-medium"
 	if got := strings.Join(registeredIDs(full.ID), ","); got != wantFull {
 		t.Fatalf("full serves %s,\nwant %s", got, wantFull)
 	}
-	wantFree := "claude-sonnet-5-5,gemini-3.5-flash-lite,gemini-3.7-flash,gemini-3.7-flash-high,gemini-3.8-flash,gemini-3.8-flash-high,gemini-3.8-flash-low,gemini-3.8-flash-medium,gemini-3.8-flash-tiered,gemini-4-carbon,gemini-4-carbon-high,gemini-4-carbon-low,gemini-4-carbon-medium"
+	wantFree := "gemini-3.5-flash-lite,gemini-3.7-flash,gemini-3.7-flash-high,gemini-3.7-flash-low,gemini-3.8-flash,gemini-3.8-flash-high,gemini-3.8-flash-low,gemini-3.8-flash-medium,gemini-3.8-flash-tiered,gemini-4-carbon,gemini-4-carbon-high,gemini-4-carbon-low,gemini-4-carbon-medium"
 	if got := strings.Join(registeredIDs(free.ID), ","); got != wantFree {
 		t.Fatalf("free serves %s,\nwant %s", got, wantFree)
 	}
@@ -600,6 +609,13 @@ func TestRegisterModelsForAuth_AntigravityServesWhatGoogleListsPerAccount(t *tes
 	}
 	if providers := util.GetProviderName("gemini-4-neon"); len(providers) != 1 || providers[0] != "antigravity" {
 		t.Fatalf("providers = %v", providers)
+	}
+	// Google lists claude-sonnet-5-5 for both accounts: the Claude accounts' id,
+	// which Claude Code's requests must never reach Google under.
+	for _, provider := range util.GetProviderName("claude-sonnet-5-5") {
+		if provider == "antigravity" {
+			t.Fatal("an Antigravity account serves the Claude provider's id")
+		}
 	}
 	if route, ok := store.Route(full.ID, "gemini-4-neon"); !ok || route.Resolve("low") != "gemini-4-neon-low" || route.Resolve("") != "gemini-4-neon-xhigh" {
 		t.Fatalf("route = %+v", route)
@@ -623,7 +639,7 @@ func TestRegisterModelsForAuth_AntigravityServesWhatGoogleListsPerAccount(t *tes
 		"gemini-4-carbon":  "Gemini 4 Carbon",
 		"gemini-3.8-flash": "Gemini 3.8 Flash",
 		"gemini-3.7-flash": "Gemini 3.8 Flash",
-		"gemini-3.1-pro":   "Gemini 3.1 Pro (High)",
+		"gemini-3.1-pro":   "Gemini 3.1 Pro",
 	} {
 		if entry, ok := gemini[name]; !ok || entry["displayName"] != display {
 			t.Fatalf("GET /v1beta/models %s = %v, want display name %q", name, entry, display)
@@ -681,8 +697,8 @@ func TestRegisterModelsForAuth_AntigravityLeavesConfiguredNamesAndExclusionsAlon
 	if _, ok := store.Route(account.ID, "gemini-4-carbon"); !ok {
 		t.Fatal("the other names stand")
 	}
-	for _, id := range []string{"gemini-4-neon-xhigh", "gemini-3.1-pro", "gemini-3.1-pro-high"} {
-		if id == "gemini-3.1-pro-high" {
+	for _, id := range []string{"gemini-4-neon-xhigh", "gemini-3.1-pro", "gemini-3.1-pro-low"} {
+		if id == "gemini-3.1-pro-low" {
 			if registeredInfo(account.ID, id) == nil {
 				t.Fatal("an id the exclusion does not name stays")
 			}
@@ -695,15 +711,16 @@ func TestRegisterModelsForAuth_AntigravityLeavesConfiguredNamesAndExclusionsAlon
 	if _, ok := store.Route(account.ID, "gemini-3.1-pro"); ok {
 		t.Fatal("an excluded name is not published")
 	}
-	if route, ok := store.Route(account.ID, "gemini-4-neon"); !ok || route.Resolve("") != "gemini-4-neon-low" || route.Resolve("xhigh") != "gemini-4-neon-low" {
-		t.Fatalf("route = %+v, want the excluded default never reached", route)
+	if route, ok := store.Route(account.ID, "gemini-4-neon"); !ok || route.Resolve("") != "gemini-4-neon-high" || route.Resolve("xhigh") != "gemini-4-neon-high" || route.Resolve("low") != "gemini-4-neon-low" {
+		t.Fatalf("route = %+v, want the excluded default never reached, the high variant in its place", route)
 	}
 }
 
 // The whole path against a stand-in for Google's Code Assist API: two accounts
-// are added, the learner asks Google for each (in the place of the capability
-// probe, with the account's project), and a request for a Gemini API name
-// reaches Google as the variant for its level, on the account that serves it.
+// are added, the learner asks Google for each (with the account's project),
+// the capability probe asks only while an account has no answer, and a
+// request for a Gemini API name reaches Google as the variant for its level,
+// on the account that serves it.
 func TestAntigravityAccountModels_EndToEnd(t *testing.T) {
 	type call struct{ token, path, body string }
 	var mu sync.Mutex
@@ -746,14 +763,10 @@ func TestAntigravityAccountModels_EndToEnd(t *testing.T) {
 	}
 	fullAuth, freeAuth := account("ag-devyre-e2e-full.json", "ya29.full"), account("ag-devyre-e2e-free.json", "ya29.free")
 	cleanAntigravityAccounts(t, fullAuth.ID, freeAuth.ID)
-	t.Cleanup(func() {
-		devyreAntigravityLearner.Store(nil)
-		antigravityaccountmodels.SetLearner(nil)
-	})
-
 	manager := coreauth.NewManager(nil, nil, nil)
 	service := &Service{cfg: &config.Config{RequestRetry: 1}, coreManager: manager}
 	service.devyreStartAntigravityAccountModels()
+	t.Cleanup(service.devyreStopAntigravityAccountModels)
 	service.applyCoreAuthAddOrUpdate(context.Background(), fullAuth)
 	service.applyCoreAuthAddOrUpdate(context.Background(), freeAuth)
 
@@ -772,19 +785,36 @@ func TestAntigravityAccountModels_EndToEnd(t *testing.T) {
 	}
 	service.WaitAntigravityProbes()
 
-	mu.Lock()
-	for _, c := range calls {
-		if c.path != "/v1internal:fetchAvailableModels" {
-			continue
+	countAsks := func() (learner, probe int) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range calls {
+			switch {
+			case c.path != "/v1internal:fetchAvailableModels":
+			case c.body == `{"project":"project-`+strings.TrimPrefix(c.token, "ya29.")+`"}`:
+				learner++
+			case c.body == `{}`:
+				probe++
+			default:
+				t.Fatalf("fetchAvailableModels body = %s", c.body)
+			}
 		}
-		if c.body != `{"project":"project-`+strings.TrimPrefix(c.token, "ya29.")+`"}` {
-			t.Fatalf("fetchAvailableModels body = %s: the capability probe asked beside the learner", c.body)
-		}
+		return learner, probe
 	}
-	asked := len(calls)
+	learnerAsks, probeAsks := countAsks()
+	if learnerAsks != 2 || probeAsks < 1 {
+		t.Fatalf("learner asked %d times, probe %d: want once per account, and the probe for an account without an answer", learnerAsks, probeAsks)
+	}
+	// Registered again with an answer for their tokens: nobody asks.
+	before := len(calls)
+	service.applyCoreAuthAddOrUpdate(context.Background(), fullAuth)
+	service.applyCoreAuthAddOrUpdate(context.Background(), freeAuth)
+	service.WaitAntigravityProbes()
+	mu.Lock()
+	after := len(calls)
 	mu.Unlock()
-	if asked != 2 {
-		t.Fatalf("asked Google %d times, want once per account", asked)
+	if after != before {
+		t.Fatalf("calls %d -> %d: the probe or the learner asked again for accounts the learner has answers for", before, after)
 	}
 
 	execute := func(model, level string) call {
@@ -823,5 +853,140 @@ func TestAntigravityAccountModels_EndToEnd(t *testing.T) {
 		if tc.token != "" && got.token != tc.token {
 			t.Fatalf("%s went to the account of %s", tc.model, got.token)
 		}
+	}
+}
+
+// The capability probe stands aside only for an account the learner has an
+// answer for that serves models; it runs for one without (not asked yet,
+// failed, or serving nothing), and for another service.
+func TestDevyreAntigravityLearnerProbes(t *testing.T) {
+	f := newFakeAntigravityModels(t, "ag-probe.json")
+	gate := make(chan struct{})
+	f.gate = gate
+	l := f.learner()
+	service := &Service{cfg: &config.Config{}}
+	l.s = service
+	devyreAntigravityLearner.Store(l)
+	t.Cleanup(func() {
+		close(gate)
+		devyreAntigravityLearner.Store(nil)
+	})
+	auth := f.credential("ag-probe.json")
+
+	if service.devyreAntigravityLearnerProbes(auth) {
+		t.Fatal("without an answer the probe runs")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for fetched, _ := f.snapshot(); len(fetched) != 1; fetched, _ = f.snapshot() {
+		if time.Now().After(deadline) {
+			t.Fatal("the registered credential was not asked")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	l.store.Set(auth.ID, antigravityaccountmodels.Learned{Credential: devyreAntigravityCredential(auth), Answer: antigravityAnswer(t, "fetch_available_models_full.json")})
+	if !service.devyreAntigravityLearnerProbes(auth) {
+		t.Fatal("with an answer that serves models the learner takes the probe's place")
+	}
+	if (&Service{}).devyreAntigravityLearnerProbes(auth) {
+		t.Fatal("another service's registrations probe as before")
+	}
+	empty, _ := antigravityaccountmodels.Parse([]byte(`{"models":{}}`))
+	l.store.Set(auth.ID, antigravityaccountmodels.Learned{Credential: devyreAntigravityCredential(auth), Answer: empty})
+	if service.devyreAntigravityLearnerProbes(auth) {
+		t.Fatal("an answer that serves nothing leaves the catalog, and the probe, as before")
+	}
+}
+
+// An answer can change under the same token: the learner asks again on its
+// own once an account's answer is devyreAntigravityModelsRefresh old, and only
+// that account.
+func TestDevyreAntigravityModels_RefreshesOldAnswersOnItsOwn(t *testing.T) {
+	f := newFakeAntigravityModels(t, "ag-a.json")
+	l := f.learner()
+	l.Ensure(context.Background())
+	f.advance(20 * time.Minute)
+	f.mu.Lock()
+	f.credentials = append(f.credentials, &coreauth.Auth{ID: "ag-b.json", Provider: "antigravity", Metadata: map[string]any{"access_token": "ya29.b"}})
+	f.bodies["ag-b.json"] = antigravityFixture(t, "fetch_available_models_full.json")
+	f.mu.Unlock()
+	l.noteRegistered(f.credential("ag-b.json"))
+	idleAntigravity(t, l)
+
+	f.advance(9 * time.Minute)
+	if l.refreshOld() {
+		t.Fatal("no answer is old enough yet")
+	}
+	f.mu.Lock()
+	f.bodies["ag-a.json"] = antigravityFixture(t, "fetch_available_models_free.json")
+	f.mu.Unlock()
+	f.advance(time.Minute)
+	if !l.refreshOld() {
+		t.Fatal("ag-a.json's answer is old enough")
+	}
+	idleAntigravity(t, l)
+	fetched, registered := f.snapshot()
+	if strings.Join(fetched, ",") != "ag-a.json,ag-b.json,ag-a.json" {
+		t.Fatalf("fetched = %v, want only the old answer asked again", fetched)
+	}
+	if len(registered) != 3 {
+		t.Fatalf("registered = %v, want the changed answer registered again", registered)
+	}
+}
+
+// Shutdown stops the learner: a lookup running then registers nothing, no
+// lookup starts after, its own refreshes end, and the request paths no longer
+// ask it.
+func TestDevyreAntigravityModels_StopRegistersNothing(t *testing.T) {
+	f := newFakeAntigravityModels(t, "ag-a.json")
+	gate := make(chan struct{})
+	f.gate = gate
+	l := f.learner()
+	done := l.start(devyreAntigravityModelsRetryGap, false)
+	deadline := time.Now().Add(5 * time.Second)
+	for fetched, _ := f.snapshot(); len(fetched) != 1; fetched, _ = f.snapshot() {
+		if time.Now().After(deadline) {
+			t.Fatal("the lookup did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	refreshing := make(chan struct{})
+	go func() {
+		l.refreshEvery(time.Millisecond)
+		close(refreshing)
+	}()
+	l.halt()
+	close(gate)
+	<-done
+	select {
+	case <-refreshing:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refreshes did not end")
+	}
+	if _, registered := f.snapshot(); len(registered) != 0 {
+		t.Fatalf("registered = %v after the stop", registered)
+	}
+	if _, ok := l.store.Get("ag-a.json"); ok {
+		t.Fatal("a lookup ending after the stop records nothing")
+	}
+	l.Ensure(context.Background())
+	l.noteRegistered(f.credential("ag-a.json"))
+	if fetched, _ := f.snapshot(); len(fetched) != 1 {
+		t.Fatalf("fetched = %v after the stop", fetched)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	service := &Service{cfg: &config.Config{}, coreManager: manager}
+	service.devyreStartAntigravityAccountModels()
+	t.Cleanup(service.devyreStopAntigravityAccountModels)
+	if devyreAntigravityLearner.Load() == nil {
+		t.Fatal("Run installs the learner")
+	}
+	(&Service{}).devyreStopAntigravityAccountModels()
+	if devyreAntigravityLearner.Load() == nil {
+		t.Fatal("another service's shutdown leaves it")
+	}
+	service.devyreStopAntigravityAccountModels()
+	if devyreAntigravityLearner.Load() != nil || antigravityaccountmodels.Resolve(context.Background(), "gemini-4-neon") {
+		t.Fatal("Shutdown removes the learner")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -25,36 +26,48 @@ import (
 // once, one lookup at a time:
 //
 //   - when a Gemini client asks for its model list (GET /v1beta/models); the
-//     list waits for credentials that have no answer yet, and stale answers
-//     are refreshed behind it;
+//     list waits for credentials that have no answer yet, and answers older
+//     than devyreAntigravityModelsTTL are refreshed behind it;
 //   - when a credential is registered (added, or changed: a refreshed token, a
-//     new sign-in) without an answer for its current token. This takes the
-//     place of upstream's capability probe, whose request it is: one answer
-//     serves both the models and their web-search hints;
+//     new sign-in) without an answer for its current token;
 //   - when a request names a model no credential serves: it waits for a running
 //     lookup, or starts one unless one ended within devyreAntigravityModelsRetryGap;
+//   - on its own, for answers older than devyreAntigravityModelsRefresh, since
+//     an answer can change under the same token (a model Google disables for a
+//     while);
 //   - once at start.
 //
-// A credential is asked at most once per devyreAntigravityModelsRetryGap for
-// the same token. One whose lookup fails keeps what it had. What changed is
+// Its request is upstream's capability probe's, and its answer carries the
+// probe's web-search hints: for an account it has an answer for, the probe
+// asks nothing of its own (devyreAntigravityLearnerProbes).
+//
+// A credential whose lookup fails keeps what it had. What changed is
 // registered again at once, so routing and the model lists follow without a
-// restart.
+// restart. Shutdown stops the learner: a lookup running then registers nothing.
 const (
 	// devyreAntigravityModelsFetchTimeout bounds one credential's lookup.
 	devyreAntigravityModelsFetchTimeout = 15 * time.Second
 	// devyreAntigravityModelsWait is the longest a model list or a request waits.
 	devyreAntigravityModelsWait = 10 * time.Second
-	// devyreAntigravityModelsTTL is how long an answer stands before it is refreshed.
+	// devyreAntigravityModelsTTL is how old an answer gets before a model list
+	// refreshes it.
 	devyreAntigravityModelsTTL = 15 * time.Minute
+	// devyreAntigravityModelsRefresh is how old an answer gets before the
+	// learner asks again on its own.
+	devyreAntigravityModelsRefresh = 30 * time.Minute
+	// devyreAntigravityModelsTick is how often the learner looks for such answers.
+	devyreAntigravityModelsTick = 5 * time.Minute
 	// devyreAntigravityModelsRetryGap spaces the lookups an unknown model
-	// starts, and the times one credential is asked.
+	// starts, and a failed credential's next attempt with the same token.
 	devyreAntigravityModelsRetryGap = time.Minute
+	// devyreAntigravityModelsNewOnly asks only the credentials without an
+	// answer for their current token.
+	devyreAntigravityModelsNewOnly = time.Duration(math.MaxInt64)
 	// devyreAntigravityModelsWorkers bounds the credentials asked at once.
 	devyreAntigravityModelsWorkers = 4
 )
 
-// devyreAntigravityLearner is the learner Run installed, which takes the place
-// of the capability probe for its service.
+// devyreAntigravityLearner is the learner Run installed.
 var devyreAntigravityLearner atomic.Pointer[devyreAntigravityModelLearner]
 
 type devyreAntigravityFailure struct {
@@ -78,13 +91,19 @@ type devyreAntigravityModelLearner struct {
 	mu sync.Mutex
 	// running is closed when the running lookup ends; nil when none runs.
 	running chan struct{}
-	// again asks for another lookup once the running one ends, for a
-	// credential registered while it ran.
-	again bool
-	// lastEnded is when the last lookup ended.
+	// runningAge is the age from which the running lookup asks an answer again.
+	runningAge time.Duration
+	// follow asks for another lookup, from followAge, once the running one
+	// ends: for a credential registered while it ran, or answers it leaves.
+	follow    bool
+	followAge time.Duration
+	// lastEnded is when the last lookup that asked a credential ended.
 	lastEnded time.Time
 	// failed is each credential's last failed lookup.
 	failed map[string]devyreAntigravityFailure
+	// stopped is set, and stop closed, when the service shuts down.
+	stopped bool
+	stop    chan struct{}
 }
 
 func newDevyreAntigravityModelLearner(s *Service) *devyreAntigravityModelLearner {
@@ -93,6 +112,7 @@ func newDevyreAntigravityModelLearner(s *Service) *devyreAntigravityModelLearner
 		store:  antigravityaccountmodels.Default(),
 		now:    time.Now,
 		failed: make(map[string]devyreAntigravityFailure),
+		stop:   make(chan struct{}),
 	}
 	l.fetch = func(ctx context.Context, auth *coreauth.Auth) ([]byte, error) {
 		return l.s.devyreFetchAntigravityAvailableModels(ctx, auth)
@@ -107,8 +127,8 @@ func newDevyreAntigravityModelLearner(s *Service) *devyreAntigravityModelLearner
 }
 
 // devyreStartAntigravityAccountModels installs the learner for the request
-// paths and the registration, and asks Google once for the credentials loaded
-// at start.
+// paths and the registration, asks Google once for the credentials loaded at
+// start, and refreshes old answers until Shutdown.
 func (s *Service) devyreStartAntigravityAccountModels() {
 	if s == nil || s.coreManager == nil {
 		return
@@ -117,27 +137,46 @@ func (s *Service) devyreStartAntigravityAccountModels() {
 	devyreAntigravityLearner.Store(learner)
 	antigravityaccountmodels.SetLearner(learner)
 	go learner.Ensure(context.Background())
+	go learner.refreshEvery(devyreAntigravityModelsTick)
 }
 
-// devyreAntigravityLearnerProbes reports whether this service's learner takes
-// the place of the capability probe for a credential just registered, and
-// starts its lookup when the credential has no answer for its current token.
-func (s *Service) devyreAntigravityLearnerProbes(auth *coreauth.Auth) bool {
+// devyreStopAntigravityAccountModels stops this service's learner: its own
+// refreshes end, a lookup running now registers nothing, and the request paths
+// no longer ask it.
+func (s *Service) devyreStopAntigravityAccountModels() {
 	learner := devyreAntigravityLearner.Load()
 	if s == nil || learner == nil || learner.s != s {
+		return
+	}
+	learner.halt()
+	if devyreAntigravityLearner.CompareAndSwap(learner, nil) {
+		antigravityaccountmodels.SetLearner(nil)
+	}
+}
+
+// devyreAntigravityLearnerProbes starts the lookup of a credential just
+// registered that has no answer for its current token, and reports whether
+// this service's learner takes the place of the capability probe for it: when
+// it has an answer for the account that serves models, whose web-search hints
+// the registration applied. Without one (not asked yet, failed, or serving
+// nothing) the probe runs as before.
+func (s *Service) devyreAntigravityLearnerProbes(auth *coreauth.Auth) bool {
+	learner := devyreAntigravityLearner.Load()
+	if s == nil || auth == nil || learner == nil || learner.s != s {
 		return false
 	}
 	learner.noteRegistered(auth)
-	return true
+	learned, ok := learner.store.Get(auth.ID)
+	return ok && len(learned.Answer.Served()) > 0
 }
 
 // devyreWithAccountAntigravityModels makes an Antigravity credential's models
-// the ones Google lists for its account, once Google has answered: the models
-// that are neither disabled nor internal, each described by the catalog when
-// it knows the id and by Google's entry when it does not, marked for Google
-// Search as Google's answer lists them. To these it adds the Gemini API names
-// the account serves them under (antigravityaccountmodels.Routes), which it
-// publishes for the executor; the ids stay listed too.
+// the ones Google lists for its account, once Google has answered
+// (antigravityaccountmodels.Answer.Served), each described by the catalog
+// when it knows the id and by Google's entry when it does not, marked for
+// Google Search as Google's answer lists them. To these it adds the Gemini API
+// names the account serves them under (antigravityaccountmodels.Routes), which
+// it publishes for the executor; the ids stay listed too.
 //
 // models are the catalog's, less what excluded names; the same exclusions
 // apply to Google's models and to the names. A name an oauth-model-alias entry
@@ -210,7 +249,7 @@ func (l *devyreAntigravityModelLearner) Ensure(ctx context.Context) {
 	if !missing && !stale {
 		return
 	}
-	done := l.start()
+	done := l.start(devyreAntigravityModelsTTL, false)
 	if missing {
 		l.wait(ctx, done)
 	}
@@ -228,13 +267,14 @@ func (l *devyreAntigravityModelLearner) Resolve(ctx context.Context, model strin
 		if recent {
 			return false
 		}
-		done = l.start()
+		done = l.start(devyreAntigravityModelsRetryGap, false)
 	}
 	return l.wait(ctx, done)
 }
 
 // noteRegistered starts a lookup for a credential just registered that has no
-// answer for its current token, without waiting for it.
+// answer for its current token, without waiting for it; it asks no other
+// credential that has one.
 func (l *devyreAntigravityModelLearner) noteRegistered(auth *coreauth.Auth) {
 	if !devyreAsksGoogleForModels(auth) {
 		return
@@ -245,24 +285,36 @@ func (l *devyreAntigravityModelLearner) noteRegistered(auth *coreauth.Auth) {
 	if l.recentlyFailed(auth, l.now()) {
 		return
 	}
-	l.mu.Lock()
-	if l.running != nil {
-		// The running lookup may have listed the credentials before this one.
-		l.again = true
-		l.mu.Unlock()
-		return
-	}
-	l.mu.Unlock()
-	l.start()
+	// A running lookup may have listed the credentials before this one.
+	l.start(devyreAntigravityModelsNewOnly, true)
 }
 
-// recentlyFailed reports whether the credential's lookup failed within the
-// gap with its current token.
-func (l *devyreAntigravityModelLearner) recentlyFailed(auth *coreauth.Auth, now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	failure, ok := l.failed[auth.ID]
-	return ok && failure.credential == devyreAntigravityCredential(auth) && now.Sub(failure.at) < devyreAntigravityModelsRetryGap
+// refreshEvery asks again, every tick, for the answers older than
+// devyreAntigravityModelsRefresh, until the learner stops.
+func (l *devyreAntigravityModelLearner) refreshEvery(tick time.Duration) {
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-l.stop:
+			return
+		case <-ticker.C:
+			l.refreshOld()
+		}
+	}
+}
+
+// refreshOld starts a lookup of the answers older than
+// devyreAntigravityModelsRefresh, and reports whether there were any.
+func (l *devyreAntigravityModelLearner) refreshOld() bool {
+	now := l.now()
+	for _, auth := range l.credentials() {
+		if l.due(auth, now, devyreAntigravityModelsRefresh) {
+			l.start(devyreAntigravityModelsRefresh, false)
+			return true
+		}
+	}
+	return false
 }
 
 // anyAsks reports whether a credential can ask Google.
@@ -275,37 +327,77 @@ func (l *devyreAntigravityModelLearner) anyAsks() bool {
 	return false
 }
 
-// due reports whether a lookup asks the credential: it can, has no answer for
-// its current token or one older than the gap, and did not just fail.
-func (l *devyreAntigravityModelLearner) due(auth *coreauth.Auth, now time.Time) bool {
+// recentlyFailed reports whether the credential's lookup failed within the
+// gap with its current token.
+func (l *devyreAntigravityModelLearner) recentlyFailed(auth *coreauth.Auth, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	failure, ok := l.failed[auth.ID]
+	return ok && failure.credential == devyreAntigravityCredential(auth) && now.Sub(failure.at) < devyreAntigravityModelsRetryGap
+}
+
+// due reports whether a lookup from minAge asks the credential: it can, did
+// not just fail, and has no answer for its current token or one at least
+// minAge old.
+func (l *devyreAntigravityModelLearner) due(auth *coreauth.Auth, now time.Time, minAge time.Duration) bool {
 	if !devyreAsksGoogleForModels(auth) || l.recentlyFailed(auth, now) {
 		return false
 	}
 	learned, ok := l.store.Get(auth.ID)
-	return !ok || learned.Credential != devyreAntigravityCredential(auth) || now.Sub(learned.At) >= devyreAntigravityModelsRetryGap
+	return !ok || learned.Credential != devyreAntigravityCredential(auth) || now.Sub(learned.At) >= minAge
 }
 
-// start begins a lookup unless one already runs, and returns the channel closed
-// when the lookup ends.
-func (l *devyreAntigravityModelLearner) start() chan struct{} {
+func (l *devyreAntigravityModelLearner) isStopped() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.stopped
+}
+
+func (l *devyreAntigravityModelLearner) halt() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.stopped {
+		l.stopped = true
+		close(l.stop)
+	}
+}
+
+// start begins a lookup that asks the credentials due from minAge unless one
+// already runs, and returns the channel closed when the lookup ends. When one
+// runs that asks less (from an older age), or after is set, another lookup
+// follows it. A stopped learner starts none.
+func (l *devyreAntigravityModelLearner) start(minAge time.Duration, after bool) chan struct{} {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.stopped {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
 	if l.running != nil {
+		if after || minAge < l.runningAge {
+			if !l.follow || minAge < l.followAge {
+				l.followAge = minAge
+			}
+			l.follow = true
+		}
 		return l.running
 	}
 	done := make(chan struct{})
-	l.running = done
+	l.running, l.runningAge = done, minAge
 	go func() {
-		l.run()
+		asked := l.run(minAge)
 		l.mu.Lock()
 		l.running = nil
-		l.lastEnded = l.now()
-		again := l.again
-		l.again = false
+		if asked {
+			l.lastEnded = l.now()
+		}
+		follow, age := l.follow, l.followAge
+		l.follow = false
 		l.mu.Unlock()
 		close(done)
-		if again {
-			l.start()
+		if follow {
+			l.start(age, false)
 		}
 	}()
 	return done
@@ -329,22 +421,31 @@ func (l *devyreAntigravityModelLearner) wait(ctx context.Context, done <-chan st
 	}
 }
 
-func (l *devyreAntigravityModelLearner) run() {
+// run asks the credentials due from minAge, forgets removed ones, and reports
+// whether it asked any.
+func (l *devyreAntigravityModelLearner) run(minAge time.Duration) bool {
 	credentials := l.credentials()
 	keep := make(map[string]struct{}, len(credentials))
 	for _, auth := range credentials {
 		keep[auth.ID] = struct{}{}
 	}
 	l.store.Retain(keep)
+	l.mu.Lock()
+	for id := range l.failed {
+		if _, ok := keep[id]; !ok {
+			delete(l.failed, id)
+		}
+	}
+	l.mu.Unlock()
 	now := l.now()
 	var due []*coreauth.Auth
 	for _, auth := range credentials {
-		if l.due(auth, now) {
+		if l.due(auth, now, minAge) {
 			due = append(due, auth)
 		}
 	}
 	if len(due) == 0 {
-		return
+		return false
 	}
 	work := make(chan *coreauth.Auth)
 	var wg sync.WaitGroup
@@ -363,6 +464,7 @@ func (l *devyreAntigravityModelLearner) run() {
 	}
 	close(work)
 	wg.Wait()
+	return true
 }
 
 func (l *devyreAntigravityModelLearner) learn(auth *coreauth.Auth) {
@@ -370,6 +472,9 @@ func (l *devyreAntigravityModelLearner) learn(auth *coreauth.Auth) {
 	defer cancel()
 	credential := devyreAntigravityCredential(auth)
 	body, errFetch := l.fetch(ctx, auth)
+	if l.isStopped() {
+		return
+	}
 	var answer antigravityaccountmodels.Answer
 	if errFetch == nil {
 		answer, errFetch = antigravityaccountmodels.Parse(body)
@@ -393,6 +498,9 @@ func (l *devyreAntigravityModelLearner) learn(auth *coreauth.Auth) {
 		log.Infof("antigravity account models: auth=%s models=%d (%s)", auth.ID, len(ids), strings.Join(ids, ","))
 	} else {
 		log.Infof("antigravity account models: auth=%s Google lists no models it serves; the catalog stands", auth.ID)
+	}
+	if l.isStopped() {
+		return
 	}
 	l.register(auth)
 }

@@ -39,6 +39,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -120,15 +121,31 @@ type Learned struct {
 }
 
 // Served returns the models an account serves once Google has answered: the
-// ones listed that are neither disabled nor internal, without the ids
-// upstream's catalog generator skips.
+// ones listed that are neither disabled nor internal, nor retired (a model
+// deprecatedModelIds names is served by its replacement, under its own name),
+// without the ids upstream's catalog generator skips. A partner's model
+// (Anthropic's, OpenAI's) is served only under an id the Antigravity catalog
+// already has, and never under one another provider's catalog has: an id such
+// as claude-sonnet-5-5 belongs to the Claude accounts, whose clients would
+// otherwise be sent to Google.
 func (a Answer) Served() []Model {
+	retired := make(map[string]struct{}, len(a.Deprecated))
+	for old := range a.Deprecated {
+		retired[strings.ToLower(old)] = struct{}{}
+	}
 	out := make([]Model, 0, len(a.Models))
 	for _, model := range a.Models {
 		if model.Disabled || model.Internal {
 			continue
 		}
-		if _, skip := skippedIDs[strings.ToLower(model.ID)]; skip {
+		key := strings.ToLower(model.ID)
+		if _, skip := skippedIDs[key]; skip {
+			continue
+		}
+		if _, old := retired[key]; old {
+			continue
+		}
+		if !model.Google() && !partnerServed(model.ID) {
 			continue
 		}
 		out = append(out, model)
@@ -144,6 +161,38 @@ func (a Answer) ServedIDs() []string {
 		out = append(out, model.ID)
 	}
 	return out
+}
+
+// Google reports whether the model is Google's own: by model_provider, else
+// by a gemini id.
+func (m Model) Google() bool {
+	if m.Provider == "" {
+		return strings.HasPrefix(strings.ToLower(m.ID), "gemini")
+	}
+	return strings.EqualFold(m.Provider, googleProvider)
+}
+
+// otherCatalogs are the catalogs of the providers whose ids a partner's model
+// served through Antigravity must not take.
+var otherCatalogs = []string{"claude", "codex", "kimi", "xai", "devin", "meta"}
+
+// partnerServed reports whether a partner's model may be served under its id:
+// the Antigravity catalog has the id, and no other provider's catalog does.
+func partnerServed(id string) bool {
+	if !catalogHas(id, "antigravity") {
+		return false
+	}
+	for _, channel := range otherCatalogs {
+		if catalogHas(id, channel) {
+			return false
+		}
+	}
+	return true
+}
+
+// catalogHas reports whether a provider's catalog lists id (tests replace it).
+var catalogHas = func(id, channel string) bool {
+	return registry.LookupStaticModelInfoByChannel(id, channel) != nil
 }
 
 // wireInt reads an integer that proto3 JSON writes as a number or, for 64-bit
@@ -279,9 +328,38 @@ func LevelName(suffix string) string {
 	return strings.ToLower(strings.TrimLeft(strings.TrimSpace(suffix), "-"))
 }
 
+// variantID is the id of the family's variant for suffix: the key and the
+// suffix, read with a dash when the suffix has none and only that form is a
+// model Google lists.
+func (f Family) variantID(suffix string, listed map[string]struct{}) string {
+	id := f.Key + suffix
+	if suffix == "" || strings.HasPrefix(suffix, "-") {
+		return id
+	}
+	if _, ok := listed[strings.ToLower(id)]; ok {
+		return id
+	}
+	if _, ok := listed[strings.ToLower(f.Key+"-"+suffix)]; ok {
+		return f.Key + "-" + suffix
+	}
+	return id
+}
+
+// levelRank orders the thinking levels.
+var levelRank = map[string]int{"minimal": 0, "low": 1, "medium": 2, "high": 3, "xhigh": 4, "max": 5}
+
+// levelInName is a display name's trailing level, as Google writes it
+// ("Gemini 4 Neon (Low)", "(XHigh)", "(Extra High)").
+var levelInName = regexp.MustCompile(`(?i)\s*\((?:minimal|low|medium|high|x-?high|extra[ -]?high|max)\)\s*$`)
+
+// withoutLevel is a display name without its trailing level.
+func withoutLevel(name string) string {
+	return strings.TrimSpace(levelInName.ReplaceAllString(name, ""))
+}
+
 // Route is a Gemini API name an account serves beside its ids, and the served
 // ids a request for it reaches: one per thinking level, and one for a request
-// that names no level the route has.
+// that names none.
 type Route struct {
 	Name        string
 	DisplayName string
@@ -289,37 +367,92 @@ type Route struct {
 	Levels []string
 	// ByLevel maps each level to the id that serves it.
 	ByLevel map[string]string
-	// Default serves a request without a level the route has.
+	// Default serves a request that names no level: Google's default variant
+	// when the account serves it, else the high one, else the highest.
 	Default string
 }
 
-// Resolve returns the served id a request for the route at level reaches:
-// the level's own id, else the default.
+// Resolve returns the served id a request for the route at level reaches: the
+// level's own id; for a level the route lacks, the nearest one it has (a tie
+// to the higher, so xhigh or max above its top reach its highest); without a
+// level ("", auto, none, or one no level order knows), the default.
 func (r Route) Resolve(level string) string {
-	if id, ok := r.ByLevel[strings.ToLower(strings.TrimSpace(level))]; ok && id != "" {
+	level = strings.ToLower(strings.TrimSpace(level))
+	if id, ok := r.ByLevel[level]; ok && id != "" {
 		return id
 	}
-	return r.Default
+	want, known := levelRank[level]
+	if !known {
+		return r.Default
+	}
+	best, bestRank, found := "", 0, false
+	for _, served := range r.Levels {
+		rank, ok := levelRank[served]
+		id := r.ByLevel[served]
+		if !ok || id == "" {
+			continue
+		}
+		distance, bestDistance := abs(rank-want), abs(bestRank-want)
+		if !found || distance < bestDistance || (distance == bestDistance && rank > bestRank) {
+			best, bestRank, found = id, rank, true
+		}
+	}
+	if !found {
+		return r.Default
+	}
+	return best
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}
+
+// defaultID is the id a route reaches without a level: Google's default
+// variant when served (googleDefault), else the high one, else the highest.
+func defaultID(byLevel map[string]string, levels []string, googleDefault string) string {
+	if googleDefault != "" {
+		return googleDefault
+	}
+	if id, ok := byLevel["high"]; ok {
+		return id
+	}
+	best, bestRank := "", -1
+	for _, level := range levels {
+		if rank, ok := levelRank[level]; ok && rank > bestRank {
+			best, bestRank = byLevel[level], rank
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return byLevel[levels[len(levels)-1]]
 }
 
 // Routes returns the Gemini API names an account serves beside its ids, given
 // the ids it serves (Served, less what the configuration excludes):
 //
 //   - a family whose variants it serves, under the family's key (unless the key
-//     is itself a served id), with the served variants' levels; without a
-//     level, the default variant, else the first one served;
+//     is itself a served id), with the served variants' levels;
 //   - an id in no family that ends in a level suffix, under the name without
 //     it, when that name is neither served nor a family's key; ids sharing the
 //     name become its levels;
-//   - a retired id it does not serve whose replacement it serves, under the
-//     retired id, served as the replacement is.
+//   - a retired id whose replacement it serves, under the retired id, served
+//     as the replacement is.
 //
-// Only Google's own models get such names: an Anthropic or OpenAI model keeps
-// its id, since a name like claude-opus-5-5 belongs to the Claude accounts.
+// A name's display name is its family's, else its default id's without the
+// trailing level. Only Google's own models get such names: an Anthropic or
+// OpenAI model keeps its id, since a name like claude-opus-5-5 belongs to the
+// Claude accounts.
 func Routes(answer Answer, served []string) []Route {
 	models := make(map[string]Model, len(answer.Models))
+	listed := make(map[string]struct{}, len(answer.Models))
 	for _, model := range answer.Models {
-		models[strings.ToLower(model.ID)] = model
+		key := strings.ToLower(model.ID)
+		models[key] = model
+		listed[key] = struct{}{}
 	}
 	serves := make(map[string]string, len(served))
 	for _, id := range served {
@@ -329,13 +462,7 @@ func Routes(answer Answer, served []string) []Route {
 	}
 	google := func(id string) bool {
 		model, ok := models[strings.ToLower(id)]
-		if !ok {
-			return false
-		}
-		if model.Provider == "" {
-			return strings.HasPrefix(strings.ToLower(model.ID), "gemini")
-		}
-		return strings.EqualFold(model.Provider, googleProvider)
+		return ok && model.Google()
 	}
 
 	routes := make(map[string]*Route)
@@ -351,23 +478,22 @@ func Routes(answer Answer, served []string) []Route {
 	for _, family := range answer.Families {
 		familyKeys[strings.ToLower(family.Key)] = struct{}{}
 		for _, suffix := range family.Suffixes {
-			variants[strings.ToLower(family.Key+suffix)] = struct{}{}
+			variants[strings.ToLower(family.variantID(suffix, listed))] = struct{}{}
 		}
 	}
 
 	for _, family := range answer.Families {
-		key := strings.ToLower(family.Key)
-		if _, isID := serves[key]; isID {
+		if _, isID := serves[strings.ToLower(family.Key)]; isID {
 			continue
 		}
-		route := &Route{Name: family.Key, DisplayName: family.DisplayName, ByLevel: make(map[string]string)}
+		route := &Route{Name: family.Key, ByLevel: make(map[string]string)}
 		for _, suffix := range family.Suffixes {
-			id, ok := serves[strings.ToLower(family.Key+suffix)]
-			if !ok || !google(id) {
+			id, ok := serves[strings.ToLower(family.variantID(suffix, listed))]
+			level := LevelName(suffix)
+			if !ok || !google(id) || level == "" {
 				continue
 			}
-			level := LevelName(suffix)
-			if _, dup := route.ByLevel[level]; dup || level == "" {
+			if _, dup := route.ByLevel[level]; dup {
 				continue
 			}
 			route.ByLevel[level] = id
@@ -376,13 +502,16 @@ func Routes(answer Answer, served []string) []Route {
 		if len(route.Levels) == 0 {
 			continue
 		}
-		if id, ok := serves[strings.ToLower(family.Key+family.DefaultSuffix)]; ok && family.DefaultSuffix != "" && google(id) {
-			route.Default = id
-		} else {
-			route.Default = route.ByLevel[route.Levels[0]]
+		googleDefault := ""
+		if family.DefaultSuffix != "" {
+			if id, ok := serves[strings.ToLower(family.variantID(family.DefaultSuffix, listed))]; ok && google(id) {
+				googleDefault = id
+			}
 		}
+		route.Default = defaultID(route.ByLevel, route.Levels, googleDefault)
+		route.DisplayName = family.DisplayName
 		if route.DisplayName == "" {
-			route.DisplayName = family.Key
+			route.DisplayName = withoutLevel(displayName(models, route.Default))
 		}
 		add(route)
 	}
@@ -422,8 +551,8 @@ func Routes(answer Answer, served []string) []Route {
 				route.Levels = append(route.Levels, level)
 			}
 		}
-		route.Default = route.ByLevel[route.Levels[0]]
-		route.DisplayName = displayName(models, route.Default)
+		route.Default = defaultID(route.ByLevel, route.Levels, "")
+		route.DisplayName = withoutLevel(displayName(models, route.Default))
 	}
 
 	retired := make([]string, 0, len(answer.Deprecated))
@@ -444,7 +573,7 @@ func Routes(answer Answer, served []string) []Route {
 			if !google(id) {
 				continue
 			}
-			add(&Route{Name: old, DisplayName: displayName(models, id), Default: id, ByLevel: map[string]string{}})
+			add(&Route{Name: old, DisplayName: withoutLevel(displayName(models, id)), Default: id, ByLevel: map[string]string{}})
 			continue
 		}
 		target, ok := routes[strings.ToLower(replacement)]
@@ -510,6 +639,10 @@ func ModelInfos(answer Answer) []*registry.ModelInfo {
 // familyLevels maps each family variant's id (lower case) to its family's
 // levels.
 func familyLevels(answer Answer) map[string][]string {
+	listed := make(map[string]struct{}, len(answer.Models))
+	for _, model := range answer.Models {
+		listed[strings.ToLower(model.ID)] = struct{}{}
+	}
 	out := make(map[string][]string)
 	for _, family := range answer.Families {
 		var levels []string
@@ -519,7 +652,7 @@ func familyLevels(answer Answer) map[string][]string {
 			}
 		}
 		for _, suffix := range family.Suffixes {
-			out[strings.ToLower(family.Key+suffix)] = levels
+			out[strings.ToLower(family.variantID(suffix, listed))] = levels
 		}
 	}
 	return out
