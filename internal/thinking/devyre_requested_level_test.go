@@ -26,3 +26,28 @@ func TestDevyreRequestedLevel(t *testing.T) {
 		}
 	}
 }
+
+func TestDevyreSetRequestedLevel(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, format, level, want string
+	}{
+		{"gemini capitals kept", `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"XHIGH"}}}`, "gemini", "high", `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"HIGH"}}}`},
+		{"gemini lower case", `{"generationConfig":{"thinkingConfig":{"thinking_level":"xhigh"}}}`, "gemini", "high", `{"generationConfig":{"thinkingConfig":{"thinking_level":"high"}}}`},
+		{"antigravity envelope", `{"request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"MINIMAL"}}}}`, "antigravity", "low", `{"request":{"generationConfig":{"thinkingConfig":{"thinkingLevel":"LOW"}}}}`},
+		{"openai", `{"reasoning_effort":"xhigh"}`, "openai", "high", `{"reasoning_effort":"high"}`},
+		{"responses", `{"reasoning":{"effort":"xhigh"}}`, "openai-response", "high", `{"reasoning":{"effort":"high"}}`},
+		{"claude", `{"output_config":{"effort":"max"}}`, "claude", "high", `{"output_config":{"effort":"high"}}`},
+		{"removed", `{"generationConfig":{"thinkingConfig":{"thinkingLevel":"XHIGH","includeThoughts":true}}}`, "gemini", "", `{"generationConfig":{"thinkingConfig":{"includeThoughts":true}}}`},
+		{"no level named", `{"generationConfig":{"thinkingConfig":{"thinkingBudget":8192}}}`, "gemini", "high", `{"generationConfig":{"thinkingConfig":{"thinkingBudget":8192}}}`},
+		{"invalid body", `not json`, "gemini", "high", `not json`},
+	} {
+		body := []byte(tc.body)
+		got := DevyreSetRequestedLevel(body, tc.format, tc.level)
+		if string(got) != tc.want {
+			t.Fatalf("%s: got %s, want %s", tc.name, got, tc.want)
+		}
+		if string(body) != tc.body {
+			t.Fatalf("%s: the request's own body was changed: %s", tc.name, body)
+		}
+	}
+}

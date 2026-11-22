@@ -426,3 +426,18 @@ func TestLearnerHook(t *testing.T) {
 		t.Fatalf("learner = %+v", learner)
 	}
 }
+
+func TestRoute_LevelOf(t *testing.T) {
+	answer := readFixture(t, "fetch_available_models_full.json")
+	byName := routesByName(Routes(answer, answer.ServedIDs()))
+	for _, tc := range []struct{ name, id, want string }{
+		{"gemini-4-neon", "gemini-4-neon-high", "high"},
+		{"gemini-4-carbon", "GEMINI-4-CARBON-LOW", "low"},
+		{"gemini-3.7-flash-high", "gemini-3.8-flash-high", "high"},
+		{"gemini-3.7-flash-high", "gemini-pro-agent", ""},
+	} {
+		if got := byName[tc.name].LevelOf(tc.id); got != tc.want {
+			t.Fatalf("%s LevelOf(%s) = %q, want %q", tc.name, tc.id, got, tc.want)
+		}
+	}
+}

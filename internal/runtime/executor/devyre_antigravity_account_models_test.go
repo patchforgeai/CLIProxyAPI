@@ -67,6 +67,13 @@ func (s *devyreAntigravityStandIn) last() []byte {
 // (sdk/cliproxy/devyre_antigravity_account_models.go).
 func devyreAntigravityRoutes(t *testing.T, authID, fixture string) {
 	t.Helper()
+	devyreAntigravityRoutesServing(t, authID, fixture, nil)
+}
+
+// devyreAntigravityRoutesServing is devyreAntigravityRoutes for an account
+// that serves only the ids keep takes, as an exclusion leaves it.
+func devyreAntigravityRoutesServing(t *testing.T, authID, fixture string, keep func(id string) bool) {
+	t.Helper()
 	body, err := os.ReadFile(filepath.Join("..", "..", "antigravityaccountmodels", "testdata", fixture))
 	if err != nil {
 		t.Fatal(err)
@@ -75,12 +82,18 @@ func devyreAntigravityRoutes(t *testing.T, authID, fixture string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	infos := antigravityaccountmodels.ModelInfos(answer)
-	byID := make(map[string]*registry.ModelInfo, len(infos))
-	for _, info := range infos {
+	var infos []*registry.ModelInfo
+	var served []string
+	byID := make(map[string]*registry.ModelInfo)
+	for _, info := range antigravityaccountmodels.ModelInfos(answer) {
+		if keep != nil && !keep(info.ID) {
+			continue
+		}
+		infos = append(infos, info)
+		served = append(served, info.ID)
 		byID[strings.ToLower(info.ID)] = info
 	}
-	routes := antigravityaccountmodels.Routes(answer, answer.ServedIDs())
+	routes := antigravityaccountmodels.Routes(answer, served)
 	for _, route := range routes {
 		infos = append(infos, antigravityaccountmodels.RouteInfo(route, byID))
 	}
@@ -173,5 +186,85 @@ func TestDevyreAntigravityAccountModel_UpstreamGetsTheVariant(t *testing.T) {
 				t.Fatalf("upstream thinking level = %q, want %q; body %s", got, wantLevel, body)
 			}
 		})
+	}
+}
+
+// A level the account's variants lack reaches the nearest variant and goes to
+// Google as that variant's own level, so the router's thinking check takes the
+// request (200, not 400); the request the conductor holds stays as it came,
+// for another credential. A request for a Google id keeps today's check.
+func TestDevyreAntigravityAccountModel_ALevelTheVariantsLack(t *testing.T) {
+	standIn := &devyreAntigravityStandIn{}
+	server := httptest.NewServer(standIn.handler(t))
+	defer server.Close()
+
+	carbon := devyreAntigravityAuth("ag-devyre-carbon.json", server.URL)
+	devyreAntigravityRoutes(t, carbon.ID, "fetch_available_models_full.json")
+	neonToHigh := devyreAntigravityAuth("ag-devyre-neon-high.json", server.URL)
+	devyreAntigravityRoutesServing(t, neonToHigh.ID, "fetch_available_models_full.json", func(id string) bool { return id != "gemini-4-neon-xhigh" })
+	exec := NewAntigravityExecutor(&config.Config{RequestRetry: 1})
+
+	payloadFor := func(level string) []byte {
+		if level == "" {
+			return []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}]}`)
+		}
+		return []byte(`{"contents":[{"role":"user","parts":[{"text":"hi"}]}],"generationConfig":{"thinkingConfig":{"thinkingLevel":"` + level + `"}}}`)
+	}
+	for _, tc := range []struct {
+		name, model, level, want, wantLevel string
+		auth                                *cliproxyauth.Auth
+		stream                              bool
+	}{
+		{name: "carbon at XHIGH", model: "gemini-4-carbon", level: "XHIGH", want: "gemini-4-carbon-high", wantLevel: "HIGH", auth: carbon},
+		{name: "neon topping out at high, at XHIGH", model: "gemini-4-neon", level: "XHIGH", want: "gemini-4-neon-high", wantLevel: "HIGH", auth: neonToHigh, stream: true},
+		{name: "carbon(xhigh)", model: "gemini-4-carbon(xhigh)", want: "gemini-4-carbon-high", wantLevel: "high", auth: carbon},
+		{name: "a level the variant serves stays", model: "gemini-4-neon", level: "XHIGH", want: "gemini-4-neon-xhigh", wantLevel: "XHIGH", auth: carbon},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := payloadFor(tc.level)
+			held := append([]byte(nil), payload...)
+			req := cliproxyexecutor.Request{Model: tc.model, Payload: payload}
+			opts := cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, ResponseFormat: sdktranslator.FormatGemini, OriginalRequest: payload, Stream: tc.stream}
+			if tc.stream {
+				result, err := exec.ExecuteStream(context.Background(), tc.auth, req, opts)
+				if err != nil {
+					t.Fatalf("ExecuteStream: %v", err)
+				}
+				for chunk := range result.Chunks {
+					if chunk.Err != nil {
+						t.Fatalf("chunk: %v", chunk.Err)
+					}
+				}
+			} else if _, err := exec.Execute(context.Background(), tc.auth, req, opts); err != nil {
+				t.Fatalf("Execute: %v, want Google's variant answering", err)
+			}
+			body := standIn.last()
+			if got := gjson.GetBytes(body, "model").String(); got != tc.want {
+				t.Fatalf("upstream model = %q, want %q; body %s", got, tc.want, body)
+			}
+			if got := gjson.GetBytes(body, "request.generationConfig.thinkingConfig.thinkingLevel").String(); !strings.EqualFold(got, tc.wantLevel) {
+				t.Fatalf("upstream thinking level = %q, want %q; body %s", got, tc.wantLevel, body)
+			}
+			if string(payload) != string(held) {
+				t.Fatalf("the request the conductor holds was changed: %s", payload)
+			}
+		})
+	}
+
+	// A Google id is not a learned name: the router's check refuses a level it
+	// does not take, as it did, and nothing reaches Google.
+	standIn.mu.Lock()
+	before := len(standIn.bodies)
+	standIn.mu.Unlock()
+	payload := payloadFor("XHIGH")
+	_, err := exec.Execute(context.Background(), carbon, cliproxyexecutor.Request{Model: "gemini-4-carbon-high", Payload: payload}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatGemini, ResponseFormat: sdktranslator.FormatGemini, OriginalRequest: payload})
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("err = %v, want the router's own refusal for a Google id", err)
+	}
+	standIn.mu.Lock()
+	after := len(standIn.bodies)
+	standIn.mu.Unlock()
+	if after != before {
+		t.Fatal("a refused request reached Google")
 	}
 }

@@ -21,7 +21,7 @@ import (
 // CountTokens counts tokens for the given request using the Antigravity API.
 func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	// devyre: a Gemini API name the account serves under another id (devyre_antigravity_account_models.go).
-	req = devyreAntigravityAccountModel(auth, req, opts)
+	req, opts = devyreAntigravityAccountModel(auth, req, opts)
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	from := opts.SourceFormat

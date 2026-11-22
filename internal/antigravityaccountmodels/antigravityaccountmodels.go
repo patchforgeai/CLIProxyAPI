@@ -403,6 +403,18 @@ func (r Route) Resolve(level string) string {
 	return best
 }
 
+// LevelOf returns the thinking level the variant id serves: the level the
+// route reaches it by, else the level suffix the id ends in; "" when neither.
+func (r Route) LevelOf(id string) string {
+	for _, level := range r.Levels {
+		if strings.EqualFold(r.ByLevel[level], id) {
+			return level
+		}
+	}
+	_, level := splitLevel(id)
+	return level
+}
+
 func abs(n int) int {
 	if n < 0 {
 		return -n
