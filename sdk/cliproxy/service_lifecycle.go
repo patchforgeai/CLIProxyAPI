@@ -212,6 +212,8 @@ func (s *Service) Run(ctx context.Context) error {
 	s.devyreStartCodexAccountModels()
 	// devyre: the models Anthropic offers each Claude account.
 	s.devyreStartClaudeAccountModels()
+	// devyre: the models Google offers each Antigravity account.
+	s.devyreStartAntigravityAccountModels()
 
 	select {
 	case <-ctx.Done():

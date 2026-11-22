@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/antigravityaccountmodels"
 	. "github.com/router-for-me/CLIProxyAPI/v8/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
@@ -48,6 +49,12 @@ func (h *GeminiAPIHandler) Models() []map[string]any {
 // GeminiModels handles the Gemini models listing endpoint.
 // It returns a JSON response containing available Gemini models and their specifications.
 func (h *GeminiAPIHandler) GeminiModels(c *gin.Context) {
+	// devyre: the Antigravity accounts' own models first (internal/antigravityaccountmodels).
+	ctx := context.Background()
+	if c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	antigravityaccountmodels.Ensure(ctx)
 	rawModels := h.Models()
 	normalizedModels := make([]map[string]any, 0, len(rawModels))
 	defaultMethods := []string{"generateContent"}

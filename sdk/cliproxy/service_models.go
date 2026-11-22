@@ -112,6 +112,8 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 	case "antigravity":
 		models = registry.GetAntigravityModels()
 		models = applyExcludedModels(models, excluded)
+		// devyre: what Google lists for this account, and its Gemini API names.
+		models = s.devyreWithAccountAntigravityModels(a, models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
 		configuredModels := false

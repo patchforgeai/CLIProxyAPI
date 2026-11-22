@@ -22,6 +22,8 @@ import (
 
 // ExecuteStream performs a streaming request to the Antigravity API.
 func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (_ *cliproxyexecutor.StreamResult, err error) {
+	// devyre: a Gemini API name the account serves under another id (devyre_antigravity_account_models.go).
+	req = devyreAntigravityAccountModel(auth, req, opts)
 	if opts.Alt == "responses/compact" {
 		return nil, statusErr{code: http.StatusBadRequest, msg: "streaming not supported for /responses/compact"}
 	}

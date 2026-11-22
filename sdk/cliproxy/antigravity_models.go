@@ -235,9 +235,26 @@ func (s *Service) probeAntigravityModelCapabilityHints(ctx context.Context, auth
 }
 
 func (s *Service) fetchAntigravityModelHintsFromURL(ctx context.Context, client *http.Client, baseURL string, accessToken string) (antigravityModelCapabilityHints, antigravityProbeStatus) {
-	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+antigravityModelsPath, strings.NewReader(`{}`))
-	if errReq != nil {
+	body, status, _ := fetchAntigravityAvailableModels(ctx, client, baseURL, accessToken, `{}`)
+	if status != antigravityProbeStatusSuccess {
+		return antigravityModelCapabilityHints{}, status
+	}
+	hints, ok := parseAntigravityModelCapabilityHints(body)
+	if !ok {
 		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
+	}
+	return hints, antigravityProbeStatusSuccess
+}
+
+// fetchAntigravityAvailableModels posts payload to fetchAvailableModels at
+// baseURL with the access token and returns the body of a 2xx answer, or why
+// there is none (its status, never its body).
+// devyre: shared with the account models learner, whose answer serves the
+// web-search hints too (devyre_antigravity_account_models.go).
+func fetchAntigravityAvailableModels(ctx context.Context, client *http.Client, baseURL string, accessToken string, payload string) ([]byte, antigravityProbeStatus, error) {
+	req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+antigravityModelsPath, strings.NewReader(payload))
+	if errReq != nil {
+		return nil, antigravityProbeStatusTransientError, errReq
 	}
 	req.Close = true
 	req.Header.Set("Content-Type", "application/json")
@@ -246,7 +263,7 @@ func (s *Service) fetchAntigravityModelHintsFromURL(ctx context.Context, client 
 
 	resp, errDo := client.Do(req)
 	if errDo != nil {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
+		return nil, antigravityProbeStatusTransientError, errDo
 	}
 	defer func() {
 		if errClose := resp.Body.Close(); errClose != nil {
@@ -254,20 +271,16 @@ func (s *Service) fetchAntigravityModelHintsFromURL(ctx context.Context, client 
 		}
 	}()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusAuthError
+		return nil, antigravityProbeStatusAuthError, fmt.Errorf("fetchAvailableModels answered %d", resp.StatusCode)
 	}
 	body, errRead := io.ReadAll(resp.Body)
 	if errRead != nil {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
+		return nil, antigravityProbeStatusTransientError, errRead
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
+		return nil, antigravityProbeStatusTransientError, fmt.Errorf("fetchAvailableModels answered %d", resp.StatusCode)
 	}
-	hints, ok := parseAntigravityModelCapabilityHints(body)
-	if !ok {
-		return antigravityModelCapabilityHints{}, antigravityProbeStatusTransientError
-	}
-	return hints, antigravityProbeStatusSuccess
+	return body, antigravityProbeStatusSuccess, nil
 }
 
 func (s *Service) antigravityModelFetchProxyURL(auth *coreauth.Auth) string {
@@ -388,6 +401,11 @@ func (s *Service) waitAntigravityProbesContext(ctx context.Context) {
 
 func (s *Service) asyncProbeAntigravityCapabilities(ctx context.Context, auth *coreauth.Auth, providerKey string) {
 	if auth == nil || auth.ID == "" || auth.Disabled {
+		return
+	}
+	// devyre: the account models learner asks Google for this account itself,
+	// and its answer carries the web-search hints (devyre_antigravity_account_models.go).
+	if s.devyreAntigravityLearnerProbes(auth) {
 		return
 	}
 	authClone := auth.Clone()

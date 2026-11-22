@@ -24,6 +24,8 @@ import (
 
 // Execute performs a non-streaming request to the Antigravity API.
 func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
+	// devyre: a Gemini API name the account serves under another id (devyre_antigravity_account_models.go).
+	req = devyreAntigravityAccountModel(auth, req, opts)
 	if helps.HasResponsesCompactionItem(req.Payload) {
 		expanded, errExpand := helps.ExpandAntigravityCompactionCapsules(req.Payload)
 		if errExpand != nil {
