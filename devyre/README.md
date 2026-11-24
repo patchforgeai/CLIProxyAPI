@@ -198,8 +198,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/devyre_codex_recovery_test.go` | ChatGPT recovery lifts the credential-wide usage-limit block for every model, several models rejected together in either order, and a model-scoped usage limit; it needs new evidence and a response with room, keeps a per-minute rate limit, a model at capacity and a rejection that raced the usage call, and each provider's response lifts its own holds alone |
 | `sdk/cliproxy/auth/devyre_focus.go` | `devyreFocusTakesOver`: whether session affinity gives a bound session up to a usable focus |
 | `sdk/cliproxy/auth/devyre_focus_test.go` | The focus in the selector (urgency, 5h, 7d and model-scoped gates, tiers, other providers, ends, rotation, the `focus` log reason) and under session affinity (explicit sessions, the fallback key, LCP, the log line, through the manager) |
-| `sdk/cliproxy/auth/devyre_limit_refusal.go` | `devyreRefusedAsLimit`: a request no credential can take, while each one that takes it again in time is held for a limit, is refused as that limit (the model cooldown) whatever keeps the others out for good (`devyreOutForGood`, `devyreOutForGoodLocked`) |
-| `sdk/cliproxy/auth/devyre_limit_refusal_test.go` | A signed-out and a turned-off credential beside one held for the model's limit give the model cooldown with that hold's end, through the conductor's selection, the scheduler and the mixed scheduler; one failing for a moment beside it keeps the 503; every credential signed out keeps the terminal refusal |
+| `sdk/cliproxy/auth/devyre_limit_refusal.go` | `devyreLimitSummary`: a request no credential can take, while each one that takes it again in time is held for a limit, is refused as that limit (the model cooldown, ending as the first hold does) whatever keeps the others out until someone acts, a refused sign-in among it (`devyreSignedOut`); `devyreLimitOverSignIn`: a request whose last try met a refused sign-in while the rest are so held ends as the limit too |
+| `sdk/cliproxy/auth/devyre_limit_refusal_test.go` | A credential signed out (with no retry, or tried again in 30 minutes after a 401 or an invalid grant) and a turned-off one beside one held for the model's limit give the model cooldown with that hold's end, through the conductor's selection, the scheduler and the mixed scheduler; one failing for a moment beside it keeps the 503; every credential signed out keeps the terminal refusal; a request whose last try met a refused sign-in ends as the limit, and as the limit's own refusal when that came last |
 | `sdk/cliproxy/auth/devyre_model_allowance_recovery_test.go` | A credential-wide hold a Fable-only rejection set, as 2026-11-16's were, lifted by a usage reading with room in both shared windows: every other model served, Fable held while its own window is spent; kept with a shared window spent and for a rejection no window explains; `back in use` said only once the credential is |
 | `sdk/cliproxy/auth/devyre_placement.go` | What `SessionAffinitySelector` tells its fallback about a pick (new placement or failover, the credential left, the active bindings), the bindings a credential failure suspended, whether a subagent joins its parent's credential, and `CarrySessionBindings` for a rebuilt selector |
 | `sdk/cliproxy/auth/devyre_placement_test.go` | Stay power and its pools, a herd of failovers spreading over the credentials, the 429 retry through the conductor as a failover, released and removed bindings, forks and non-fork subagents, a failover that goes to a usable focus, the bounded suspended bindings, the active binding count |
@@ -298,10 +298,10 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `sdk/auth/manager.go` | `Login` reads the existing file through `authseal.ReadFile`. |
 | `sdk/cliproxy/auth/conductor.go` | The `devyre` field (`devyreManagerState`) on `Manager`. |
 | `sdk/cliproxy/auth/conductor_cooldown.go` | `MarkResult` hands each result to `devyreSoftTransient` right after the result policy; when that keeps a transient failure soft, it has recorded the failure and `MarkResult` returns. After it has applied a result, one line hands the credential as it left it to `devyreLogQuotaHold` (`devyre_quota_log.go`). |
-| `sdk/cliproxy/auth/conductor_execution.go` | `executeMixedOnce` and `executeCountMixedOnce` hand a failed attempt to `devyreRetryTransient` right after the 401 refresh, and return when the request ended during its wait. |
-| `sdk/cliproxy/auth/conductor_selection.go` | `availableAuthsForRouteModelWithPriorityMode` counts the candidates out for good (`devyreOutForGood`) and refuses with the model cooldown when `devyreRefusedAsLimit` says so, in place of upstream's "every candidate cools down" (`devyre_limit_refusal.go`). |
+| `sdk/cliproxy/auth/conductor_execution.go` | `executeMixedOnce` and `executeCountMixedOnce` hand a failed attempt to `devyreRetryTransient` right after the 401 refresh, and return when the request ended during its wait. Where they and `executeStreamMixedOnce` end a request with its last error once no credential is left to try, outside Home's rounds, `devyreLimitOverSignIn` may end it as the limit instead (`devyre_limit_refusal.go`). |
+| `sdk/cliproxy/auth/conductor_selection.go` | `availableAuthsForRouteModelWithPriorityMode` refuses with the model cooldown when `devyreLimitOf` says the candidates are held for a limit beside ones out until someone acts, in place of upstream's "every candidate cools down", which also drops its count of cooling candidates (`devyre_limit_refusal.go`). |
 | `sdk/cliproxy/auth/conductor_stream.go` | `executeStreamWithModelPool` takes a `devyreTransientRetry` budget per attempt and hands a failed start to `retryStart` and a failed bootstrap to `retryBootstrap`, each right after the 401 refresh. |
-| `sdk/cliproxy/auth/scheduler.go` | `unavailableErrorLocked` and `mixedUnavailableErrorLocked` count each shard's candidates out for good (`devyreOutForGoodLocked`) and refuse with the model cooldown when `devyreRefusedAsLimit` says so (`devyre_limit_refusal.go`). |
+| `sdk/cliproxy/auth/scheduler.go` | `unavailableErrorLocked` and `mixedUnavailableErrorLocked` summarize each shard's candidates (`devyreLimitLocked`) and refuse with the model cooldown when the summary says so, in place of upstream's count of cooling candidates (`devyre_limit_refusal.go`). |
 | `sdk/cliproxy/auth/selector.go` | Three conditions in `SessionAffinitySelector`, where it reuses a binding (the explicit-session cache hit, the fallback-key cache hit and the LCP match in `pickLCP`), also ask `devyreFocusTakesOver`; a yes treats the bound credential as unavailable, so the upstream reselect-and-rebind path runs. `SessionAffinitySelector` carries a `devyre` field (`devyreAffinityState`). `Pick` hands its fallback a placement through the context (`withPlacement`): a failover when the bound credential is unavailable (`devyreFailover`) or when a credential failure suspended the binding (`devyrePlacementFor`), a new placement otherwise; its `bind` ends a suspended binding, the failover lines name `from=` and the pick's `reason=`, and a subagent that says it is not a fork takes its parent's binding only with headroom (`devyreJoinsParent`). `extractExplicitSessionIDs` records the agent type the request names in its metadata (`devyreSetAgentType`). A cache hit, and a fork or alias joining its parent's binding, mark the request's metadata with that credential (`devyreMarkBound`) for the transient retries. `OnResult` suspends the binding it removes for a credential failure (`devyreSuspend`), and `InvalidateAuth` the bindings of the removed credential (`devyreSuspendAuth`). |
 | `sdk/cliproxy/session/info.go` | `SessionInfo` carries `AgentType`, and the two Claude Code branches of `ExtractSessionInfo` (the session header, `metadata.user_id`) call `applyClaudeAgentType` for a subagent. |
 | `sdk/cliproxy/auth/session_cache.go` | `SessionCache` carries `devyreOnChange`, and `replaceAliasGroupsLocked` and `removeAliasGroupLocked` end with `devyreChangedLocked()`, so every change to the bindings schedules a save. |
@@ -407,17 +407,24 @@ treats a confirmed Fable-only rejection. A shared window reported rejected, at a
 
 A request no credential can take is refused with the model cooldown (429, `model_cooldown`, its
 `reset_seconds` the first hold's end) when each credential that takes it again in time is held
-for a limit, whatever keeps the others out for good: signed out (a 401 with no refresh to come),
-an access token expired with nothing to renew it, or turned off (`devyreRefusedAsLimit`,
-`devyre_limit_refusal.go`). Upstream refuses with the cooldown only when every candidate cools
+for a limit, whatever keeps the others out until someone acts: signed out (a 401 or an invalid
+grant, which the router tries again every 30 minutes, each try meeting the same refusal until a
+sign-in changes its tokens), an access token expired with nothing to renew it, or turned off
+(`devyreLimitSummary`, `devyre_limit_refusal.go`). A request whose last try met such a refused
+sign-in while the rest are so held, as the first request after a signed-out account's 30 minutes
+does, ends as the limit too, not with that 401 (`devyreLimitOverSignIn`); one whose last try met
+the limit itself ends with the provider's refusal, which carries its reset. Upstream refuses with the cooldown only when every candidate cools
 down, and otherwise with 503 "no auth available". So on 2026-11-24, with four of seven Claude
 accounts signed out on one computer and the other three at Fable's weekly limit, every Fable
 request was refused as a server outage: Claude Code retried each 503 ten times and ended the turn
 with "Claude's API returned a server error", and Anvil, which has a session wait for usage only
 after a limit, left the session failed when the limit lifted. A credential that comes back by
-itself (a transient failure's retry time) is no limit: beside one, the refusal stays the 503,
-and every credential signed out stays the terminal refusal it was. The conductor's selection, the
-scheduler and the mixed-provider scheduler decide it alike.
+itself (another failure's retry time) is no limit: beside one, the refusal stays the 503, and
+every credential signed out stays the terminal refusal it was. The conductor's selection, the
+scheduler and the mixed-provider scheduler decide it alike. Before the router held a signed-out
+credential's 30-minute retry as a reason to answer 503, and ended such a request with the 401,
+which Claude Code reports as a sign-in to fix (checked against Anvil's live test of the router
+build, `apps/server/src/router/limitBesideSignedOut.test.ts`).
 
 ### A cooldown reset forgets the readings before it
 

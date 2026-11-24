@@ -627,9 +627,8 @@ func (s *authScheduler) pickMixedWithStrategy(ctx context.Context, providers []s
 func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()
 	total := 0
-	cooldownCount := 0
 	unauthorizedCount := 0
-	outForGoodCount := 0
+	var limit devyreLimitSummary
 	earliest := time.Time{}
 
 	var latestModelTime time.Time
@@ -649,11 +648,10 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		if shard == nil {
 			continue
 		}
-		localTotal, localCooldownCount, localUnauthorizedCount, localEarliest := shard.availabilitySummaryLocked(predicate)
+		localTotal, _, localUnauthorizedCount, localEarliest := shard.availabilitySummaryLocked(predicate)
 		total += localTotal
-		cooldownCount += localCooldownCount
 		unauthorizedCount += localUnauthorizedCount
-		outForGoodCount += shard.devyreOutForGoodLocked(predicate)
+		limit.merge(shard.devyreLimitLocked(predicate))
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
 		}
@@ -684,10 +682,10 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	if total == 0 {
 		return WithCause(&Error{Code: "auth_not_found", Message: "no auth available"}, lastCandidateErr)
 	}
-	// devyre: credentials out for good beside those at a limit leave it the limit
-	// (devyre_limit_refusal.go).
-	if devyreRefusedAsLimit(total, cooldownCount, outForGoodCount, earliest) {
-		resetIn := earliest.Sub(now)
+	// devyre: credentials out until someone acts beside those at a limit leave it the limit,
+	// which ends as the first hold does (devyre_limit_refusal.go).
+	if limit.refusedAsLimit() {
+		resetIn := limit.firstHoldEnds.Sub(now)
 		if resetIn < 0 {
 			resetIn = 0
 		}
@@ -1415,20 +1413,20 @@ func (m *modelScheduler) readyCountAtPriorityLocked(preferWebsocket bool, priori
 // unavailableErrorLocked returns the correct unavailable or cooldown error for the shard.
 func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicate func(*scheduledAuth) bool) error {
 	now := time.Now()
-	total, cooldownCount, unauthorizedCount, earliest := m.availabilitySummaryLocked(predicate)
+	total, _, unauthorizedCount, earliest := m.availabilitySummaryLocked(predicate)
 	_, _, _, authErr, _, _ := m.candidateErrorsLocked(model, predicate)
 	lastCandidateErr, _, _ := m.latestCandidateErrorWithTimeLocked(model, predicate)
 	if total == 0 {
 		return WithCause(&Error{Code: "auth_not_found", Message: "no auth available"}, lastCandidateErr)
 	}
-	// devyre: credentials out for good beside those at a limit leave it the limit
-	// (devyre_limit_refusal.go).
-	if devyreRefusedAsLimit(total, cooldownCount, m.devyreOutForGoodLocked(predicate), earliest) {
+	// devyre: credentials out until someone acts beside those at a limit leave it the limit,
+	// which ends as the first hold does (devyre_limit_refusal.go).
+	if limit := m.devyreLimitLocked(predicate); limit.refusedAsLimit() {
 		providerForError := provider
 		if providerForError == "mixed" {
 			providerForError = ""
 		}
-		resetIn := earliest.Sub(now)
+		resetIn := limit.firstHoldEnds.Sub(now)
 		if resetIn < 0 {
 			resetIn = 0
 		}

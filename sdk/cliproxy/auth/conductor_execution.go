@@ -514,7 +514,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
-				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
+				preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
+				// devyre: a refused sign-in last, beside accounts held for a limit, ends it as the
+				// limit (devyre_limit_refusal.go).
+				if limited := m.devyreLimitOverSignIn(homeMode, preferredErr, errPick, tried, routeModel); limited != nil {
+					return cliproxyexecutor.Response{}, limited
+				}
+				return cliproxyexecutor.Response{}, preferredErr
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
@@ -734,7 +740,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		auth, executor, provider, errPick := m.pickNextMixed(ctx, providers, routeModel, pickOpts, tried)
 		if errPick != nil {
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
-				return cliproxyexecutor.Response{}, preferredExecutionAttemptError(lastErr, upstreamErr)
+				preferredErr := preferredExecutionAttemptError(lastErr, upstreamErr)
+				// devyre: a refused sign-in last, beside accounts held for a limit, ends it as the
+				// limit (devyre_limit_refusal.go).
+				if limited := m.devyreLimitOverSignIn(homeMode, preferredErr, errPick, tried, routeModel); limited != nil {
+					return cliproxyexecutor.Response{}, limited
+				}
+				return cliproxyexecutor.Response{}, preferredErr
 			}
 			return cliproxyexecutor.Response{}, errPick
 		}
@@ -992,6 +1004,11 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			if shouldReturnLastErrorOnPickFailure(homeMode, lastErr, errPick) {
 				if homeMode {
 					return nil, markHomeRetryRoundExhausted(preferredErr, roundTiming.RetryAfter(), isHomeNextRoundImmediatelyAvailable(errPick))
+				}
+				// devyre: a refused sign-in last, beside accounts held for a limit, ends it as the
+				// limit (devyre_limit_refusal.go).
+				if limited := m.devyreLimitOverSignIn(homeMode, preferredErr, errPick, tried, routeModel); limited != nil {
+					return nil, limited
 				}
 				return nil, preferredErr
 			}
