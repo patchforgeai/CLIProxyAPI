@@ -629,6 +629,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	total := 0
 	cooldownCount := 0
 	unauthorizedCount := 0
+	outForGoodCount := 0
 	earliest := time.Time{}
 
 	var latestModelTime time.Time
@@ -652,6 +653,7 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 		total += localTotal
 		cooldownCount += localCooldownCount
 		unauthorizedCount += localUnauthorizedCount
+		outForGoodCount += shard.devyreOutForGoodLocked(predicate)
 		if !localEarliest.IsZero() && (earliest.IsZero() || localEarliest.Before(earliest)) {
 			earliest = localEarliest
 		}
@@ -682,7 +684,9 @@ func (s *authScheduler) mixedUnavailableErrorLocked(providers []string, model st
 	if total == 0 {
 		return WithCause(&Error{Code: "auth_not_found", Message: "no auth available"}, lastCandidateErr)
 	}
-	if cooldownCount == total && !earliest.IsZero() {
+	// devyre: credentials out for good beside those at a limit leave it the limit
+	// (devyre_limit_refusal.go).
+	if devyreRefusedAsLimit(total, cooldownCount, outForGoodCount, earliest) {
 		resetIn := earliest.Sub(now)
 		if resetIn < 0 {
 			resetIn = 0
@@ -1417,7 +1421,9 @@ func (m *modelScheduler) unavailableErrorLocked(provider, model string, predicat
 	if total == 0 {
 		return WithCause(&Error{Code: "auth_not_found", Message: "no auth available"}, lastCandidateErr)
 	}
-	if cooldownCount == total && !earliest.IsZero() {
+	// devyre: credentials out for good beside those at a limit leave it the limit
+	// (devyre_limit_refusal.go).
+	if devyreRefusedAsLimit(total, cooldownCount, m.devyreOutForGoodLocked(predicate), earliest) {
 		providerForError := provider
 		if providerForError == "mixed" {
 			providerForError = ""

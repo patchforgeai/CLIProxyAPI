@@ -559,6 +559,7 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 	availableByPriority := make(map[int][]*Auth)
 	cooldownCount := 0
 	unauthorizedCount := 0
+	outForGoodCount := 0
 	var earliest time.Time
 	for _, candidate := range auths {
 		checkModel := m.selectionModelForAuth(candidate, routeModel)
@@ -570,6 +571,9 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 		}
 		if reason == blockReasonCooldown {
 			cooldownCount++
+		}
+		if devyreOutForGood(reason, next) {
+			outForGoodCount++
 		}
 		if reason != blockReasonDisabled && next.After(now) && (earliest.IsZero() || next.Before(earliest)) {
 			earliest = next
@@ -584,7 +588,9 @@ func (m *Manager) availableAuthsForRouteModelWithPriorityMode(auths []*Auth, pro
 			return m.selectionModelForAuth(candidate, routeModel)
 		})
 
-		if cooldownCount == len(auths) && !earliest.IsZero() {
+		// devyre: credentials out for good beside those at a limit leave it the limit
+		// (devyre_limit_refusal.go).
+		if devyreRefusedAsLimit(len(auths), cooldownCount, outForGoodCount, earliest) {
 			providerForError := provider
 			if providerForError == "mixed" {
 				providerForError = ""
