@@ -1,6 +1,7 @@
 package cliproxy
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,6 +13,9 @@ import (
 // authDirHoldWait is how long a starting router waits for another that holds its auth folder:
 // one still exiting gets that long (Anvil's supervisor kills one after 3 s). Tests shorten it.
 var authDirHoldWait = 15 * time.Second
+
+// acquireAuthDir holds an auth folder (tests stand in for it).
+var acquireAuthDir = authdir.Acquire
 
 // devyreSettleCredentials makes sure, as the service stops, that what the refreshes got reaches
 // the token files (devyre/README.md, "No refresh is lost"): right after the refresh loop stops,
@@ -37,13 +41,19 @@ func (s *Service) devyreFlushCredentials() {
 
 // devyreHoldAuthDir holds the auth folder while the service runs, so a second router (an old one
 // still exiting) never refreshes its credentials beside this one: both would spend the same
-// single-use refresh tokens. It waits authDirHoldWait for one that holds it, then fails the start.
+// single-use refresh tokens. It waits authDirHoldWait for one that holds it, then fails the start
+// (the process exits with an error, so its supervisor sees a failure). Where the folder's
+// filesystem takes no lock, it says so and runs without one, as before there was any.
 func (s *Service) devyreHoldAuthDir() error {
 	if s == nil || s.cfg == nil || s.cfg.AuthDir == "" {
 		return nil
 	}
 	started := time.Now()
-	lock, err := authdir.Acquire(s.cfg.AuthDir, authDirHoldWait)
+	lock, err := acquireAuthDir(s.cfg.AuthDir, authDirHoldWait)
+	if errors.Is(err, authdir.ErrUnsupported) {
+		log.Warnf("running without a hold on the auth folder: %v; a second router on it could refresh beside this one", err)
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("cliproxy: %w", err)
 	}

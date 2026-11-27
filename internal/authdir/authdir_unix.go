@@ -19,3 +19,9 @@ func tryLock(file *os.File) (bool, error) {
 }
 
 func unlock(file *os.File) { _ = unix.Flock(int(file.Fd()), unix.LOCK_UN) }
+
+// lockUnsupported reports whether a lock failed because the filesystem takes none.
+func lockUnsupported(err error) bool {
+	return errors.Is(err, unix.ENOTSUP) || errors.Is(err, unix.EOPNOTSUPP) ||
+		errors.Is(err, unix.ENOSYS) || errors.Is(err, unix.ENOLCK)
+}

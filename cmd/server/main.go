@@ -840,7 +840,9 @@ func main() {
 			managementasset.StartAutoUpdater(context.Background(), configFilePath)
 			misc.StartAntigravityVersionUpdater(context.Background())
 			startModelCatalogUpdaters(localModel, cfg.Home.Enabled)
-			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...)
+			if errRun := cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost, serverOptions...); errRun != nil {
+				os.Exit(1) // devyre: a supervisor sees a failure (another router holds the auth folder)
+			}
 		}
 	}
 }

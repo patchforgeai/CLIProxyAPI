@@ -23,3 +23,10 @@ func tryLock(file *os.File) (bool, error) {
 func unlock(file *os.File) {
 	_ = windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, new(windows.Overlapped))
 }
+
+// lockUnsupported reports whether a lock failed because the filesystem (a share, a FUSE-like
+// driver) takes none.
+func lockUnsupported(err error) bool {
+	return errors.Is(err, windows.ERROR_NOT_SUPPORTED) || errors.Is(err, windows.ERROR_INVALID_FUNCTION) ||
+		errors.Is(err, windows.ERROR_CALL_NOT_IMPLEMENTED)
+}

@@ -211,9 +211,9 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/devyre_save_retry.go` | A failed save tried again until one lands (`devyreNoteSave`), and once more at shutdown (`FlushPendingSaves`); the save watermark as the last write that landed (`admits`, `landed`); the refresh tokens spent here, and a file holding one kept from putting it back (`keepUnspentTokens`) |
 | `sdk/cliproxy/auth/devyre_save_retry_test.go` | A refresh's failed save tried until it lands, logged when it does; a shutdown's last try; the watermark against the watcher's skipped saves and a new sign-in; a file with a spent token |
 | `sdk/cliproxy/devyre_settle.go` | `devyreSettleCredentials`, `devyreFlushCredentials`: as the service stops, the refreshes in flight waited for and the unsaved credentials flushed; `devyreHoldAuthDir`, `devyreReleaseAuthDir`: the auth folder held while it runs |
-| `sdk/cliproxy/devyre_settle_test.go` | A second router on one auth folder waits for the first and does not start beside it |
-| `internal/authdir/authdir.go`, `authdir_unix.go`, `authdir_windows.go` | The hold on an auth folder (`Acquire`): an exclusive lock on `.router.lock` in it (flock, `LockFileEx`), waited for a while |
-| `internal/authdir/authdir_test.go` | One hold at a time; a second waits, gives up after its wait, and gets it once the first lets go |
+| `sdk/cliproxy/devyre_settle_test.go` | A second router on one auth folder waits for the first and does not start beside it; a folder that takes no lock runs without one |
+| `internal/authdir/authdir.go`, `authdir_unix.go`, `authdir_windows.go` | The hold on an auth folder (`Acquire`): an exclusive lock on `.router.lock` in it (flock, `LockFileEx`), waited for a while; `ErrHeld`, and `ErrUnsupported` where the filesystem takes no lock |
+| `internal/authdir/authdir_test.go`, `authdir_unix_test.go`, `authdir_windows_test.go` | One hold at a time; a second waits, gives up after its wait, and gets it once the first lets go; a filesystem without locks said so |
 | `sdk/cliproxy/auth/devyre_drain.go` | The refreshes in flight, by credential, and a shutdown's bounded wait for them (`DrainRefreshes`, `RefreshDrainWait`) |
 | `sdk/cliproxy/auth/devyre_drain_test.go` | A shutdown waits for a loop refresh on the wire and saves its answer; the wait is bounded and names what it leaves |
 | `sdk/cliproxy/auth/devyre_refresh_spread.go` | Each credential's stable offset into its provider's lead (`refreshSpread`, `spreadLead`) |
@@ -294,7 +294,8 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/api/server_middleware.go` | Two hunks: `accessAuthMiddleware` falls back to `devyreKeylessProxyAccess` after the API keys fail with a 401, and `serveExampleAPIKeyWarningPage` calls `devyreDenyFraming`. |
 | `internal/api/server_options.go` | The `devyreKeepAliveProbe` and `devyreListenReport` fields that `WithDevyreKeepAliveProbe` and `WithDevyreListenReport` set. |
 | `internal/api/server_routes.go` | `AttachWebsocketRoute` uses `devyreKeyOnlyAuthMiddleware`, so `/v1/ws` is never keyless. |
-| `internal/cmd/run.go` | With the stdin lifeline on, `StartServiceWithPluginHost` runs until the lifeline ends (`devyreWithLifeline`) instead of applying the 10-second keep-alive idle limit. |
+| `internal/cmd/run.go` | With the stdin lifeline on, `StartServiceWithPluginHost` runs until the lifeline ends (`devyreWithLifeline`) instead of applying the 10-second keep-alive idle limit. `StartService` and `StartServiceWithPluginHost` return why the service could not run. |
+| `cmd/server/main.go` (also) | Exits 1 when the service could not run (another router holds the auth folder), so a supervisor sees a failure. |
 | `internal/client/codex/models/models.go` | `loadCodexClientModelTemplates` returns its templates through `devyreWithAccountTemplates`. |
 | `internal/registry/model_updater.go`, `codex_client_models_updater.go`, `devin_models_updater.go` | Each `run…Updater` is one `devyreRefreshLoop` call in place of the start refresh and the ticker loop (upstream's `periodicRefresh`, `tryPeriodicRefresh` and `tryStartupRefresh` went with it), and each `tryRefresh…` returns whether the catalog was fetched and taken. |
 | `internal/config/config_defaults.go` | `DefaultPanelGitHubRepository` points at the panel fork; nothing fetches from it. |
@@ -515,7 +516,12 @@ the only ones left. So:
   at best: a restart meanwhile (several a day on the Preview channel) loaded the dead token.
 - One router at a time refreshes a folder's credentials: the service holds an exclusive lock on
   `.router.lock` in its auth folder while it runs (`internal/authdir`), and a second one waits up to
-  15 s for it, then does not start. Anvil's supervisor restarts a router on a moved port while the
+  15 s for it, then does not start and exits 1, so its supervisor sees a failure. Where the
+  folder's filesystem takes no lock (`ENOTSUP`, `EOPNOTSUPP`, `ENOSYS`, `ENOLCK`, Windows'
+  `ERROR_NOT_SUPPORTED` and its kin) it says so and runs without one, as before. The hold lasts
+  until the process has stopped writing token files: the API server's stop, which waits for the
+  requests still streaming, saves their results, so a router that let go earlier could write a
+  spent token over its successor's. Anvil's supervisor restarts a router on a moved port while the
   old one may still be exiting; both refreshing a credential that came due would spend its token
   twice, and one of them would get `invalid_grant`.
 - On Windows a rename over a file that a handle holds open without sharing its deletion fails, as

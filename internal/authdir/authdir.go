@@ -20,8 +20,15 @@ const FileName = ".router.lock"
 // pollEvery is how often a wait for the folder tries again.
 const pollEvery = 100 * time.Millisecond
 
+// tryLockHook, when set (tests), stands in for tryLock.
+var tryLockHook func(*os.File) (bool, error)
+
 // ErrHeld: another process holds the folder.
 var ErrHeld = errors.New("another router holds the auth folder")
+
+// ErrUnsupported: the folder's filesystem takes no lock (some network and FUSE ones). A router
+// then runs without one, as before there was any.
+var ErrUnsupported = errors.New("the auth folder's filesystem takes no lock")
 
 // Lock is a held auth folder.
 type Lock struct {
@@ -30,7 +37,8 @@ type Lock struct {
 }
 
 // Acquire holds dir for this process, waiting up to wait for another process that holds it to
-// let go (or exit, which lets go for it). It fails with ErrHeld when that one still holds it.
+// let go (or exit, which lets go for it). It fails with ErrHeld when that one still holds it, and
+// with ErrUnsupported where the filesystem takes no lock.
 func Acquire(dir string, wait time.Duration) (*Lock, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("authdir: create %s: %w", dir, err)
@@ -42,9 +50,16 @@ func Acquire(dir string, wait time.Duration) (*Lock, error) {
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		held, errLock := tryLock(file)
+		lock := tryLock
+		if tryLockHook != nil {
+			lock = tryLockHook
+		}
+		held, errLock := lock(file)
 		if errLock != nil {
 			_ = file.Close()
+			if lockUnsupported(errLock) {
+				return nil, fmt.Errorf("authdir: lock %s: %w (%w)", path, ErrUnsupported, errLock)
+			}
 			return nil, fmt.Errorf("authdir: lock %s: %w", path, errLock)
 		}
 		if held {

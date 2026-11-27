@@ -2,6 +2,7 @@ package authdir
 
 import (
 	"errors"
+	"os"
 	"testing"
 	"time"
 )
@@ -35,5 +36,13 @@ func TestOneRouterAtATimeHoldsTheFolder(t *testing.T) {
 	}
 	if err := second.Release(); err != nil {
 		t.Fatalf("a second release: %v", err)
+	}
+}
+
+func TestAFilesystemWithoutLocksIsSaidSo(t *testing.T) {
+	tryLockHook = func(*os.File) (bool, error) { return false, unsupportedForTest }
+	t.Cleanup(func() { tryLockHook = nil })
+	if _, err := Acquire(t.TempDir(), time.Second); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("Acquire() = %v, want ErrUnsupported", err)
 	}
 }
