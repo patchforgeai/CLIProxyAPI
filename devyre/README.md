@@ -209,7 +209,10 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/runtime/executor/devyre_claude_after_refresh_test.go` | Claude's profile looked up after the refresh with the new token, only a change coming back, a failed lookup erasing nothing |
 | `sdk/cliproxy/auth/devyre_save_retry.go` | A failed save tried again until one lands (`devyreNoteSave`), and once more at shutdown (`FlushPendingSaves`); the save watermark as the last write that landed (`admits`, `landed`); the refresh tokens spent here, and a file holding one kept from putting it back (`keepUnspentTokens`) |
 | `sdk/cliproxy/auth/devyre_save_retry_test.go` | A refresh's failed save tried until it lands, logged when it does; a shutdown's last try; the watermark against the watcher's skipped saves and a new sign-in; a file with a spent token |
-| `sdk/cliproxy/devyre_settle.go` | `devyreSettleCredentials`: as the service stops, the refreshes in flight waited for and the unsaved credentials flushed |
+| `sdk/cliproxy/devyre_settle.go` | `devyreSettleCredentials`: as the service stops, the refreshes in flight waited for and the unsaved credentials flushed; `devyreHoldAuthDir`, `devyreReleaseAuthDir`: the auth folder held while it runs |
+| `sdk/cliproxy/devyre_settle_test.go` | A second router on one auth folder waits for the first and does not start beside it |
+| `internal/authdir/authdir.go`, `authdir_unix.go`, `authdir_windows.go` | The hold on an auth folder (`Acquire`): an exclusive lock on `.router.lock` in it (flock, `LockFileEx`), waited for a while |
+| `internal/authdir/authdir_test.go` | One hold at a time; a second waits, gives up after its wait, and gets it once the first lets go |
 | `sdk/cliproxy/auth/devyre_drain.go` | The refreshes in flight, by credential, and a shutdown's bounded wait for them (`DrainRefreshes`, `RefreshDrainWait`) |
 | `sdk/cliproxy/auth/devyre_drain_test.go` | A shutdown waits for a loop refresh on the wire and saves its answer; the wait is bounded and names what it leaves |
 | `sdk/cliproxy/auth/devyre_wake.go` | After a wake (a pass of the refresh loop far later than its timer allows, by either clock), due refreshes wait 20 s for the network |
@@ -332,9 +335,9 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `sdk/cliproxy/session/info.go` | `SessionInfo` carries `AgentType`, and the two Claude Code branches of `ExtractSessionInfo` (the session header, `metadata.user_id`) call `applyClaudeAgentType` for a subagent. |
 | `sdk/cliproxy/auth/session_cache.go` | `SessionCache` carries `devyreOnChange`, and `replaceAliasGroupsLocked` and `removeAliasGroupLocked` end with `devyreChangedLocked()`, so every change to the bindings schedules a save. |
 | `sdk/cliproxy/antigravity_models.go` | The request of `fetchAntigravityModelHintsFromURL` moved into `fetchAntigravityAvailableModels`, which takes the request body and returns the answer's body and an error naming the status, for the Antigravity learner too; `asyncProbeAntigravityCapabilities` returns right after its first check when `devyreAntigravityLearnerProbes` says the learner's answer for the account takes its place. |
-| `sdk/cliproxy/service.go` | The `devyreSessions` field (`devyreSessionState`) on `Service`. |
+| `sdk/cliproxy/service.go` | The `devyreSessions` field (`devyreSessionState`) and the `devyreAuthDir` field (the held auth folder) on `Service`. |
 | `sdk/cliproxy/service_config.go` | `expiring-first` aliases in `normalizedRoutingRuntimeState`, construction in `newRoutingSelector`, and the gate, headroom and log settings in `routingRuntimeState`. That struct must stay comparable: no pointers, maps or slices. `applyManagerConfig` builds a changed selector through `devyreRoutingSelector`, which carries the session bindings over, and then calls `devyreApplySessionPersistence`. |
-| `sdk/cliproxy/service_lifecycle.go` | `Run` calls `devyreStartSessionPersistence` right before the server starts, and `devyreStartCodexAccountModels`, `devyreStartClaudeAccountModels` and `devyreStartAntigravityAccountModels` right after `registerModelRefreshCallback`; `Shutdown` calls `devyreStopAntigravityAccountModels` right after `StopAutoRefresh`, and `devyreStopSessionPersistence` and `devyreSettleCredentials` right after the server stopped. |
+| `sdk/cliproxy/service_lifecycle.go` | `Run` calls `devyreStartSessionPersistence` right before the server starts, and `devyreStartCodexAccountModels`, `devyreStartClaudeAccountModels` and `devyreStartAntigravityAccountModels` right after `registerModelRefreshCallback`; `Run` holds the auth folder (`devyreHoldAuthDir`) right after it makes sure it exists; `Shutdown` calls `devyreStopAntigravityAccountModels` right after `StopAutoRefresh`, and `devyreStopSessionPersistence`, `devyreSettleCredentials` and `devyreReleaseAuthDir` right after the server stopped. |
 | `sdk/cliproxy/service_models.go` | The Codex OAuth branch of `registerModelsForAuthWithCache` passes the plan's catalog models through `devyreWithAccountCodexModels` before the exclusions, and the Claude branch, unless a configured key names its own models (`configuredModels`), through `devyreWithAccountClaudeModels`. The Antigravity branch passes the catalog's models, after the exclusions, through `devyreWithAccountAntigravityModels` with the exclusions. |
 
 If upstream deletes the `/v0/management` routes, `TestT3Hub_*` fails first. Restore the three routes T3 uses (`GET auth-files`, `POST api-call`, `POST reset-quota`) in `internal/api/devyre_v0_shim.go`.
@@ -460,6 +463,11 @@ the only ones left. So:
   says; the service tries every one still unsaved once more as it stops. Before, a failed save
   was one warning, and the file kept the spent refresh token until its next write, four hours later
   at best: a restart meanwhile (several a day on the Preview channel) loaded the dead token.
+- One router at a time refreshes a folder's credentials: the service holds an exclusive lock on
+  `.router.lock` in its auth folder while it runs (`internal/authdir`), and a second one waits up to
+  15 s for it, then does not start. Anvil's supervisor restarts a router on a moved port while the
+  old one may still be exiting; both refreshing a credential that came due would spend its token
+  twice, and one of them would get `invalid_grant`.
 - On Windows a rename over a file that a handle holds open without sharing its deletion fails, as
   Go's `os.Open` opens it; the replace tried again for about 1.7 s, then the save failed. Every
   read of an auth file goes through `authseal.ReadFile`, which now opens it sharing its deletion
@@ -1035,6 +1043,7 @@ go test ./internal/auth/tokenrefresh/ ./internal/auth/claude/ ./internal/auth/co
 go test ./sdk/cliproxy/auth/ ./internal/api/handlers/management/ -run "DevyreA|DevyreTheV8|DevyreClaudes|DevyreEvery|DevyreANew|InvalidGrant|DevyreTheRotated"
 go test ./internal/runtime/executor/ -run DevyreClaudeLooks
 go test ./sdk/cliproxy/auth/ -run "DevyreAFailed|DevyreAShutdown|DevyreTheSave|DevyreAFile|DevyreARefresh"
+go test ./internal/authdir/ ./sdk/cliproxy/ -run "OneRouter|DevyreASecond"
 go test ./internal/watcher/ -run Devyre
 go test ./sdk/auth/ -run Devyre
 go test ./internal/managementasset/ -run DevyrePanel

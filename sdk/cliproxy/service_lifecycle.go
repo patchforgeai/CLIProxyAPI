@@ -68,6 +68,9 @@ func (s *Service) Run(ctx context.Context) error {
 		if errEnsureAuthDir := s.ensureAuthDir(); errEnsureAuthDir != nil {
 			return errEnsureAuthDir
 		}
+		if errHold := s.devyreHoldAuthDir(); errHold != nil { // devyre: one router a folder
+			return errHold
+		}
 	}
 
 	s.applyRetryConfig(s.cfg)
@@ -343,6 +346,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 		s.devyreStopSessionPersistence() // devyre: save the session bindings once more
 		s.devyreSettleCredentials()      // devyre: what the refreshes got is saved before the exit
+		s.devyreReleaseAuthDir()         // devyre: the next router may hold the folder
 
 		if s.pluginHost != nil {
 			sdktranslator.SetPluginHooks(nil)

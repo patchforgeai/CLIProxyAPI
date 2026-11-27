@@ -5,6 +5,7 @@ package cliproxy
 
 import (
 	"context"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/authdir"
 	"sync"
 	"time"
 
@@ -133,6 +134,7 @@ type Service struct {
 	homePluginDeleteTask         func(context.Context, *config.Config, home.PluginTask) homeplugins.SyncReport
 	antigravityProbeWg           sync.WaitGroup
 	devyreSessions               devyreSessionState // devyre: session bindings across restarts (devyre_session_affinity.go)
+	devyreAuthDir                *authdir.Lock      // devyre: the auth folder, held while it runs (devyre_settle.go)
 }
 
 // SetResultPolicy sets an execution result policy on the underlying core auth manager.
