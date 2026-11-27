@@ -198,6 +198,18 @@ func logSignInChange(auth *Auth, step string, from, to SignInStatus) {
 	}
 }
 
+// logSignInEnd says, at info, when a refresh's answer moved (or first gave) the end of the
+// sign-in.
+func logSignInEnd(before, after *Auth) {
+	was, hadEnd := SignInEndsAt(before)
+	now, hasEnd := SignInEndsAt(after)
+	if !hasEnd || (hadEnd && was.Equal(now)) {
+		return
+	}
+	log.WithFields(log.Fields{"credential": after.ID, "provider": after.Provider, "ends_at": now.UTC().Format(time.RFC3339)}).
+		Infof("sign-in of %s ends at %s, as its token answer says", after.ID, now.UTC().Format(time.RFC3339))
+}
+
 func signInStateWord(state SignInState) string {
 	if state == SignInFine {
 		return "fine"

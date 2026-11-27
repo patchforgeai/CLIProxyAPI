@@ -157,21 +157,23 @@ func TestGinLogrusLoggerHealthProbeStatus(t *testing.T) {
 	previousHooks := logger.ReplaceHooks(make(log.LevelHooks))
 	previousLevel := logger.GetLevel()
 	hook := logtest.NewLocal(logger)
-	logger.SetLevel(log.InfoLevel)
+	logger.SetLevel(log.DebugLevel)
 	t.Cleanup(func() { logger.ReplaceHooks(previousHooks); logger.SetLevel(previousLevel) })
 	for _, tc := range []struct {
 		name, method, path string
 		status             int
 		wantLog            bool
+		// devyre: a request that went through logs at debug, a refused one at warn or error.
+		wantLevel log.Level
 	}{
-		{"get_ok", "GET", "/healthz", 200, false},
-		{"head_ok", "HEAD", "/healthz", 200, false},
-		{"success_boundary", "GET", "/healthz", 299, false},
-		{"redirect", "GET", "/healthz", 300, true},
-		{"client_error", "GET", "/healthz", 400, true},
-		{"server_error", "HEAD", "/healthz", 503, true},
-		{"similar_path", "GET", "/healthz-extra", 200, true},
-		{"other_method", "POST", "/healthz", 200, true},
+		{"get_ok", "GET", "/healthz", 200, false, 0},
+		{"head_ok", "HEAD", "/healthz", 200, false, 0},
+		{"success_boundary", "GET", "/healthz", 299, false, 0},
+		{"redirect", "GET", "/healthz", 300, true, log.DebugLevel},
+		{"client_error", "GET", "/healthz", 400, true, log.WarnLevel},
+		{"server_error", "HEAD", "/healthz", 503, true, log.ErrorLevel},
+		{"similar_path", "GET", "/healthz-extra", 200, true, log.DebugLevel},
+		{"other_method", "POST", "/healthz", 200, true, log.DebugLevel},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			engine := gin.New()
@@ -187,6 +189,8 @@ func TestGinLogrusLoggerHealthProbeStatus(t *testing.T) {
 			}
 			if got := len(hook.AllEntries()) > 0; got != tc.wantLog {
 				t.Errorf("access log present = %v, want %v", got, tc.wantLog)
+			} else if got && hook.LastEntry().Level != tc.wantLevel {
+				t.Errorf("access log level = %s, want %s", hook.LastEntry().Level, tc.wantLevel)
 			}
 		})
 	}

@@ -1064,7 +1064,8 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 			if auth.ID == cachedAuthID && !s.devyreFocusTakesOver(ctx, provider, model, primaryID, auth.ID, available) {
 				bind(auth.ID)
 				devyreMarkBound(opts.Metadata, auth.ID) // devyre: a transient failure retries it (devyre_transient.go)
-				entry.Infof("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
+				// devyre: a request staying where its session is says nothing new: debug, not info.
+				entry.Debugf("session-affinity: cache hit | session=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), auth.ID, provider, model)
 				return auth, nil
 			}
 		}
@@ -1096,7 +1097,7 @@ func (s *SessionAffinitySelector) Pick(ctx context.Context, provider, model stri
 						if isFork {
 							entry.Infof("session-affinity: fork cache hit | session=%s parent=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						} else {
-							entry.Infof("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
+							entry.Debugf("session-affinity: fallback cache hit | session=%s fallback=%s auth=%s provider=%s model=%s", truncateSessionID(primaryID), truncateSessionID(fallbackID), auth.ID, provider, model)
 						}
 						return auth, nil
 					}

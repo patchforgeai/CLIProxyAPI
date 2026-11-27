@@ -719,6 +719,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		return nil, fmt.Errorf("auth %s not found", id)
 	}
 	logSignInChange(saved, "refresh", signInBefore, SignInStatusOf(saved))
+	logSignInEnd(auth, saved)
 	saved = m.followRefresh(ctx, exec, saved)
 	targetAuth := saved
 	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)

@@ -105,7 +105,9 @@ func GinLogrusLogger() gin.HandlerFunc {
 		case statusCode >= http.StatusBadRequest:
 			entry.Warn(logLine)
 		default:
-			entry.Info(logLine)
+			// devyre: a request that went through says nothing worth keeping weeks of: at info,
+			// these lines were a third of the log, which its 20 MB cap then kept two days of.
+			entry.Debug(logLine)
 		}
 	}
 }

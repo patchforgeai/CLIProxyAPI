@@ -334,7 +334,7 @@ func TestExpiringFirstFailoverAfterA429Retry(t *testing.T) {
 // session's next pick is its failover, whichever request makes it, and the
 // failover ends the suspended binding.
 func TestExpiringFirstFailoverAfterAReleasedBinding(t *testing.T) {
-	hook := efLogHook(t, log.InfoLevel)
+	hook := efLogHook(t, log.DebugLevel) // a cache hit logs at debug
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: newHeadroomTestSelector(), TTL: time.Hour})
 	defer selector.Stop()
 	a := efClaudeAuth("auth-a", efWindow{"5h", 90, 3 * efHour}, efWindow{"7d", 40, 3 * efHour})
@@ -405,7 +405,7 @@ func TestExpiringFirstFailoverForARemovedCredential(t *testing.T) {
 // type in X-Claude-Code-Agent-Type ("fork" for a fork); without it, it sends
 // X-Claude-Code-Agent-Id alone.
 func TestExpiringFirstSubagentJoinsItsParentOnlyWithHeadroom(t *testing.T) {
-	hook := efLogHook(t, log.InfoLevel)
+	hook := efLogHook(t, log.DebugLevel) // a cache hit logs at debug
 	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{Fallback: newHeadroomTestSelector(), TTL: time.Hour})
 	defer selector.Stop()
 	// The parent's credential is usable but about to run out of its 5h window.

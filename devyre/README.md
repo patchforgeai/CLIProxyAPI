@@ -334,7 +334,8 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `sdk/cliproxy/auth/conductor_selection.go` | `availableAuthsForRouteModelWithPriorityMode` refuses with the model cooldown when `devyreLimitOf` says the candidates are held for a limit beside ones out until someone acts, in place of upstream's "every candidate cools down", which also drops its count of cooling candidates (`devyre_limit_refusal.go`). |
 | `sdk/cliproxy/auth/conductor_stream.go` | `executeStreamWithModelPool` takes a `devyreTransientRetry` budget per attempt and hands a failed start to `retryStart` and a failed bootstrap to `retryBootstrap`, each right after the 401 refresh. |
 | `sdk/cliproxy/auth/scheduler.go` | `unavailableErrorLocked` and `mixedUnavailableErrorLocked` summarize each shard's candidates (`devyreLimitLocked`) and refuse with the model cooldown when the summary says so, in place of upstream's count of cooling candidates (`devyre_limit_refusal.go`). |
-| `sdk/cliproxy/auth/selector.go` | Three conditions in `SessionAffinitySelector`, where it reuses a binding (the explicit-session cache hit, the fallback-key cache hit and the LCP match in `pickLCP`), also ask `devyreFocusTakesOver`; a yes treats the bound credential as unavailable, so the upstream reselect-and-rebind path runs. `SessionAffinitySelector` carries a `devyre` field (`devyreAffinityState`). `Pick` hands its fallback a placement through the context (`withPlacement`): a failover when the bound credential is unavailable (`devyreFailover`) or when a credential failure suspended the binding (`devyrePlacementFor`), a new placement otherwise; its `bind` ends a suspended binding, the failover lines name `from=` and the pick's `reason=`, and a subagent that says it is not a fork takes its parent's binding only with headroom (`devyreJoinsParent`). `extractExplicitSessionIDs` records the agent type the request names in its metadata (`devyreSetAgentType`). A cache hit, and a fork or alias joining its parent's binding, mark the request's metadata with that credential (`devyreMarkBound`) for the transient retries. `OnResult` suspends the binding it removes for a credential failure (`devyreSuspend`), and `InvalidateAuth` the bindings of the removed credential (`devyreSuspendAuth`). |
+| `sdk/cliproxy/auth/selector.go` | Three conditions in `SessionAffinitySelector`, where it reuses a binding (the explicit-session cache hit, the fallback-key cache hit and the LCP match in `pickLCP`), also ask `devyreFocusTakesOver`; a yes treats the bound credential as unavailable, so the upstream reselect-and-rebind path runs. `SessionAffinitySelector` carries a `devyre` field (`devyreAffinityState`). `Pick` hands its fallback a placement through the context (`withPlacement`): a failover when the bound credential is unavailable (`devyreFailover`) or when a credential failure suspended the binding (`devyrePlacementFor`), a new placement otherwise; its `bind` ends a suspended binding, the failover lines name `from=` and the pick's `reason=`, and a subagent that says it is not a fork takes its parent's binding only with headroom (`devyreJoinsParent`). `extractExplicitSessionIDs` records the agent type the request names in its metadata (`devyreSetAgentType`). A cache hit, and a fork or alias joining its parent's binding, mark the request's metadata with that credential (`devyreMarkBound`) for the transient retries. `OnResult` suspends the binding it removes for a credential failure (`devyreSuspend`), and `InvalidateAuth` the bindings of the removed credential (`devyreSuspendAuth`). A cache hit and a fallback cache hit log at debug, not info. |
+| `internal/logging/gin_logger.go`, `gin_logger_test.go` | A request answered below 400 logs at debug, not info; a refused one still at warn or error. |
 | `sdk/cliproxy/session/info.go` | `SessionInfo` carries `AgentType`, and the two Claude Code branches of `ExtractSessionInfo` (the session header, `metadata.user_id`) call `applyClaudeAgentType` for a subagent. |
 | `sdk/cliproxy/auth/session_cache.go` | `SessionCache` carries `devyreOnChange`, and `replaceAliasGroupsLocked` and `removeAliasGroupLocked` end with `devyreChangedLocked()`, so every change to the bindings schedules a save. |
 | `sdk/cliproxy/antigravity_models.go` | The request of `fetchAntigravityModelHintsFromURL` moved into `fetchAntigravityAvailableModels`, which takes the request body and returns the answer's body and an error naming the status, for the Antigravity learner too; `asyncProbeAntigravityCapabilities` returns right after its first check when `devyreAntigravityLearnerProbes` says the learner's answer for the account takes its place. |
@@ -457,6 +458,22 @@ differ and they drift apart after one round together. Claude keeps its 4 h lead:
 offset leaves 2 h of the token for a refresh that fails to be tried again (at most 5 minutes
 apart), so nothing argued for another. At most two refreshes of a provider go out at once, and a
 429 holds the provider's next ones until its Retry-After (`tokenrefresh`).
+
+### The log says why a sign-in changed
+
+Every failed refresh names its credential (its file name, never a token): `token refresh of
+<file>, attempt N, failed: <answer>` at warn, per request sent. Every change of how a sign-in stands
+is logged at info, with the credential, the step (`refresh`, `save`, `shutdown`), why, the
+provider's answer and the next try: into and out of `retrying` and `ended`, and when an answer moves
+the end of a sign-in. A save that failed and then landed, one still unsaved at shutdown, a refresh
+abandoned by a shutdown, tokens dropped or carried over are each a line of their own.
+
+The routine per-request lines moved to debug: an access line of a request answered below 400, and
+a session-affinity cache hit or fallback cache hit. At info they were nine lines in ten, so the
+log's 20 MB cap kept about two days. Measured on this Mac's own log (2026-11-24 to 11-26, 107,173
+lines), the same traffic writes 0.9 MB a day instead of 8.7 (1.75 MB instead of 16 on its busiest
+day, every account at a limit, when each refused request still says why at warn): the cap keeps
+about 22 days, 11 at that rate, instead of 2.3 and 1.3.
 
 ### No refresh is lost
 
