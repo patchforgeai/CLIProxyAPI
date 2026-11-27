@@ -350,7 +350,7 @@ func TestARefreshNeverMakesASignInLastLonger(t *testing.T) {
 	cases := []struct{ kept, answered, want string }{
 		{early, late, early},
 		{late, early, early},
-		{"", late, late},   // a sign-in made before ends were kept learns its end
+		{"", late, ""},     // a sign-in with no kept end learns none from a refresh (Claude Code)
 		{early, "", early}, // an answer that gives none keeps the one kept
 		{"", "", ""},       // never a guess
 		{"not a time", "", ""},

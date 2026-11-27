@@ -234,22 +234,19 @@ func SignInEnd(receivedAt time.Time, expiresIn *int64) (time.Time, bool) {
 
 // EndAfterRefresh is when a sign-in ends once a refresh answered (RFC 3339, empty when unknown):
 // the earlier of the end it kept and the end the answer gave, as Claude Code keeps it, since a
-// refresh never makes a sign-in last longer; the answer's when none was kept (a sign-in made
-// before ends were kept learns its end from the first answer that gives one); the kept one when
-// the answer gave none. Never a guess: an end no answer gave stays unknown.
+// refresh never makes a sign-in last longer; the kept one when the answer gave none. A sign-in
+// with no kept end learns none from a refresh, as in Claude Code: a refresh's answer may give a
+// fresh lifetime rather than what is left of the sign-in's, and an end later than the real one
+// would say it lasts when it does not. Only a sign-in's own answer gives its end.
 func EndAfterRefresh(kept, answered string) string {
 	keptAt, keptOK := ParseEnd(kept)
-	answeredAt, answeredOK := ParseEnd(answered)
-	switch {
-	case keptOK && answeredOK && answeredAt.Before(keptAt):
-		return FormatEnd(answeredAt)
-	case keptOK:
-		return FormatEnd(keptAt)
-	case answeredOK:
-		return FormatEnd(answeredAt)
-	default:
+	if !keptOK {
 		return ""
 	}
+	if answeredAt, answeredOK := ParseEnd(answered); answeredOK && answeredAt.Before(keptAt) {
+		return FormatEnd(answeredAt)
+	}
+	return FormatEnd(keptAt)
 }
 
 // ParseEnd reads an end as the token files keep it (RFC 3339).

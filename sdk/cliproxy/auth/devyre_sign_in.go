@@ -7,8 +7,9 @@ package auth
 // that end in its token file, the earlier of the kept and the new one at each refresh, and a new
 // sign-in replaces it: the key is a token payload key (IsAuthTokenPayloadKey), which a new
 // sign-in never takes from the file it replaces. A sign-in made before ends were kept has none
-// until an answer gives one; nothing infers it (a file's times survive a new sign-in on Windows
-// and macOS).
+// until it is signed in again: a refresh's answer may give a fresh lifetime rather than what is
+// left, so it only ever moves a kept end earlier (Claude Code's rule), and nothing infers one
+// (a file's times survive a new sign-in on Windows and macOS).
 //
 // A refresh the provider refused for good (tokenrefresh.Kind.Terminal: Claude's "Refresh token
 // expired", OpenAI's refresh_token_expired, _reused and _invalidated, any other invalid_grant or
@@ -39,7 +40,8 @@ func SignInEndsAt(auth *Auth) (time.Time, bool) {
 }
 
 // NoteSignInEnd keeps the end a refresh answered with (RFC 3339, empty when the answer gave
-// none) by tokenrefresh.EndAfterRefresh: the earlier of the kept one and it.
+// none) by tokenrefresh.EndAfterRefresh: the earlier of the kept one and it, none without a
+// kept one.
 func NoteSignInEnd(auth *Auth, answered string) {
 	if auth == nil {
 		return

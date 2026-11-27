@@ -202,7 +202,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/auth/devyre_filestore_seal_test.go` | The store with a key: a sign-in's file and a refresh's written sealed and listed back, an unchanged save not written, another key's file replaced by a save, nothing sealed listed without the key |
 | `sdk/cliproxy/auth/devyre_codex_recovery_test.go` | ChatGPT recovery lifts the credential-wide usage-limit block for every model, several models rejected together in either order, and a model-scoped usage limit; it needs new evidence and a response with room, keeps a per-minute rate limit, a model at capacity and a rejection that raced the usage call, and each provider's response lifts its own holds alone |
 | `sdk/cliproxy/auth/devyre_sign_in.go` | A sign-in's life: its end in the token file (`MetadataSignInEndsAt`, `SignInEndsAt`, `NoteSignInEnd`), how it stands (`SignInStatusOf`: fine, retrying or ended), the ended mark the token file keeps (`MetadataSignInEnded`), and what the same tokens read again keep of it (`devyreKeepSignInState`) |
-| `sdk/cliproxy/auth/devyre_sign_in_test.go` | A refresh keeps the earlier end, learns one it had none of, never guesses; a new sign-in takes nothing of the old one's end |
+| `sdk/cliproxy/auth/devyre_sign_in_test.go` | A refresh keeps the earlier end and learns none it had not kept; a new sign-in takes nothing of the old one's end |
 | `sdk/cliproxy/auth/devyre_refresh_outcome.go` | What a failed refresh does (`applyRefreshFailure`): a sign-in the provider ended, never refreshed again and written to the token file, or one retrying by why it failed (`passingRefreshBackoff`); each change logged at info (`logSignInChange`) |
 | `sdk/cliproxy/auth/devyre_refresh_outcome_test.go` | Claude's time limit ends the sign-in at once and for a restart too; an ended sign-in serves while its access token runs, and a request's 401 sends nothing; passing failures retried in 10, 20, 40 s, 5 min or a 429's wait, retrying since the first, fine again after a refresh that works; the same tokens read again keep it, a new sign-in is a new chance; every change logged; a wake holds due refreshes |
 | `sdk/cliproxy/auth/devyre_refresh_save.go` | Where a refresh's tokens go (`rebaseRefreshedAuth`: to a credential registered again that still holds the spent token, never over a new sign-in's), and the work after the save (`followRefresh`) |
@@ -392,9 +392,11 @@ The fork keeps it the same way in the sealed token file, as `refresh_token_expir
 `sign_in.ends_at` (never in `/v0`). A new sign-in replaces it: the key is a token payload key, which
 a sign-in never takes from the file it replaces. ChatGPT's end is kept only if its answer gives
 `refresh_token_expires_in`; its ID token says nothing of it. A sign-in made before ends were kept
-has none until an answer gives one (Claude Code, which would keep it unknown, defaults a sign-in
-without one to 30 days; this guesses nothing), and none is ever inferred from a file's times:
-Windows and macOS keep a file's creation time across a sign-in again.
+has none until it is signed in again: as in Claude Code, a refresh only ever moves a kept end
+earlier, since its answer may give a fresh lifetime rather than what is left, and an end later
+than the real one would say a sign-in lasts when it does not. Nothing is guessed (Claude Code
+defaults a sign-in whose answer gave none to 30 days; this does not), and none is ever inferred
+from a file's times: Windows and macOS keep a file's creation time across a sign-in again.
 
 ### A sign-in the provider ended
 

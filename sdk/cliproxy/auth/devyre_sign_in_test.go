@@ -1,9 +1,6 @@
 package auth
 
-import (
-	"testing"
-	"time"
-)
+import "testing"
 
 func TestDevyreARefreshKeepsTheEarlierEndOfTheSignIn(t *testing.T) {
 	auth := &Auth{ID: "claude-a.json", Metadata: map[string]any{}}
@@ -14,10 +11,12 @@ func TestDevyreARefreshKeepsTheEarlierEndOfTheSignIn(t *testing.T) {
 	if _, ok := auth.Metadata[MetadataSignInEndsAt]; ok {
 		t.Fatal("an answer without an end gave one")
 	}
+	// A refresh's answer may give a fresh lifetime, not what is left: nothing is learned from it.
 	NoteSignInEnd(auth, "2026-12-20T10:00:00Z")
-	if ends, ok := SignInEndsAt(auth); !ok || !ends.Equal(time.Date(2026, 12, 20, 10, 0, 0, 0, time.UTC)) {
-		t.Fatalf("learned end = %v, %t", ends, ok)
+	if _, ok := SignInEndsAt(auth); ok {
+		t.Fatal("a sign-in with no kept end learned one from a refresh")
 	}
+	auth.Metadata[MetadataSignInEndsAt] = "2026-12-20T10:00:00Z" // as its sign-in's answer gave it
 	NoteSignInEnd(auth, "2027-01-20T10:00:00Z")
 	if got := auth.Metadata[MetadataSignInEndsAt]; got != "2026-12-20T10:00:00Z" {
 		t.Fatalf("a later answer moved the end to %v", got)
