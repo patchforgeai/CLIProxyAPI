@@ -117,9 +117,6 @@ func (m *Manager) devyreNoteSave(auth *Auth, err error) {
 		}
 		return
 	}
-	if r.stopped {
-		return
-	}
 	if r.pending == nil {
 		r.pending = make(map[string]*pendingSave)
 	}
@@ -137,7 +134,9 @@ func (m *Manager) devyreNoteSave(auth *Auth, err error) {
 		log.WithFields(log.Fields{"credential": auth.ID, "provider": auth.Provider, "step": "save", "tries": pending.failures}).
 			Warnf("could not save %s (try %d): %v; trying again at %s", auth.ID, pending.failures, err, pending.next.Format(time.RFC3339))
 	}
-	m.armSaveRetryLocked(r)
+	if !r.stopped { // stopping: the next flush tries it
+		m.armSaveRetryLocked(r)
+	}
 }
 
 func (m *Manager) armSaveRetryLocked(r *devyreSaveRetries) {
@@ -200,6 +199,7 @@ func (m *Manager) FlushPendingSaves() []string {
 	r := &m.devyre.saves
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// What fails from here on is tried once more by the next flush, not on a timer.
 	r.stopped = true
 	if r.timer != nil {
 		r.timer.Stop()

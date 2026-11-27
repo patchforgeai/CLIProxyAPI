@@ -300,6 +300,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if s.coreManager != nil {
 			s.coreManager.StopAutoRefresh()
 		}
+		s.devyreSettleCredentials()            // devyre: before the server's stop, which may wait on streams
 		s.devyreStopAntigravityAccountModels() // devyre: no lookup registers models after this
 		if s.watcher != nil {
 			if err := s.watcher.Stop(); err != nil {
@@ -345,7 +346,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 		s.devyreStopSessionPersistence() // devyre: save the session bindings once more
-		s.devyreSettleCredentials()      // devyre: what the refreshes got is saved before the exit
+		s.devyreFlushCredentials()       // devyre: and what a request's refresh got since
 		s.devyreReleaseAuthDir()         // devyre: the next router may hold the folder
 
 		if s.pluginHost != nil {

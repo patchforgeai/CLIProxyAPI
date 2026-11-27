@@ -209,7 +209,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/runtime/executor/devyre_claude_after_refresh_test.go` | Claude's profile looked up after the refresh with the new token, only a change coming back, a failed lookup erasing nothing |
 | `sdk/cliproxy/auth/devyre_save_retry.go` | A failed save tried again until one lands (`devyreNoteSave`), and once more at shutdown (`FlushPendingSaves`); the save watermark as the last write that landed (`admits`, `landed`); the refresh tokens spent here, and a file holding one kept from putting it back (`keepUnspentTokens`) |
 | `sdk/cliproxy/auth/devyre_save_retry_test.go` | A refresh's failed save tried until it lands, logged when it does; a shutdown's last try; the watermark against the watcher's skipped saves and a new sign-in; a file with a spent token |
-| `sdk/cliproxy/devyre_settle.go` | `devyreSettleCredentials`: as the service stops, the refreshes in flight waited for and the unsaved credentials flushed; `devyreHoldAuthDir`, `devyreReleaseAuthDir`: the auth folder held while it runs |
+| `sdk/cliproxy/devyre_settle.go` | `devyreSettleCredentials`, `devyreFlushCredentials`: as the service stops, the refreshes in flight waited for and the unsaved credentials flushed; `devyreHoldAuthDir`, `devyreReleaseAuthDir`: the auth folder held while it runs |
 | `sdk/cliproxy/devyre_settle_test.go` | A second router on one auth folder waits for the first and does not start beside it |
 | `internal/authdir/authdir.go`, `authdir_unix.go`, `authdir_windows.go` | The hold on an auth folder (`Acquire`): an exclusive lock on `.router.lock` in it (flock, `LockFileEx`), waited for a while |
 | `internal/authdir/authdir_test.go` | One hold at a time; a second waits, gives up after its wait, and gets it once the first lets go |
@@ -341,7 +341,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `sdk/cliproxy/antigravity_models.go` | The request of `fetchAntigravityModelHintsFromURL` moved into `fetchAntigravityAvailableModels`, which takes the request body and returns the answer's body and an error naming the status, for the Antigravity learner too; `asyncProbeAntigravityCapabilities` returns right after its first check when `devyreAntigravityLearnerProbes` says the learner's answer for the account takes its place. |
 | `sdk/cliproxy/service.go` | The `devyreSessions` field (`devyreSessionState`) and the `devyreAuthDir` field (the held auth folder) on `Service`. |
 | `sdk/cliproxy/service_config.go` | `expiring-first` aliases in `normalizedRoutingRuntimeState`, construction in `newRoutingSelector`, and the gate, headroom and log settings in `routingRuntimeState`. That struct must stay comparable: no pointers, maps or slices. `applyManagerConfig` builds a changed selector through `devyreRoutingSelector`, which carries the session bindings over, and then calls `devyreApplySessionPersistence`. |
-| `sdk/cliproxy/service_lifecycle.go` | `Run` calls `devyreStartSessionPersistence` right before the server starts, and `devyreStartCodexAccountModels`, `devyreStartClaudeAccountModels` and `devyreStartAntigravityAccountModels` right after `registerModelRefreshCallback`; `Run` holds the auth folder (`devyreHoldAuthDir`) right after it makes sure it exists; `Shutdown` calls `devyreStopAntigravityAccountModels` right after `StopAutoRefresh`, and `devyreStopSessionPersistence`, `devyreSettleCredentials` and `devyreReleaseAuthDir` right after the server stopped. |
+| `sdk/cliproxy/service_lifecycle.go` | `Run` calls `devyreStartSessionPersistence` right before the server starts, and `devyreStartCodexAccountModels`, `devyreStartClaudeAccountModels` and `devyreStartAntigravityAccountModels` right after `registerModelRefreshCallback`; `Run` holds the auth folder (`devyreHoldAuthDir`) right after it makes sure it exists; `Shutdown` calls `devyreSettleCredentials` and `devyreStopAntigravityAccountModels` right after `StopAutoRefresh`, and `devyreStopSessionPersistence`, `devyreFlushCredentials` and `devyreReleaseAuthDir` right after the server stopped. |
 | `sdk/cliproxy/service_models.go` | The Codex OAuth branch of `registerModelsForAuthWithCache` passes the plan's catalog models through `devyreWithAccountCodexModels` before the exclusions, and the Claude branch, unless a configured key names its own models (`configuredModels`), through `devyreWithAccountClaudeModels`. The Antigravity branch passes the catalog's models, after the exclusions, through `devyreWithAccountAntigravityModels` with the exclusions. |
 
 If upstream deletes the `/v0/management` routes, `TestT3Hub_*` fails first. Restore the three routes T3 uses (`GET auth-files`, `POST api-call`, `POST reset-quota`) in `internal/api/devyre_v0_shim.go`.
@@ -491,11 +491,13 @@ the only ones left. So:
   that still holds the spent refresh token takes the new tokens. Upstream dropped them as a stale
   registration and kept the dead token, in memory and on disk. One whose tokens were replaced
   meanwhile (a new sign-in) keeps its own: the refresh's are dropped, and the log says so.
-- A shutdown waits for the refreshes in flight, up to 5 s (`RefreshDrainWait`; Anvil's
-  supervisor gives the router 8 s to stop), then flushes the unsaved credentials. Before, it
-  cancelled the refresh loop and returned in microseconds with a refresh on the wire, and the
-  process exited before its answer was saved. One still in flight after the wait is named in the
-  log as abandoned.
+- A shutdown waits for the refreshes in flight, up to 2 s (`RefreshDrainWait`), then flushes the
+  unsaved credentials, right after it stops the refresh loop and before the API server's stop,
+  which waits for the requests streaming; it flushes once more at the end. Anvil's supervisor gives
+  the router 3 s to stop, within the server's own 5 s stop budget, and so does a restart now.
+  Before, a shutdown cancelled the refresh loop and returned in microseconds with a refresh on the
+  wire, and the process exited before its answer was saved. One still in flight after the wait is
+  named in the log as abandoned.
 - A save that fails is tried again, after 1 s doubling to a minute, until one lands, which the log
   says; the service tries every one still unsaved once more as it stops. Before, a failed save
   was one warning, and the file kept the spent refresh token until its next write, four hours later

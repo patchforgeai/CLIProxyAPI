@@ -15,9 +15,11 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// RefreshDrainWait is how long a shutdown waits for the refreshes in flight. A refresh's
-// exchange takes about a second; its own bound is 30 s, longer than a stop may take.
-const RefreshDrainWait = 5 * time.Second
+// RefreshDrainWait is how long a shutdown waits for the refreshes in flight: a refresh's exchange
+// takes about a second (its own bound, 30 s, is longer than a stop may take), and Anvil's
+// supervisor gives the router 3 s to stop before it kills it (supervisor.ts `stopGraceMs`), within
+// the server's own 5 s stop budget.
+const RefreshDrainWait = 2 * time.Second
 
 // devyreRefreshDrain counts the refreshes in flight, by credential.
 type devyreRefreshDrain struct {
