@@ -162,7 +162,7 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 		return false
 	}
 	if hasExpiry && !expiry.IsZero() {
-		return time.Until(expiry) <= *lead
+		return time.Until(expiry) <= spreadLead(a, *lead) // devyre: spread out (devyre_refresh_spread.go)
 	}
 	if !lastRefresh.IsZero() {
 		return now.Sub(lastRefresh) >= *lead

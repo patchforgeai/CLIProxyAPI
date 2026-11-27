@@ -467,7 +467,7 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 		return time.Time{}, false
 	}
 	if hasExpiry && !expiry.IsZero() {
-		dueAt := expiry.Add(-*lead)
+		dueAt := expiry.Add(-spreadLead(auth, *lead)) // devyre: spread out (devyre_refresh_spread.go)
 		if !dueAt.After(now) {
 			return now, true
 		}

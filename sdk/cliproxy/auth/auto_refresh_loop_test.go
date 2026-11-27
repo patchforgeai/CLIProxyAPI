@@ -56,7 +56,7 @@ func TestNextRefreshCheckAt_DisabledWithInvalidGrantUnschedule(t *testing.T) {
 	if !ok {
 		t.Fatalf("nextRefreshCheckAt() ok = false, want true for normal disabled auth")
 	}
-	want := expiry.Add(-lead)
+	want := expiry.Add(-lead + refreshSpread(normalDisabledAuth, lead)) // devyre: spread out
 	if !got.Equal(want) {
 		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
 	}
@@ -152,7 +152,8 @@ func TestNextRefreshCheckAt_ProviderLead_Expiry(t *testing.T) {
 	if !ok {
 		t.Fatalf("nextRefreshCheckAt() ok = false, want true")
 	}
-	want := expiry.Add(-lead)
+	// devyre: a stable offset into the lead (devyre_refresh_spread.go).
+	want := expiry.Add(-lead + refreshSpread(auth, lead))
 	if !got.Equal(want) {
 		t.Fatalf("nextRefreshCheckAt() = %s, want %s", got, want)
 	}
@@ -180,7 +181,7 @@ func TestNextRefreshCheckAt_RelativeExpiry(t *testing.T) {
 	}
 
 	got, ok := nextRefreshCheckAt(now, auth, 15*time.Minute)
-	want := issuedAt.Add(time.Hour - lead)
+	want := issuedAt.Add(time.Hour - lead + refreshSpread(auth, lead))
 	if !ok || !got.Equal(want) {
 		t.Fatalf("nextRefreshCheckAt() = (%s, %t), want (%s, true)", got, ok, want)
 	}

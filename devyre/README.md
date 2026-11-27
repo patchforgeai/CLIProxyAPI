@@ -215,6 +215,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/authdir/authdir_test.go` | One hold at a time; a second waits, gives up after its wait, and gets it once the first lets go |
 | `sdk/cliproxy/auth/devyre_drain.go` | The refreshes in flight, by credential, and a shutdown's bounded wait for them (`DrainRefreshes`, `RefreshDrainWait`) |
 | `sdk/cliproxy/auth/devyre_drain_test.go` | A shutdown waits for a loop refresh on the wire and saves its answer; the wait is bounded and names what it leaves |
+| `sdk/cliproxy/auth/devyre_refresh_spread.go` | Each credential's stable offset into its provider's lead (`refreshSpread`, `spreadLead`) |
+| `sdk/cliproxy/auth/devyre_refresh_spread_test.go` | Seven accounts refreshed in one second come due apart, each within the first half of its lead, stably; the offset stays under half the lead |
 | `sdk/cliproxy/auth/devyre_wake.go` | After a wake (a pass of the refresh loop far later than its timer allows, by either clock), due refreshes wait 20 s for the network |
 | `sdk/cliproxy/auth/devyre_focus.go` | `devyreFocusTakesOver`: whether session affinity gives a bound session up to a usable focus |
 | `sdk/cliproxy/auth/devyre_focus_test.go` | The focus in the selector (urgency, 5h, 7d and model-scoped gates, tiers, other providers, ends, rotation, the `focus` log reason) and under session affinity (explicit sessions, the fallback key, LCP, the log line, through the manager) |
@@ -277,10 +279,11 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/auth/claude/anthropic.go`, `internal/auth/codex/openai.go` | `ClaudeTokenData` and `CodexTokenData` carry `RefreshTokenExpiresAt`, which the code exchange sets from the answer's `refresh_token_expires_in`, `CreateTokenStorage` copies and `UpdateTokenStorage` keeps the earlier of (`tokenrefresh.EndAfterRefresh`). |
 | `sdk/cliproxy/auth/metadata_merge.go` | `IsAuthTokenPayloadKey` takes `refresh_token_expires_at` and `sign_in_ended`: a new sign-in never takes the old one's end, and a refresh's always applies. `MergeRefreshedAuth` takes the refresh's sign-in state. |
 | `sdk/cliproxy/auth/conductor_refresh.go` | `refreshAuthForRequestAtEpoch` counts itself in flight (`devyre.refreshes`) for a shutdown to wait for. `shouldRefresh`, `markRefreshPending`, `tryRefreshAfterUnauthorized` and `refreshAuthForRequestAtEpoch` (unless forced) leave an ended sign-in alone (`hasEndedSignIn`). A failed refresh goes to `applyRefreshFailure` in place of upstream's branch (and its invalid-grant backoff, `invalidGrantBackoffDuration`, which is gone); one that worked clears the sign-in state, is saved without its caller's cancellation, logs the change and then runs `followRefresh`; one whose tokens were replaced meanwhile is dropped. |
-| `sdk/cliproxy/auth/auto_refresh_loop.go` | `nextRefreshCheckAt` never schedules an ended sign-in. The loop notes each pass (`notePass`), and `handleDue` lets `waitForNetwork` hold due refreshes after a wake; `resetTimer` records whether the timer is armed. |
+| `sdk/cliproxy/auth/auto_refresh_loop.go` | `nextRefreshCheckAt` never schedules an ended sign-in, and puts a credential's due time its spread into the lead (`spreadLead`); `shouldRefresh` in `conductor_refresh.go` agrees. The loop notes each pass (`notePass`), and `handleDue` lets `waitForNetwork` hold due refreshes after a wake; `resetTimer` records whether the timer is armed. |
 | `sdk/cliproxy/auth/conductor_lifecycle.go` | `updateInternal`, replacing a credential with the same tokens, keeps what their refreshes said (`devyreKeepSignInState`); a refresh's update goes through `rebaseRefreshedAuth` before the registration check; a watcher's replacement holding a spent refresh token keeps the newer ones and is written (`keepUnspentTokens`). `persist` asks `admits` and records `landed` in place of upstream's watermark, which moved for every save asked for, and reports each save to `devyreNoteSave`; `authPersistLock` carries `wrote` and `known`. |
 | `sdk/cliproxy/auth/types.go` | `Auth` carries `devyreSignIn`, a passing refresh failure in memory. |
 | `sdk/cliproxy/auth/conductor_refresh_disabled_test.go`, `conductor_scheduler_refresh_test.go` | An invalid grant, or a 401 at the token endpoint, ends the sign-in instead of being retried with a backoff. |
+| `sdk/cliproxy/auth/auto_refresh_loop_test.go` | The due times of a provider's lead include the credential's spread. |
 | `internal/auth/meta/meta.go` | `SaveTokenToFile` reads the old file through `authseal.ReadFile` and writes through `authseal.WriteFile` in place of its own temporary file and rename. |
 | `internal/api/handlers/management/config_basic.go` | `normalizeRoutingStrategy` accepts `expiring-first`, so `PUT /routing/strategy` does too. |
 | `internal/api/handlers/management/handler.go` | Two hunks: `Middleware()` asks `devyreTailnetAuthorize` first and skips the key for a trusted request, and the missing-key branch of `AuthenticateManagementKey` no longer calls `fail()`, so only a wrong key counts toward the ban (RESP's commands before `AUTH`, which ask with an empty key only to learn whether the IP is banned, included). |
@@ -439,6 +442,21 @@ in 10 s), and at worst leave on a half-up link whose answer is lost, which may s
 
 The v8 listing's `sign_in` says all of it: `state` (`retrying` or `ended`, absent while fine),
 `reason`, `answer`, `since`, `next_try_at`, `access_expires_at` and `ends_at`.
+
+### Refreshes spread out
+
+A credential is due at its access token's expiry less its provider's lead: Claude's 4 h of an 8 h
+token, ChatGPT's 24 h. A start or a wake makes every credential that came due meanwhile due at
+once, and each refresh then set the next one a lead before its new expiry, so they stayed in step
+for good: this Mac's six Claude accounts were rewritten in the same second, every four hours, from
+2026-11-24 to 11-26, and one network blip, stop or 429 met them all.
+
+Now each credential comes due a stable offset into its lead (`devyre_refresh_spread.go`, from its
+file name, under half the lead: Claude's between 4 and 2 h before the expiry), so their periods
+differ and they drift apart after one round together. Claude keeps its 4 h lead: even the latest
+offset leaves 2 h of the token for a refresh that fails to be tried again (at most 5 minutes
+apart), so nothing argued for another. At most two refreshes of a provider go out at once, and a
+429 holds the provider's next ones until its Retry-After (`tokenrefresh`).
 
 ### No refresh is lost
 
@@ -1044,6 +1062,7 @@ go test ./sdk/cliproxy/auth/ ./internal/api/handlers/management/ -run "DevyreA|D
 go test ./internal/runtime/executor/ -run DevyreClaudeLooks
 go test ./sdk/cliproxy/auth/ -run "DevyreAFailed|DevyreAShutdown|DevyreTheSave|DevyreAFile|DevyreARefresh"
 go test ./internal/authdir/ ./sdk/cliproxy/ -run "OneRouter|DevyreASecond"
+go test ./sdk/cliproxy/auth/ -run "DevyreAccountsRefreshed|DevyreTheSpread|NextRefreshCheckAt"
 go test ./internal/watcher/ -run Devyre
 go test ./sdk/auth/ -run Devyre
 go test ./internal/managementasset/ -run DevyrePanel
