@@ -32,9 +32,10 @@ func refreshOnce(t *testing.T, provider string, send func(context.Context) (*htt
 	t.Helper()
 	var calls int32
 	answer, err := Refresh(context.Background(), Exchange{
-		Provider:     provider,
-		Account:      "account.json",
-		RefreshToken: "rt-" + t.Name(),
+		Provider:         provider,
+		Account:          "account.json",
+		RefreshToken:     "rt-" + t.Name(),
+		UnauthorizedEnds: provider == "codex", // as the provider packages set it
 		Send: func(ctx context.Context) (*http.Response, error) {
 			atomic.AddInt32(&calls, 1)
 			return send(ctx)
@@ -71,7 +72,15 @@ func TestAnswersSayWhatTheyMeanForTheSignIn(t *testing.T) {
 		{"openai's spent token", "codex", 401, `{"error":{"code":"refresh_token_reused","message":"already used"}}`, nil, KindReused, true, 1},
 		{"openai's spent token, flat", "codex", 400, `{"error":"invalid_grant","code":"refresh_token_reused"}`, nil, KindReused, true, 1},
 		{"openai's revoked sign-in", "codex", 401, `{"error":{"code":"refresh_token_invalidated"}}`, nil, KindRevoked, true, 1},
-		{"a 401 that names nothing", "codex", 401, `{"error":{"message":"Unauthorized"}}`, nil, KindRefused, true, 1},
+		{"a 401 that names nothing, from OpenAI", "codex", 401, `{"error":{"message":"Unauthorized"}}`, nil, KindRefused, true, 1},
+		// Claude Code reads a 401 as a dead token only with an invalid_grant.
+		{"an empty 401, from Claude's endpoint", "claude", 401, ``, nil, KindRejected, false, 1},
+		{"an edge proxy's 401 page", "claude", 401, `<html><body>401 Authorization Required</body></html>`, nil, KindRejected, false, 1},
+		{"an API error's 401", "claude", 401, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`, nil, KindRejected, false, 1},
+		{"claude's 401 invalid_grant", "claude", 401, `{"error":"invalid_grant","error_description":"Refresh token not found or invalid"}`, nil, KindRefused, true, 1},
+		// A 429 is a 429, whatever its body names.
+		{"a 429 that says invalid_grant", "claude", 429, `{"error":"invalid_grant"}`, nil, KindRateLimited, false, 1},
+		{"a 429 that names an OpenAI end", "codex", 429, `{"error":{"code":"refresh_token_expired"}}`, nil, KindRateLimited, false, 1},
 		{"a 429", "claude", 429, `{"error":"rate_limited"}`, http.Header{"Retry-After": []string{"60"}}, KindRateLimited, false, 1},
 		{"a 503, replayed", "claude", 503, `{"error":"overloaded"}`, nil, KindServer, false, attempts},
 		{"cloudflare's challenge", "claude", 403, `<html><head><title>Just a moment...</title></head><body>cloudflare challenge-platform</body></html>`, nil, KindBlocked, false, 1},

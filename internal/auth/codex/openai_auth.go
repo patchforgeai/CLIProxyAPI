@@ -211,6 +211,8 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, account, refreshToken str
 		Provider:     "codex",
 		Account:      account,
 		RefreshToken: refreshToken,
+		// Codex reads every 401 from the token endpoint as the end of its sign-in.
+		UnauthorizedEnds: true,
 		Send: func(ctx context.Context) (*http.Response, error) {
 			data := url.Values{
 				"client_id":     {ClientID},

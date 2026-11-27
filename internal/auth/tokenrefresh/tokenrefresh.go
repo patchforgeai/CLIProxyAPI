@@ -57,8 +57,9 @@ const (
 	KindRevoked Kind = "revoked"
 	// The provider put the account on hold (Claude's account_on_hold). Terminal.
 	KindOnHold Kind = "on_hold"
-	// Any other invalid_grant, or a 401 from the token endpoint: the provider refuses this
-	// refresh token and always will. Terminal.
+	// Any other invalid_grant, or a 401 from a token endpoint whose client reads every 401 as
+	// final (Exchange.UnauthorizedEnds): the provider refuses this refresh token and always will.
+	// Terminal.
 	KindRefused Kind = "refused"
 
 	// The request never reached the server (DNS, dial, TLS handshake): the token is unspent.
@@ -72,7 +73,7 @@ const (
 	KindServer Kind = "server_error"
 	// A Cloudflare challenge or another page in place of the token endpoint's answer.
 	KindBlocked Kind = "blocked"
-	// Another 4xx the provider named no grant error for.
+	// Another 4xx the provider named no grant error for (Claude's 401 without one included).
 	KindRejected Kind = "rejected"
 )
 
@@ -280,6 +281,11 @@ type Exchange struct {
 	Send func(ctx context.Context) (*http.Response, error)
 	// Read reads an answer's body; io.ReadAll when nil.
 	Read func(*http.Response) ([]byte, error)
+	// UnauthorizedEnds: a 401 from the token endpoint ends the sign-in whatever its body says,
+	// as the provider's own client reads it (Codex 0.162.1: every 401 at a refresh is
+	// permanent). Without it a 401 ends it only with an invalid_grant (Claude Code 2.1.332); one
+	// without (an empty body, an edge proxy's page) is passing.
+	UnauthorizedEnds bool
 }
 
 var (
@@ -580,23 +586,24 @@ func answerFailure(x Exchange, resp *http.Response, body []byte) *Failure {
 	}
 	status := resp.StatusCode
 	authStatus := status == http.StatusBadRequest || status == http.StatusUnauthorized || status == http.StatusForbidden
+	// A 429 is a 429 whatever its body says; only a 4xx below it can refuse the token.
 	switch kind, named := openAITerminal[strings.ToLower(failure.Code)]; {
 	case isChallenge(resp, body):
 		failure.Kind = KindBlocked
+	case status == http.StatusTooManyRequests:
+		failure.Kind = KindRateLimited
+		failure.Wait = retryAfter(resp)
 	case authStatus && failure.Description == claudeOnHold:
 		failure.Kind = KindOnHold
-	case named && status != http.StatusTooManyRequests && status < 500:
+	case named && status < 500:
 		failure.Kind = kind
 	case strings.EqualFold(failure.Code, "invalid_grant") && status < 500:
 		failure.Kind = KindRefused
 		if strings.EqualFold(failure.Description, claudeEnded) {
 			failure.Kind = KindEnded
 		}
-	case status == http.StatusUnauthorized:
+	case status == http.StatusUnauthorized && x.UnauthorizedEnds:
 		failure.Kind = KindRefused
-	case status == http.StatusTooManyRequests:
-		failure.Kind = KindRateLimited
-		failure.Wait = retryAfter(resp)
 	case status >= 500:
 		failure.Kind = KindServer
 	case status == http.StatusForbidden:

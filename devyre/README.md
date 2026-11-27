@@ -283,7 +283,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `sdk/cliproxy/auth/auto_refresh_loop.go` | `nextRefreshCheckAt` never schedules an ended sign-in, and puts a credential's due time its spread into the lead (`spreadLead`); `shouldRefresh` in `conductor_refresh.go` agrees. The loop notes each pass (`notePass`), and `handleDue` lets `waitForNetwork` hold due refreshes after a wake; `resetTimer` records whether the timer is armed. |
 | `sdk/cliproxy/auth/conductor_lifecycle.go` | `updateInternal`, replacing a credential with the same tokens, keeps what their refreshes said (`devyreKeepSignInState`); a refresh's update goes through `rebaseRefreshedAuth` before the registration check; a watcher's replacement holding a spent refresh token keeps the newer ones and is written (`keepUnspentTokens`). `persist` asks `admits` and records `landed` in place of upstream's watermark, which moved for every save asked for, and reports each save to `devyreNoteSave`; `authPersistLock` carries `wrote` and `known`. |
 | `sdk/cliproxy/auth/types.go` | `Auth` carries `devyreSignIn`, a passing refresh failure in memory. |
-| `sdk/cliproxy/auth/conductor_refresh_disabled_test.go`, `conductor_scheduler_refresh_test.go` | An invalid grant, or a 401 at the token endpoint, ends the sign-in instead of being retried with a backoff. |
+| `sdk/cliproxy/auth/conductor_refresh_disabled_test.go`, `conductor_scheduler_refresh_test.go` | An invalid grant, or (for another provider's refresh, read by its text) a 401 at the token endpoint, ends the sign-in instead of being retried with a backoff. |
 | `sdk/cliproxy/auth/auto_refresh_loop_test.go` | The due times of a provider's lead include the credential's spread. |
 | `internal/auth/meta/meta.go` | `SaveTokenToFile` reads the old file through `authseal.ReadFile` and writes through `authseal.WriteFile` in place of its own temporary file and rename. |
 | `internal/api/handlers/management/config_basic.go` | `normalizeRoutingStrategy` accepts `expiring-first`, so `PUT /routing/strategy` does too. |
@@ -400,8 +400,10 @@ Windows and macOS keep a file's creation time across a sign-in again.
 
 A refresh the provider refused for good ends the sign-in (`devyre_refresh_outcome.go`): Claude's
 "Refresh token expired" (`invalid_grant`), OpenAI's `refresh_token_expired`, `refresh_token_reused`
-and `refresh_token_invalidated`, Claude's `account_on_hold`, any other `invalid_grant`, and a 401 from
-the token endpoint. The credential is never refreshed again until its tokens change, its status says
+and `refresh_token_invalidated`, Claude's `account_on_hold`, any other `invalid_grant` (a 429 is
+always a 429, whatever its body names), and any 401 from OpenAI's token endpoint, as Codex reads it
+(`Exchange.UnauthorizedEnds`). A 401 from Claude's without an `invalid_grant` (an empty body, an
+edge proxy's page) is passing: Claude Code reads a 401 as a dead token only with one. The credential is never refreshed again until its tokens change, its status says
 `sign-in ended by the provider (time limit)` (or `refresh token reused`, `revoked`, `account on
 hold`, `refresh token refused`), and its token file keeps `sign_in_ended` (why, the provider's
 answer, when), so a restart sends the dead token neither. An access token that has not run out
@@ -420,7 +422,8 @@ the refresh token dead and asks for `/login` on every 400 or 401 `invalid_grant`
 description; it records "Refresh token expired" alone as the sign-in's time limit, and names
 "Refresh token not found or invalid" (a spent or revoked token), "No organization associated with
 this token", "No account associated with this token" and `account_on_hold` as the others. Codex
-0.162.1 ends the sign-in on every 401 from the token endpoint. Within this router a refresh token
+0.162.1 ends the sign-in on every 401 from OpenAI's token endpoint, which the fork follows for
+ChatGPT alone. Within this router a refresh token
 is never sent twice at once (a single flight a token and a lock a credential), so an
 `invalid_grant` cannot be a race with itself; the one way it follows a refresh that worked is an
 answer lost on the way back, after which the token is spent for good too. The status still
@@ -434,7 +437,7 @@ Any other failure leaves the sign-in retrying (`state: retrying`, `next_try_at` 
 |---|---|
 | The request never left (`unreachable`: DNS, dial, TLS handshake) | 10 s, doubling to 5 min |
 | A 429 (`rate_limited`) | its Retry-After, at least a minute |
-| No readable answer (`lost`), a 5xx (`server_error`), a Cloudflare page (`blocked`), another 4xx (`rejected`) | 5 min |
+| No readable answer (`lost`), a 5xx (`server_error`), a Cloudflare page (`blocked`), another 4xx (`rejected`: Claude's 401 without an `invalid_grant` among them) | 5 min |
 
 The access token serves while it runs, and the next try never comes after it runs out. Once it has
 run out the credential is unavailable meanwhile, with the status `refresh retrying (<why>)`; before,
