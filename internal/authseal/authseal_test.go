@@ -326,6 +326,36 @@ func TestWriteFileWhileAReaderHoldsTheFile(t *testing.T) {
 	}
 }
 
+// devyre: the router's own readers (ReadFile: the watcher, the store, a load) share the file's
+// deletion, so on Windows too the atomic replace never waits for one of them.
+func TestWriteFileWhileTheRoutersOwnReaderHoldsTheFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "claude-lin@example.com.json")
+	if err := os.WriteFile(path, []byte(`{"type":"claude"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := openShared(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Close() })
+	blocked := 0
+	renameBlockedHook = func() { blocked++ }
+	t.Cleanup(func() { renameBlockedHook = nil })
+	if err := WriteFile(path, []byte(tokenJSON)); err != nil {
+		t.Fatalf("WriteFile while the router's own reader holds the file: %v", err)
+	}
+	if blocked != 0 {
+		t.Fatalf("the rename waited %d times for the router's own reader", blocked)
+	}
+	if data, err := ReadFile(path); err != nil || string(data) != tokenJSON {
+		t.Fatalf("read back = %q, %v", data, err)
+	}
+	if _, err := ReadFile(filepath.Join(dir, "missing.json")); !os.IsNotExist(err) {
+		t.Fatalf("a missing file reads as %v, want not-exist", err)
+	}
+}
+
 func TestWriteFileThroughALink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "real.json")

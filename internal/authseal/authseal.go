@@ -19,7 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -151,11 +151,23 @@ func Open(path string, data []byte) ([]byte, error) {
 // when it is sealed. The errors of reading are os.ReadFile's (os.IsNotExist works on them); a
 // sealed file that cannot be opened fails with an error that wraps ErrSealed.
 func ReadFile(path string) ([]byte, error) {
-	data, err := os.ReadFile(path)
+	data, err := readShared(path)
 	if err != nil || !IsSealed(data) {
 		return data, err
 	}
 	return Open(path, data)
+}
+
+// readShared reads the whole file at path through openShared, so an atomic replace of it never
+// waits for this read (on Windows, a reader that does not share the file's deletion makes the
+// rename over it fail).
+func readShared(path string) ([]byte, error) {
+	file, err := openShared(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	return io.ReadAll(file)
 }
 
 // WriteFile replaces the auth file at path with data, owner-only (0600): sealed while the process

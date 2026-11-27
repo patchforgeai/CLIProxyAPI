@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -52,7 +51,7 @@ func SealDir(dir string) (SealReport, error) {
 			log.Warnf("auth files: %s is not a regular file; left as it is", name)
 			return nil
 		}
-		data, errRead := os.ReadFile(path)
+		data, errRead := readShared(path)
 		if errRead != nil {
 			report.WriteFailed++
 			log.Warnf("auth files: cannot read %s to seal it: %v", name, errRead)

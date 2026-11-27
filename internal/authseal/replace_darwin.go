@@ -33,3 +33,6 @@ func keepCreationTimeClosed(tempPath string, created syscall.Timespec) {
 }
 
 func renameBlocked(error) bool { return false }
+
+// openShared opens the file at path for reading: a rename over it never waits for a reader here.
+func openShared(path string) (*os.File, error) { return os.Open(path) }

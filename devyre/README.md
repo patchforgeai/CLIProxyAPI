@@ -123,12 +123,12 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/thinking/devyre_requested_level.go` | `DevyreRequestedLevel`: the thinking level a request names, its suffix's or its body's in the source format; `DevyreSetRequestedLevel`: a copy of the body naming another level, or none |
 | `internal/thinking/devyre_requested_level_test.go` | Gemini, the Antigravity envelope, OpenAI, Responses and Claude bodies, suffixes, budgets, `auto` and `none`; the rewrite keeps capitals, removes, leaves a body naming no level and never changes the request's own |
 | `internal/authseal/authseal.go` | The auth files' key (`SetKey`), the sealed format (`Seal`, `Open`, the name as associated data), and the reads and writes every auth file goes through (`ReadFile`, `WriteFile`, `WriteJSON`) |
-| `internal/authseal/replace.go`, `replace_windows.go`, `replace_darwin.go`, `replace_other.go` | The atomic replace: a temporary file beside the auth file, its creation time kept (Windows, macOS), the rename tried again while another handle holds the file (Windows) |
+| `internal/authseal/replace.go`, `replace_windows.go`, `replace_darwin.go`, `replace_other.go` | The atomic replace: a temporary file beside the auth file, its creation time kept (Windows, macOS), the rename tried again while another process's handle holds the file (Windows); the router's own reads open the file sharing its deletion (`openShared`), so they never hold the rename up |
 | `internal/auth/tokenrefresh/tokenrefresh.go` | The one refresh policy of Claude's and ChatGPT's accounts (`Refresh`): one request at a time a token, at most two a provider, a 429 holding the provider's next refreshes until its Retry-After, a replay only after a 5xx, and a `Failure` whose `Kind` says what it means for the sign-in (see [A sign-in's life](#a-sign-ins-life)) |
 | `internal/auth/claude/devyre_sign_in_end_test.go` | A sign-in keeps the end Claude's answer gives, a refresh the earlier one, an answer without one leaves it unknown |
 | `internal/auth/tokenrefresh/tokenrefresh_test.go` | Each answer Claude Code 2.1.332 and Codex 0.162.1 name, and what it means; a request that never left told from one whose answer was lost, through a real listener; an unreadable 200 never replayed; a 429's hold on its provider alone; Retry-After's forms and bounds; the end of a sign-in an answer gives; one request a token and two a provider; a refresh that outlives its caller |
 | `internal/authseal/migrate.go` | `SealDir`: the plaintext auth files sealed at start, the rest left as they are |
-| `internal/authseal/authseal_test.go`, `migrate_test.go`, `replace_windows_test.go`, `replace_darwin_test.go`, `replace_other_test.go` | Round trips and every refusal (another key, another name, a changed byte, malformed, no key); plaintext read with and without a key; the mode, no temporary file left, the creation time kept, the rename while a reader holds the file, writes through a link, the encoder's bytes; the migration: what it seals and what it leaves, run twice, creation times, without a key |
+| `internal/authseal/authseal_test.go`, `migrate_test.go`, `replace_windows_test.go`, `replace_darwin_test.go`, `replace_other_test.go` | Round trips and every refusal (another key, another name, a changed byte, malformed, no key); plaintext read with and without a key; the mode, no temporary file left, the creation time kept, the rename while another reader holds the file, and while the router's own does (never waiting), writes through a link, the encoder's bytes; the migration: what it seals and what it leaves, run twice, creation times, without a key |
 | `internal/cmd/devyre_auth_seal.go` | `ReadStdinAuthFilesKey`: the key line on the shared stdin reader |
 | `internal/cmd/devyre_auth_seal_test.go` | The key line (CRLF, last line, empty, short, padded, standard base64, not base64, over-long; no error shows the line), and the password, the key and a shutdown line written at once |
 | `internal/cmd/devyre_lifeline.go` | The stdin lifeline: `SetStdinLifeline`, the shutdown line, the run context that ends with stdin, the password line (`ReadStdinPassword`, its reader shared with the key line) on the same buffered reader, and the listening line |
@@ -460,6 +460,12 @@ the only ones left. So:
   says; the service tries every one still unsaved once more as it stops. Before, a failed save
   was one warning, and the file kept the spent refresh token until its next write, four hours later
   at best: a restart meanwhile (several a day on the Preview channel) loaded the dead token.
+- On Windows a rename over a file that a handle holds open without sharing its deletion fails, as
+  Go's `os.Open` opens it; the replace tried again for about 1.7 s, then the save failed. Every
+  read of an auth file goes through `authseal.ReadFile`, which now opens it sharing its deletion
+  (`openShared`), so the router's own readers (the watcher, the store, a load, the management
+  routes) never hold a rename up. Another process's handle (an antivirus scan) still can: the
+  replace still tries again, and a save that fails is tried again later (above).
 - The save watermark, which keeps an older state from overwriting a newer one, is the last write
   that landed. Upstream moved it for every save asked for, the watcher's skipped ones included, so
   a refresh's save that came after a watcher update was dropped without a word. A skipped save now

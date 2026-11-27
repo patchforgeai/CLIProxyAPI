@@ -29,6 +29,23 @@ func keepCreationTimeOpen(temp *os.File, created syscall.Filetime) {
 
 func keepCreationTimeClosed(string, syscall.Filetime) {}
 
+// openShared opens the file at path for reading and shares its deletion, which Go's os.Open
+// does not: the atomic replace (a rename over the file) then never waits for a reader of it
+// (the watcher, the store, a load), whose handle keeps the old file.
+func openShared(path string) (*os.File, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		return nil, &os.PathError{Op: "open", Path: path, Err: err}
+	}
+	return os.NewFile(uintptr(handle), path), nil
+}
+
 // renameBlocked reports whether a rename failed because another handle holds the file open
 // without sharing its deletion (Go's own os.Open among them): worth trying again in a moment.
 func renameBlocked(err error) bool {
