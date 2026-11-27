@@ -391,26 +391,24 @@ func TestDevyreTheWakeWaitEndsWhenTheNetworkAnswers(t *testing.T) {
 	if !loop.waitForNetwork([]string{"a.json"}, now) {
 		t.Fatal("due refreshes went out right after a wake")
 	}
+	// Once it answers, the refresh the wait held is due again (rescheduled), and the wait is over.
+	due := func() bool {
+		loop.mu.Lock()
+		defer loop.mu.Unlock()
+		_, dirty := loop.dirty["a.json"]
+		return dirty
+	}
 	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		loop.wake.mu.Lock()
-		ended := loop.wake.until.IsZero()
-		loop.wake.mu.Unlock()
-		if ended {
-			break
-		}
+	for !due() && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
+	}
+	if !due() {
+		t.Fatal("the refresh the wait held is not due again")
 	}
 	if loop.waitForNetwork([]string{"a.json"}, time.Now()) {
 		t.Fatal("the wait did not end once the network answered")
 	}
 	if got := looks.Load(); got != 3 {
 		t.Fatalf("the network was looked at %d times, want until it answered (3)", got)
-	}
-	loop.mu.Lock()
-	_, dirty := loop.dirty["a.json"]
-	loop.mu.Unlock()
-	if !dirty {
-		t.Fatal("the refresh the wait held is not due again")
 	}
 }
