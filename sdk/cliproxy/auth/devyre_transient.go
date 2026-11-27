@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -48,6 +49,11 @@ type devyreManagerState struct {
 	// transients holds the streaks of transient failures (devyre_transient_soft.go);
 	// a test hook, nil uses the store the expiring-first selector shares.
 	transients *devyreTransientStore
+	// saves are the credentials whose last save failed, tried again until one lands
+	// (devyre_save_retry.go).
+	saves devyreSaveRetries
+	// spent are the refresh tokens this router spent, by credential (devyre_save_retry.go).
+	spent sync.Map
 }
 
 // devyreMarkBound tells the conductor that the request's session was already

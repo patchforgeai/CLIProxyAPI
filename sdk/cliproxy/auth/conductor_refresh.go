@@ -696,6 +696,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	// devyre: the rotated tokens are saved whatever became of the caller (a request that went
 	// away, the loop stopping at shutdown): the refresh token they replace is spent.
 	saveCtx := context.WithoutCancel(ctx)
+	if spent := authRefreshToken(base); spent != "" && spent != authRefreshToken(updated) {
+		m.noteSpentRefreshToken(id, spent)
+	}
 	saved, errUpdate := m.UpdateRefreshedAuth(saveCtx, base, updated)
 	if errUpdate != nil {
 		if errors.Is(errUpdate, errRefreshSuperseded) {

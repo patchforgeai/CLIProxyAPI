@@ -342,6 +342,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 		}
 		s.devyreStopSessionPersistence() // devyre: save the session bindings once more
+		s.devyreSettleCredentials()      // devyre: what the refreshes got is saved before the exit
 
 		if s.pluginHost != nil {
 			sdktranslator.SetPluginHooks(nil)

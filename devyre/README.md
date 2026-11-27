@@ -207,6 +207,9 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/devyre_refresh_save.go` | Where a refresh's tokens go (`rebaseRefreshedAuth`: to a credential registered again that still holds the spent token, never over a new sign-in's), and the work after the save (`followRefresh`) |
 | `sdk/cliproxy/auth/devyre_refresh_save_test.go` | The rotated tokens on disk before the profile lookup; saved when the caller went away; carried onto a credential registered again; never over a new sign-in |
 | `internal/runtime/executor/devyre_claude_after_refresh_test.go` | Claude's profile looked up after the refresh with the new token, only a change coming back, a failed lookup erasing nothing |
+| `sdk/cliproxy/auth/devyre_save_retry.go` | A failed save tried again until one lands (`devyreNoteSave`), and once more at shutdown (`FlushPendingSaves`); the save watermark as the last write that landed (`admits`, `landed`); the refresh tokens spent here, and a file holding one kept from putting it back (`keepUnspentTokens`) |
+| `sdk/cliproxy/auth/devyre_save_retry_test.go` | A refresh's failed save tried until it lands, logged when it does; a shutdown's last try; the watermark against the watcher's skipped saves and a new sign-in; a file with a spent token |
+| `sdk/cliproxy/devyre_settle.go` | `devyreSettleCredentials`: the unsaved credentials flushed as the service stops |
 | `sdk/cliproxy/auth/devyre_wake.go` | After a wake (a pass of the refresh loop far later than its timer allows, by either clock), due refreshes wait 20 s for the network |
 | `sdk/cliproxy/auth/devyre_focus.go` | `devyreFocusTakesOver`: whether session affinity gives a bound session up to a usable focus |
 | `sdk/cliproxy/auth/devyre_focus_test.go` | The focus in the selector (urgency, 5h, 7d and model-scoped gates, tiers, other providers, ends, rotation, the `focus` log reason) and under session affinity (explicit sessions, the fallback key, LCP, the log line, through the manager) |
@@ -270,7 +273,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `sdk/cliproxy/auth/metadata_merge.go` | `IsAuthTokenPayloadKey` takes `refresh_token_expires_at` and `sign_in_ended`: a new sign-in never takes the old one's end, and a refresh's always applies. `MergeRefreshedAuth` takes the refresh's sign-in state. |
 | `sdk/cliproxy/auth/conductor_refresh.go` | `shouldRefresh`, `markRefreshPending`, `tryRefreshAfterUnauthorized` and `refreshAuthForRequestAtEpoch` (unless forced) leave an ended sign-in alone (`hasEndedSignIn`). A failed refresh goes to `applyRefreshFailure` in place of upstream's branch (and its invalid-grant backoff, `invalidGrantBackoffDuration`, which is gone); one that worked clears the sign-in state, is saved without its caller's cancellation, logs the change and then runs `followRefresh`; one whose tokens were replaced meanwhile is dropped. |
 | `sdk/cliproxy/auth/auto_refresh_loop.go` | `nextRefreshCheckAt` never schedules an ended sign-in. The loop notes each pass (`notePass`), and `handleDue` lets `waitForNetwork` hold due refreshes after a wake; `resetTimer` records whether the timer is armed. |
-| `sdk/cliproxy/auth/conductor_lifecycle.go` | `updateInternal`, replacing a credential with the same tokens, keeps what their refreshes said (`devyreKeepSignInState`); a refresh's update goes through `rebaseRefreshedAuth` before the registration check. |
+| `sdk/cliproxy/auth/conductor_lifecycle.go` | `updateInternal`, replacing a credential with the same tokens, keeps what their refreshes said (`devyreKeepSignInState`); a refresh's update goes through `rebaseRefreshedAuth` before the registration check; a watcher's replacement holding a spent refresh token keeps the newer ones and is written (`keepUnspentTokens`). `persist` asks `admits` and records `landed` in place of upstream's watermark, which moved for every save asked for, and reports each save to `devyreNoteSave`; `authPersistLock` carries `wrote` and `known`. |
 | `sdk/cliproxy/auth/types.go` | `Auth` carries `devyreSignIn`, a passing refresh failure in memory. |
 | `sdk/cliproxy/auth/conductor_refresh_disabled_test.go`, `conductor_scheduler_refresh_test.go` | An invalid grant, or a 401 at the token endpoint, ends the sign-in instead of being retried with a backoff. |
 | `internal/auth/meta/meta.go` | `SaveTokenToFile` reads the old file through `authseal.ReadFile` and writes through `authseal.WriteFile` in place of its own temporary file and rename. |
@@ -329,7 +332,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `sdk/cliproxy/antigravity_models.go` | The request of `fetchAntigravityModelHintsFromURL` moved into `fetchAntigravityAvailableModels`, which takes the request body and returns the answer's body and an error naming the status, for the Antigravity learner too; `asyncProbeAntigravityCapabilities` returns right after its first check when `devyreAntigravityLearnerProbes` says the learner's answer for the account takes its place. |
 | `sdk/cliproxy/service.go` | The `devyreSessions` field (`devyreSessionState`) on `Service`. |
 | `sdk/cliproxy/service_config.go` | `expiring-first` aliases in `normalizedRoutingRuntimeState`, construction in `newRoutingSelector`, and the gate, headroom and log settings in `routingRuntimeState`. That struct must stay comparable: no pointers, maps or slices. `applyManagerConfig` builds a changed selector through `devyreRoutingSelector`, which carries the session bindings over, and then calls `devyreApplySessionPersistence`. |
-| `sdk/cliproxy/service_lifecycle.go` | `Run` calls `devyreStartSessionPersistence` right before the server starts, and `devyreStartCodexAccountModels`, `devyreStartClaudeAccountModels` and `devyreStartAntigravityAccountModels` right after `registerModelRefreshCallback`; `Shutdown` calls `devyreStopAntigravityAccountModels` right after `StopAutoRefresh`, and `devyreStopSessionPersistence` right after the server stopped. |
+| `sdk/cliproxy/service_lifecycle.go` | `Run` calls `devyreStartSessionPersistence` right before the server starts, and `devyreStartCodexAccountModels`, `devyreStartClaudeAccountModels` and `devyreStartAntigravityAccountModels` right after `registerModelRefreshCallback`; `Shutdown` calls `devyreStopAntigravityAccountModels` right after `StopAutoRefresh`, and `devyreStopSessionPersistence` and `devyreSettleCredentials` right after the server stopped. |
 | `sdk/cliproxy/service_models.go` | The Codex OAuth branch of `registerModelsForAuthWithCache` passes the plan's catalog models through `devyreWithAccountCodexModels` before the exclusions, and the Claude branch, unless a configured key names its own models (`configuredModels`), through `devyreWithAccountClaudeModels`. The Antigravity branch passes the catalog's models, after the exclusions, through `devyreWithAccountAntigravityModels` with the exclusions. |
 
 If upstream deletes the `/v0/management` routes, `TestT3Hub_*` fails first. Restore the three routes T3 uses (`GET auth-files`, `POST api-call`, `POST reset-quota`) in `internal/api/devyre_v0_shim.go`.
@@ -446,6 +449,18 @@ the only ones left. So:
   that still holds the spent refresh token takes the new tokens. Upstream dropped them as a stale
   registration and kept the dead token, in memory and on disk. One whose tokens were replaced
   meanwhile (a new sign-in) keeps its own: the refresh's are dropped, and the log says so.
+- A save that fails is tried again, after 1 s doubling to a minute, until one lands, which the log
+  says; the service tries every one still unsaved once more as it stops. Before, a failed save
+  was one warning, and the file kept the spent refresh token until its next write, four hours later
+  at best: a restart meanwhile (several a day on the Preview channel) loaded the dead token.
+- The save watermark, which keeps an older state from overwriting a newer one, is the last write
+  that landed. Upstream moved it for every save asked for, the watcher's skipped ones included, so
+  a refresh's save that came after a watcher update was dropped without a word. A skipped save now
+  only says which refresh token the newest state holds: an older save that would put back another
+  one (a refresh finishing beside a new sign-in) is still dropped.
+- The watcher reading back a file that holds a refresh token this router has spent (its save had
+  not landed yet) no longer puts the dead token back in memory: the credential keeps its newer
+  tokens and writes them again.
 
 ## Routing and quota readings
 
@@ -1006,6 +1021,7 @@ go test ./internal/authseal/
 go test ./internal/auth/tokenrefresh/ ./internal/auth/claude/ ./internal/auth/codex/ -run "Refresh|Answers|Request|Transport|Unreadable|429|RetryAfter|Answer|OneRefresh|Longer|Devyre"
 go test ./sdk/cliproxy/auth/ ./internal/api/handlers/management/ -run "DevyreA|DevyreTheV8|DevyreClaudes|DevyreEvery|DevyreANew|InvalidGrant|DevyreTheRotated"
 go test ./internal/runtime/executor/ -run DevyreClaudeLooks
+go test ./sdk/cliproxy/auth/ -run "DevyreAFailed|DevyreAShutdown|DevyreTheSave|DevyreAFile|DevyreARefresh"
 go test ./internal/watcher/ -run Devyre
 go test ./sdk/auth/ -run Devyre
 go test ./internal/managementasset/ -run DevyrePanel

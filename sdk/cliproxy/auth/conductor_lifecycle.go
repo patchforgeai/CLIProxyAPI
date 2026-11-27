@@ -225,6 +225,9 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	} else if auth.RegistrationEpoch == 0 {
 		auth.RegistrationEpoch = m.authEpochs[auth.ID]
 	}
+	if mode == updateModeReplace && shouldSkipPersist(ctx) && m.keepUnspentTokens(existing, auth) {
+		ctx = withPersist(ctx) // devyre: the file is older than the credential: write it again
+	}
 	if !auth.indexAssigned && auth.Index == "" {
 		auth.Index = existing.Index
 		auth.indexAssigned = existing.indexAssigned
@@ -453,6 +456,11 @@ type authPersistLock struct {
 	mu             sync.Mutex
 	lastEpoch      uint64
 	lastGeneration uint64
+	// devyre: lastEpoch and lastGeneration are the last write that landed (wrote: one did);
+	// known is the newest state heard of, the watcher's skipped saves included, and the refresh
+	// token it held (devyre_save_retry.go).
+	wrote bool
+	known persistedState
 }
 
 func (m *Manager) persist(ctx context.Context, auth *Auth) error {
@@ -483,15 +491,15 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if pLock != nil {
 		pLock.mu.Lock()
 		defer pLock.mu.Unlock()
-		if auth.RegistrationEpoch < pLock.lastEpoch || (auth.RegistrationEpoch == pLock.lastEpoch && auth.Generation < pLock.lastGeneration) {
-			return nil
-		}
-		pLock.lastEpoch = auth.RegistrationEpoch
-		pLock.lastGeneration = auth.Generation
-		if shouldSkipPersist(ctx) {
+		// devyre: only a write that landed moves the watermark (devyre_save_retry.go).
+		if !pLock.admits(auth, shouldSkipPersist(ctx)) {
 			return nil
 		}
 		_, err := m.store.Save(ctx, auth)
+		if err == nil {
+			pLock.landed(auth)
+		}
+		m.devyreNoteSave(auth, err)
 		return err
 	}
 
@@ -499,5 +507,6 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 		return nil
 	}
 	_, err := m.store.Save(ctx, auth)
+	m.devyreNoteSave(auth, err)
 	return err
 }
