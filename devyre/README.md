@@ -209,7 +209,9 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/runtime/executor/devyre_claude_after_refresh_test.go` | Claude's profile looked up after the refresh with the new token, only a change coming back, a failed lookup erasing nothing |
 | `sdk/cliproxy/auth/devyre_save_retry.go` | A failed save tried again until one lands (`devyreNoteSave`), and once more at shutdown (`FlushPendingSaves`); the save watermark as the last write that landed (`admits`, `landed`); the refresh tokens spent here, and a file holding one kept from putting it back (`keepUnspentTokens`) |
 | `sdk/cliproxy/auth/devyre_save_retry_test.go` | A refresh's failed save tried until it lands, logged when it does; a shutdown's last try; the watermark against the watcher's skipped saves and a new sign-in; a file with a spent token |
-| `sdk/cliproxy/devyre_settle.go` | `devyreSettleCredentials`: the unsaved credentials flushed as the service stops |
+| `sdk/cliproxy/devyre_settle.go` | `devyreSettleCredentials`: as the service stops, the refreshes in flight waited for and the unsaved credentials flushed |
+| `sdk/cliproxy/auth/devyre_drain.go` | The refreshes in flight, by credential, and a shutdown's bounded wait for them (`DrainRefreshes`, `RefreshDrainWait`) |
+| `sdk/cliproxy/auth/devyre_drain_test.go` | A shutdown waits for a loop refresh on the wire and saves its answer; the wait is bounded and names what it leaves |
 | `sdk/cliproxy/auth/devyre_wake.go` | After a wake (a pass of the refresh loop far later than its timer allows, by either clock), due refreshes wait 20 s for the network |
 | `sdk/cliproxy/auth/devyre_focus.go` | `devyreFocusTakesOver`: whether session affinity gives a bound session up to a usable focus |
 | `sdk/cliproxy/auth/devyre_focus_test.go` | The focus in the selector (urgency, 5h, 7d and model-scoped gates, tiers, other providers, ends, rotation, the `focus` log reason) and under session affinity (explicit sessions, the fallback key, LCP, the log line, through the manager) |
@@ -271,7 +273,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/auth/claude/token.go`, `internal/auth/codex/token.go`, `internal/auth/kimi/token.go`, `internal/auth/xai/token.go`, `internal/auth/vertex/vertex_credentials.go` | `SaveTokenToFile` writes through `authseal.WriteJSON` (the bytes its encoder wrote, sealed with a key, replaced atomically) in place of `os.Create` and the encoder. Claude's and Codex's storages carry `RefreshTokenExpiresAt` (`refresh_token_expires_at`). |
 | `internal/auth/claude/anthropic.go`, `internal/auth/codex/openai.go` | `ClaudeTokenData` and `CodexTokenData` carry `RefreshTokenExpiresAt`, which the code exchange sets from the answer's `refresh_token_expires_in`, `CreateTokenStorage` copies and `UpdateTokenStorage` keeps the earlier of (`tokenrefresh.EndAfterRefresh`). |
 | `sdk/cliproxy/auth/metadata_merge.go` | `IsAuthTokenPayloadKey` takes `refresh_token_expires_at` and `sign_in_ended`: a new sign-in never takes the old one's end, and a refresh's always applies. `MergeRefreshedAuth` takes the refresh's sign-in state. |
-| `sdk/cliproxy/auth/conductor_refresh.go` | `shouldRefresh`, `markRefreshPending`, `tryRefreshAfterUnauthorized` and `refreshAuthForRequestAtEpoch` (unless forced) leave an ended sign-in alone (`hasEndedSignIn`). A failed refresh goes to `applyRefreshFailure` in place of upstream's branch (and its invalid-grant backoff, `invalidGrantBackoffDuration`, which is gone); one that worked clears the sign-in state, is saved without its caller's cancellation, logs the change and then runs `followRefresh`; one whose tokens were replaced meanwhile is dropped. |
+| `sdk/cliproxy/auth/conductor_refresh.go` | `refreshAuthForRequestAtEpoch` counts itself in flight (`devyre.refreshes`) for a shutdown to wait for. `shouldRefresh`, `markRefreshPending`, `tryRefreshAfterUnauthorized` and `refreshAuthForRequestAtEpoch` (unless forced) leave an ended sign-in alone (`hasEndedSignIn`). A failed refresh goes to `applyRefreshFailure` in place of upstream's branch (and its invalid-grant backoff, `invalidGrantBackoffDuration`, which is gone); one that worked clears the sign-in state, is saved without its caller's cancellation, logs the change and then runs `followRefresh`; one whose tokens were replaced meanwhile is dropped. |
 | `sdk/cliproxy/auth/auto_refresh_loop.go` | `nextRefreshCheckAt` never schedules an ended sign-in. The loop notes each pass (`notePass`), and `handleDue` lets `waitForNetwork` hold due refreshes after a wake; `resetTimer` records whether the timer is armed. |
 | `sdk/cliproxy/auth/conductor_lifecycle.go` | `updateInternal`, replacing a credential with the same tokens, keeps what their refreshes said (`devyreKeepSignInState`); a refresh's update goes through `rebaseRefreshedAuth` before the registration check; a watcher's replacement holding a spent refresh token keeps the newer ones and is written (`keepUnspentTokens`). `persist` asks `admits` and records `landed` in place of upstream's watermark, which moved for every save asked for, and reports each save to `devyreNoteSave`; `authPersistLock` carries `wrote` and `known`. |
 | `sdk/cliproxy/auth/types.go` | `Auth` carries `devyreSignIn`, a passing refresh failure in memory. |
@@ -449,6 +451,11 @@ the only ones left. So:
   that still holds the spent refresh token takes the new tokens. Upstream dropped them as a stale
   registration and kept the dead token, in memory and on disk. One whose tokens were replaced
   meanwhile (a new sign-in) keeps its own: the refresh's are dropped, and the log says so.
+- A shutdown waits for the refreshes in flight, up to 5 s (`RefreshDrainWait`; Anvil's
+  supervisor gives the router 8 s to stop), then flushes the unsaved credentials. Before, it
+  cancelled the refresh loop and returned in microseconds with a refresh on the wire, and the
+  process exited before its answer was saved. One still in flight after the wait is named in the
+  log as abandoned.
 - A save that fails is tried again, after 1 s doubling to a minute, until one lands, which the log
   says; the service tries every one still unsaved once more as it stops. Before, a failed save
   was one warning, and the file kept the spent refresh token until its next write, four hours later

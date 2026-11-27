@@ -578,6 +578,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		return nil, errors.New("auth id is empty")
 	}
 
+	m.devyre.refreshes.begin(id) // devyre: a shutdown waits for it (devyre_drain.go)
+	defer m.devyre.refreshes.end(id)
+
 	lockValue, _ := m.refreshLocks.LoadOrStore(id, &authRefreshLock{})
 	lock, _ := lockValue.(*authRefreshLock)
 	if lock == nil {

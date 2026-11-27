@@ -54,6 +54,8 @@ type devyreManagerState struct {
 	saves devyreSaveRetries
 	// spent are the refresh tokens this router spent, by credential (devyre_save_retry.go).
 	spent sync.Map
+	// refreshes are the refreshes in flight, which a shutdown waits for (devyre_drain.go).
+	refreshes devyreRefreshDrain
 }
 
 // devyreMarkBound tells the conductor that the request's session was already
