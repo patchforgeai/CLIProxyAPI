@@ -166,26 +166,47 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 	if err != nil {
 		return nil, err
 	}
-	if profile, errProfile := svc.FetchOAuthProfile(ctx, td.AccessToken); errProfile != nil {
-		log.Warnf("fetch Claude OAuth profile after refreshing %s: %v", auth.ID, errProfile)
-	} else {
-		td.Email = profile.Account.Email
-		td.AccountUUID = profile.Account.UUID
-		td.OrganizationUUID = profile.Organization.UUID
-		td.OrganizationName = profile.Organization.Name
-	}
 	claudeauth.EnsureMetadataMap(&auth.Metadata)
 	claudeauth.StoreMetadataValue(&auth.Metadata, "access_token", td.AccessToken)
 	claudeauth.StoreMetadataString(&auth.Metadata, "refresh_token", td.RefreshToken)
-	// Profile fields are optional when token rotation succeeds but the follow-up
-	// profile lookup fails. Never erase the previously resolved credential identity.
-	claudeauth.StoreMetadataString(&auth.Metadata, "email", td.Email)
-	claudeauth.StoreMetadataString(&auth.Metadata, "account_uuid", td.AccountUUID)
-	claudeauth.StoreMetadataString(&auth.Metadata, "organization_uuid", td.OrganizationUUID)
-	claudeauth.StoreMetadataString(&auth.Metadata, "organization_name", td.OrganizationName)
 	claudeauth.StoreMetadataValue(&auth.Metadata, "expired", td.Expire)
 	cliproxyauth.NoteSignInEnd(auth, td.RefreshTokenExpiresAt)
 	claudeauth.StoreMetadataValue(&auth.Metadata, "type", "claude")
 	claudeauth.StoreMetadataValue(&auth.Metadata, "last_refresh", time.Now().Format(time.RFC3339))
+	return auth, nil
+}
+
+// AfterRefresh looks the account's profile up once the rotated tokens are saved, as Claude Code
+// does after a refresh (cliproxyauth.RefreshFollower), and returns the credential with what
+// changed of its identity; nil when nothing did. devyre: it ran inside the refresh before, so a
+// slow or failed lookup held the new, single-use tokens off disk for another round trip. A
+// failed lookup never erases the identity the credential has.
+func (e *ClaudeExecutor) AfterRefresh(ctx context.Context, auth *cliproxyauth.Auth) (*cliproxyauth.Auth, error) {
+	if auth == nil || (e.cfg != nil && e.cfg.Home.Enabled) {
+		return nil, nil
+	}
+	accessToken := claudeauth.ReadMetadataString(&auth.Metadata, "access_token")
+	if accessToken == "" || isClaudeSetupToken(auth, accessToken) {
+		return nil, nil
+	}
+	profile, errProfile := e.fetchClaudeOAuthProfile(ctx, auth, accessToken)
+	if errProfile != nil {
+		return nil, fmt.Errorf("fetch Claude OAuth profile after refreshing %s: %w", auth.ID, errProfile)
+	}
+	changed := false
+	for key, value := range map[string]string{
+		"email":             profile.Account.Email,
+		"account_uuid":      profile.Account.UUID,
+		"organization_uuid": profile.Organization.UUID,
+		"organization_name": profile.Organization.Name,
+	} {
+		if value = strings.TrimSpace(value); value != "" && claudeauth.ReadMetadataString(&auth.Metadata, key) != value {
+			claudeauth.StoreMetadataString(&auth.Metadata, key, value)
+			changed = true
+		}
+	}
+	if !changed {
+		return nil, nil
+	}
 	return auth, nil
 }

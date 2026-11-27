@@ -693,8 +693,18 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
 	}
-	saved, errUpdate := m.UpdateRefreshedAuth(ctx, base, updated)
+	// devyre: the rotated tokens are saved whatever became of the caller (a request that went
+	// away, the loop stopping at shutdown): the refresh token they replace is spent.
+	saveCtx := context.WithoutCancel(ctx)
+	saved, errUpdate := m.UpdateRefreshedAuth(saveCtx, base, updated)
 	if errUpdate != nil {
+		if errors.Is(errUpdate, errRefreshSuperseded) {
+			log.WithFields(log.Fields{"credential": auth.ID, "provider": auth.Provider, "step": "save"}).
+				Infof("the tokens refreshed for %s are dropped: its tokens were replaced while it refreshed (a new sign-in)", auth.ID)
+			if current, ok := m.GetByID(id); ok {
+				return current, nil
+			}
+		}
 		// Warn, not debug: a restart after a lost persist fails with invalid_grant.
 		log.WithFields(log.Fields{"auth_id": auth.ID, "credential": auth.ID, "provider": auth.Provider}).Warnf("persist refreshed auth %s (%s) failed: %v", auth.Provider, auth.ID, errUpdate)
 		return nil, errUpdate
@@ -703,6 +713,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		return nil, fmt.Errorf("auth %s not found", id)
 	}
 	logSignInChange(saved, "refresh", signInBefore, SignInStatusOf(saved))
+	saved = m.followRefresh(ctx, exec, saved)
 	targetAuth := saved
 	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)
 	projections := make([]registry.ClientModelProjection, 0, len(supportedModels))

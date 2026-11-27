@@ -43,6 +43,13 @@ type RequestAuthPreparer interface {
 	PrepareRequestAuth(ctx context.Context, auth *Auth) (*Auth, error)
 }
 
+// RefreshFollower is implemented by an executor with work to do once a refresh's rotated tokens
+// are saved: a lookup that must not hold them off disk (devyre: Claude's profile). The auth
+// returned, if any, is merged as a prepared update; nil means nothing changed.
+type RefreshFollower interface {
+	AfterRefresh(ctx context.Context, auth *Auth) (*Auth, error)
+}
+
 // ExecutionSessionCloser allows executors to release per-session runtime resources.
 type ExecutionSessionCloser interface {
 	CloseExecutionSession(sessionID string)

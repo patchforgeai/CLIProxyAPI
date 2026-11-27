@@ -204,6 +204,9 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/devyre_sign_in_test.go` | A refresh keeps the earlier end, learns one it had none of, never guesses; a new sign-in takes nothing of the old one's end |
 | `sdk/cliproxy/auth/devyre_refresh_outcome.go` | What a failed refresh does (`applyRefreshFailure`): a sign-in the provider ended, never refreshed again and written to the token file, or one retrying by why it failed (`passingRefreshBackoff`); each change logged at info (`logSignInChange`) |
 | `sdk/cliproxy/auth/devyre_refresh_outcome_test.go` | Claude's time limit ends the sign-in at once and for a restart too; an ended sign-in serves while its access token runs, and a request's 401 sends nothing; passing failures retried in 10, 20, 40 s, 5 min or a 429's wait, retrying since the first, fine again after a refresh that works; the same tokens read again keep it, a new sign-in is a new chance; every change logged; a wake holds due refreshes |
+| `sdk/cliproxy/auth/devyre_refresh_save.go` | Where a refresh's tokens go (`rebaseRefreshedAuth`: to a credential registered again that still holds the spent token, never over a new sign-in's), and the work after the save (`followRefresh`) |
+| `sdk/cliproxy/auth/devyre_refresh_save_test.go` | The rotated tokens on disk before the profile lookup; saved when the caller went away; carried onto a credential registered again; never over a new sign-in |
+| `internal/runtime/executor/devyre_claude_after_refresh_test.go` | Claude's profile looked up after the refresh with the new token, only a change coming back, a failed lookup erasing nothing |
 | `sdk/cliproxy/auth/devyre_wake.go` | After a wake (a pass of the refresh loop far later than its timer allows, by either clock), due refreshes wait 20 s for the network |
 | `sdk/cliproxy/auth/devyre_focus.go` | `devyreFocusTakesOver`: whether session affinity gives a bound session up to a usable focus |
 | `sdk/cliproxy/auth/devyre_focus_test.go` | The focus in the selector (urgency, 5h, 7d and model-scoped gates, tiers, other providers, ends, rotation, the `focus` log reason) and under session affinity (explicit sessions, the fallback key, LCP, the log line, through the manager) |
@@ -261,13 +264,13 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/auth/claude/anthropic_auth.go` | `GenerateAuthURL` and `ExchangeCodeForTokens` became wrappers passing `RedirectURI` to unexported `generateAuthURL` and `exchangeCodeForTokens`, which take the redirect as a parameter. `RefreshTokens` takes the credential's name and sends its request through `tokenrefresh.Refresh`, without the profile lookup; the refresh's own block, single flight and retry loop (`RefreshTokensWithRetry`) are gone. |
 | `internal/auth/codex/openai_auth.go` | `GenerateAuthURL` became a wrapper passing `RedirectURI` to an unexported `generateAuthURL`. `RefreshTokens` takes the credential's name and sends its request through `tokenrefresh.Refresh`; its single flight and retry loop (`RefreshTokensWithRetry`, `isNonRetryableRefreshErr`) are gone. |
 | `internal/auth/claude/anthropic_auth_test.go`, `internal/auth/codex/openai_auth_test.go` | The refresh tests call `RefreshTokens` with a credential name and reset `tokenrefresh`; a Claude refresh no longer looks the profile up; ChatGPT's no longer replays a lost answer, honours Retry-After and names the end of a sign-in. |
-| `internal/runtime/executor/claude_executor_auth.go`, `codex_executor_auth.go`, `cmd/fetch_codex_models/main.go` | Call `RefreshTokens` with the credential's name; Claude's executor looks the profile up after it. The executors keep the answer's end of the sign-in (`NoteSignInEnd`). |
+| `internal/runtime/executor/claude_executor_auth.go`, `codex_executor_auth.go`, `cmd/fetch_codex_models/main.go` | Call `RefreshTokens` with the credential's name. The executors keep the answer's end of the sign-in (`NoteSignInEnd`). Claude's looks the profile up in `AfterRefresh` (`RefreshFollower`), once the rotated tokens are saved. |
 | `internal/auth/claude/token.go`, `internal/auth/codex/token.go`, `internal/auth/kimi/token.go`, `internal/auth/xai/token.go`, `internal/auth/vertex/vertex_credentials.go` | `SaveTokenToFile` writes through `authseal.WriteJSON` (the bytes its encoder wrote, sealed with a key, replaced atomically) in place of `os.Create` and the encoder. Claude's and Codex's storages carry `RefreshTokenExpiresAt` (`refresh_token_expires_at`). |
 | `internal/auth/claude/anthropic.go`, `internal/auth/codex/openai.go` | `ClaudeTokenData` and `CodexTokenData` carry `RefreshTokenExpiresAt`, which the code exchange sets from the answer's `refresh_token_expires_in`, `CreateTokenStorage` copies and `UpdateTokenStorage` keeps the earlier of (`tokenrefresh.EndAfterRefresh`). |
 | `sdk/cliproxy/auth/metadata_merge.go` | `IsAuthTokenPayloadKey` takes `refresh_token_expires_at` and `sign_in_ended`: a new sign-in never takes the old one's end, and a refresh's always applies. `MergeRefreshedAuth` takes the refresh's sign-in state. |
-| `sdk/cliproxy/auth/conductor_refresh.go` | `shouldRefresh`, `markRefreshPending`, `tryRefreshAfterUnauthorized` and `refreshAuthForRequestAtEpoch` (unless forced) leave an ended sign-in alone (`hasEndedSignIn`). A failed refresh goes to `applyRefreshFailure` in place of upstream's branch (and its invalid-grant backoff, `invalidGrantBackoffDuration`, which is gone); one that worked clears the sign-in state and logs the change. |
+| `sdk/cliproxy/auth/conductor_refresh.go` | `shouldRefresh`, `markRefreshPending`, `tryRefreshAfterUnauthorized` and `refreshAuthForRequestAtEpoch` (unless forced) leave an ended sign-in alone (`hasEndedSignIn`). A failed refresh goes to `applyRefreshFailure` in place of upstream's branch (and its invalid-grant backoff, `invalidGrantBackoffDuration`, which is gone); one that worked clears the sign-in state, is saved without its caller's cancellation, logs the change and then runs `followRefresh`; one whose tokens were replaced meanwhile is dropped. |
 | `sdk/cliproxy/auth/auto_refresh_loop.go` | `nextRefreshCheckAt` never schedules an ended sign-in. The loop notes each pass (`notePass`), and `handleDue` lets `waitForNetwork` hold due refreshes after a wake; `resetTimer` records whether the timer is armed. |
-| `sdk/cliproxy/auth/conductor_lifecycle.go` | `updateInternal`, replacing a credential with the same tokens, keeps what their refreshes said (`devyreKeepSignInState`). |
+| `sdk/cliproxy/auth/conductor_lifecycle.go` | `updateInternal`, replacing a credential with the same tokens, keeps what their refreshes said (`devyreKeepSignInState`); a refresh's update goes through `rebaseRefreshedAuth` before the registration check. |
 | `sdk/cliproxy/auth/types.go` | `Auth` carries `devyreSignIn`, a passing refresh failure in memory. |
 | `sdk/cliproxy/auth/conductor_refresh_disabled_test.go`, `conductor_scheduler_refresh_test.go` | An invalid grant, or a 401 at the token endpoint, ends the sign-in instead of being retried with a backoff. |
 | `internal/auth/meta/meta.go` | `SaveTokenToFile` reads the old file through `authseal.ReadFile` and writes through `authseal.WriteFile` in place of its own temporary file and rename. |
@@ -314,7 +317,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `sdk/api/handlers/openai/openai_responses_websocket_forward.go` | `forwardResponsesWebsocket` ends a response on `response.incomplete` as on `response.completed`, so an interrupted response no longer closes the client socket. `shouldExposeResponsesUpstreamError` exposes the router's own unroutable model answer (`handlers.IsUnroutableModel`). |
 | `sdk/auth/filestore.go` | `Save` reads and writes a metadata-only auth through `authseal` (a sealed file it cannot open is replaced like a missing one), and `readAuthFiles` reads through `authseal.ReadFile`. |
 | `sdk/auth/manager.go` | `Login` reads the existing file through `authseal.ReadFile`. |
-| `sdk/cliproxy/auth/conductor.go` | The `devyre` field (`devyreManagerState`) on `Manager`. |
+| `sdk/cliproxy/auth/conductor.go` | The `devyre` field (`devyreManagerState`) on `Manager`. `RefreshFollower`: an executor's work once a refresh's tokens are saved. |
 | `sdk/cliproxy/auth/conductor_cooldown.go` | `MarkResult` hands each result to `devyreSoftTransient` right after the result policy; when that keeps a transient failure soft, it has recorded the failure and `MarkResult` returns. After it has applied a result, one line hands the credential as it left it to `devyreLogQuotaHold` (`devyre_quota_log.go`). |
 | `sdk/cliproxy/auth/conductor_execution.go` | `executeMixedOnce` and `executeCountMixedOnce` hand a failed attempt to `devyreRetryTransient` right after the 401 refresh, and return when the request ended during its wait. Where they and `executeStreamMixedOnce` end a request with its last error once no credential is left to try, outside Home's rounds, `devyreLimitOverSignIn` may end it as the limit instead (`devyre_limit_refusal.go`). |
 | `sdk/cliproxy/auth/conductor_selection.go` | `availableAuthsForRouteModelWithPriorityMode` refuses with the model cooldown when `devyreLimitOf` says the candidates are held for a limit beside ones out until someone acts, in place of upstream's "every candidate cools down", which also drops its count of cooling candidates (`devyre_limit_refusal.go`). |
@@ -428,6 +431,21 @@ in 10 s), and at worst leave on a half-up link whose answer is lost, which may s
 
 The v8 listing's `sign_in` says all of it: `state` (`retrying` or `ended`, absent while fine),
 `reason`, `answer`, `since`, `next_try_at`, `access_expires_at` and `ends_at`.
+
+### No refresh is lost
+
+Once a refresh has been answered, the refresh token it sent is spent and the answer's tokens are
+the only ones left. So:
+
+- The rotated tokens are saved before anything else. Claude's profile lookup, which ran inside the
+  refresh and held them off disk for another round trip, runs after the save (`AfterRefresh`), and
+  what it changes is merged then.
+- The save outlives the refresh's caller: a request that went away, or the refresh loop stopping
+  at shutdown, no longer leaves the answer unsaved.
+- A credential registered again while it refreshed (the watcher's remove and add of its file)
+  that still holds the spent refresh token takes the new tokens. Upstream dropped them as a stale
+  registration and kept the dead token, in memory and on disk. One whose tokens were replaced
+  meanwhile (a new sign-in) keeps its own: the refresh's are dropped, and the log says so.
 
 ## Routing and quota readings
 
@@ -986,7 +1004,8 @@ go test ./internal/cmd/ -run 'Lifeline|PasswordLine|ReportListen|TakenPort|KeyLi
 go test ./cmd/server/ -run 'LifelineStdin|PasswordStdin|AuthFilesKeyStdin|DevyreSealAuthDir'
 go test ./internal/authseal/
 go test ./internal/auth/tokenrefresh/ ./internal/auth/claude/ ./internal/auth/codex/ -run "Refresh|Answers|Request|Transport|Unreadable|429|RetryAfter|Answer|OneRefresh|Longer|Devyre"
-go test ./sdk/cliproxy/auth/ ./internal/api/handlers/management/ -run "DevyreA|DevyreTheV8|DevyreClaudes|DevyreEvery|DevyreANew|InvalidGrant"
+go test ./sdk/cliproxy/auth/ ./internal/api/handlers/management/ -run "DevyreA|DevyreTheV8|DevyreClaudes|DevyreEvery|DevyreANew|InvalidGrant|DevyreTheRotated"
+go test ./internal/runtime/executor/ -run DevyreClaudeLooks
 go test ./internal/watcher/ -run Devyre
 go test ./sdk/auth/ -run Devyre
 go test ./internal/managementasset/ -run DevyrePanel

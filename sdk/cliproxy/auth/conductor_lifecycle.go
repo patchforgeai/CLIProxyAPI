@@ -187,6 +187,18 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 	if existing.RegistrationEpoch > m.authEpochs[auth.ID] {
 		m.authEpochs[auth.ID] = existing.RegistrationEpoch
 	}
+	if mode == updateModeRefresh && base != nil {
+		// devyre: a refresh's tokens go to the credential only while it holds the refresh token
+		// the refresh spent (devyre_refresh_save.go).
+		rebased, errRebase := rebaseRefreshedAuth(base, existing, auth)
+		if errRebase != nil {
+			m.mu.Unlock()
+			return nil, errRebase
+		}
+		if rebased != nil {
+			base, auth = existing.Clone(), rebased
+		}
+	}
 	if (mode == updateModeRefresh || mode == updateModePrepare) && base != nil && existing.RegistrationEpoch != base.RegistrationEpoch {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("update auth %s: stale registration epoch %d != %d", auth.ID, base.RegistrationEpoch, existing.RegistrationEpoch)
