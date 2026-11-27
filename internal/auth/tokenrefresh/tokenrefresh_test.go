@@ -179,6 +179,9 @@ func TestATransportWithoutATraceIsJudgedByItsError(t *testing.T) {
 	if failure.Kind != KindUnreachable {
 		t.Fatalf("a DNS error: kind %s, want unreachable", failure.Kind)
 	}
+	if answer := failure.Answer(); !strings.Contains(answer, "no such host") {
+		t.Fatalf("answer %q, want why no answer came", answer)
+	}
 	_, failure, calls := refreshOnce(t, "codex", func(context.Context) (*http.Response, error) {
 		return nil, errors.New("connection reset by peer")
 	})

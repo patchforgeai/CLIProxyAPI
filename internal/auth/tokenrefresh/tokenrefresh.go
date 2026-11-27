@@ -130,12 +130,17 @@ func (f *Failure) Error() string {
 }
 
 // Answer is the provider's answer in a few words: its OAuth error and description, else the
-// start of its body. Never a token: a failed answer carries none.
+// start of its body; for a request that got none, why (the transport's error). Never a token: a
+// failed answer carries none, and a transport error names the endpoint, not the request's body.
 func (f *Failure) Answer() string {
 	if f == nil {
 		return ""
 	}
 	switch {
+	case f.Held:
+		return fmt.Sprintf("held for %s after a 429", f.Wait.Round(time.Second))
+	case f.Status == 0 && f.Err != nil:
+		return excerpt([]byte(f.Err.Error()))
 	case f.Code != "" && f.Description != "":
 		return f.Code + ": " + f.Description
 	case f.Code != "":
