@@ -162,9 +162,17 @@ func (e *ClaudeExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (
 		return auth, nil
 	}
 	svc := claudeauth.NewClaudeAuthWithProxyURL(e.cfg, auth.ProxyURL)
-	td, err := svc.RefreshTokensWithRetry(ctx, refreshToken, 3)
+	td, err := svc.RefreshTokens(ctx, auth.ID, refreshToken)
 	if err != nil {
 		return nil, err
+	}
+	if profile, errProfile := svc.FetchOAuthProfile(ctx, td.AccessToken); errProfile != nil {
+		log.Warnf("fetch Claude OAuth profile after refreshing %s: %v", auth.ID, errProfile)
+	} else {
+		td.Email = profile.Account.Email
+		td.AccountUUID = profile.Account.UUID
+		td.OrganizationUUID = profile.Organization.UUID
+		td.OrganizationName = profile.Organization.Name
 	}
 	claudeauth.EnsureMetadataMap(&auth.Metadata)
 	claudeauth.StoreMetadataValue(&auth.Metadata, "access_token", td.AccessToken)

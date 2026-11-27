@@ -123,6 +123,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/thinking/devyre_requested_level_test.go` | Gemini, the Antigravity envelope, OpenAI, Responses and Claude bodies, suffixes, budgets, `auto` and `none`; the rewrite keeps capitals, removes, leaves a body naming no level and never changes the request's own |
 | `internal/authseal/authseal.go` | The auth files' key (`SetKey`), the sealed format (`Seal`, `Open`, the name as associated data), and the reads and writes every auth file goes through (`ReadFile`, `WriteFile`, `WriteJSON`) |
 | `internal/authseal/replace.go`, `replace_windows.go`, `replace_darwin.go`, `replace_other.go` | The atomic replace: a temporary file beside the auth file, its creation time kept (Windows, macOS), the rename tried again while another handle holds the file (Windows) |
+| `internal/auth/tokenrefresh/tokenrefresh.go` | The one refresh policy of Claude's and ChatGPT's accounts (`Refresh`): one request at a time a token, at most two a provider, a 429 holding the provider's next refreshes until its Retry-After, a replay only after a 5xx, and a `Failure` whose `Kind` says what it means for the sign-in (see [A sign-in's life](#a-sign-ins-life)) |
+| `internal/auth/tokenrefresh/tokenrefresh_test.go` | Each answer Claude Code 2.1.332 and Codex 0.162.1 name, and what it means; a request that never left told from one whose answer was lost, through a real listener; an unreadable 200 never replayed; a 429's hold on its provider alone; Retry-After's forms and bounds; the end of a sign-in an answer gives; one request a token and two a provider; a refresh that outlives its caller |
 | `internal/authseal/migrate.go` | `SealDir`: the plaintext auth files sealed at start, the rest left as they are |
 | `internal/authseal/authseal_test.go`, `migrate_test.go`, `replace_windows_test.go`, `replace_darwin_test.go`, `replace_other_test.go` | Round trips and every refusal (another key, another name, a changed byte, malformed, no key); plaintext read with and without a key; the mode, no temporary file left, the creation time kept, the rename while a reader holds the file, writes through a link, the encoder's bytes; the migration: what it seals and what it leaves, run twice, creation times, without a key |
 | `internal/cmd/devyre_auth_seal.go` | `ReadStdinAuthFilesKey`: the key line on the shared stdin reader |
@@ -249,8 +251,10 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/api/handlers/management/auth_files_crud.go` | `DownloadAuthFile` and `buildAuthFromFileData` read through `authseal.ReadFile`, `writeAuthFile` writes through `authseal.WriteFile`. |
 | `internal/api/handlers/management/auth_files_fields.go` | `setSourceAuthFileDisabled` reads and writes through `authseal`, `mergeExistingAuthFileMetadata` and `saveTokenRecord` read through `authseal.ReadFile`. |
 | `internal/api/handlers/management/auth_files_provider_oauth.go` | `RequestAnthropicToken`, `RequestCodexToken` and `RequestAntigravityToken` read `redirect_port` first (`devyreOAuthRedirect`; Antigravity's redirect is `antigravity.LoopbackRedirectURI`, in `internal/auth/antigravity/devyre_redirect.go`), and build the authorize URL and exchange the code through `devyreClaudeAuthURL`/`devyreClaudeExchange` and `devyreCodexAuthURL`/`devyreCodexExchange`, which fall back to upstream's calls without it. |
-| `internal/auth/claude/anthropic_auth.go` | `GenerateAuthURL` and `ExchangeCodeForTokens` became wrappers passing `RedirectURI` to unexported `generateAuthURL` and `exchangeCodeForTokens`, which take the redirect as a parameter. |
-| `internal/auth/codex/openai_auth.go` | `GenerateAuthURL` became a wrapper passing `RedirectURI` to an unexported `generateAuthURL`. |
+| `internal/auth/claude/anthropic_auth.go` | `GenerateAuthURL` and `ExchangeCodeForTokens` became wrappers passing `RedirectURI` to unexported `generateAuthURL` and `exchangeCodeForTokens`, which take the redirect as a parameter. `RefreshTokens` takes the credential's name and sends its request through `tokenrefresh.Refresh`, without the profile lookup; the refresh's own block, single flight and retry loop (`RefreshTokensWithRetry`) are gone. |
+| `internal/auth/codex/openai_auth.go` | `GenerateAuthURL` became a wrapper passing `RedirectURI` to an unexported `generateAuthURL`. `RefreshTokens` takes the credential's name and sends its request through `tokenrefresh.Refresh`; its single flight and retry loop (`RefreshTokensWithRetry`, `isNonRetryableRefreshErr`) are gone. |
+| `internal/auth/claude/anthropic_auth_test.go`, `internal/auth/codex/openai_auth_test.go` | The refresh tests call `RefreshTokens` with a credential name and reset `tokenrefresh`; a Claude refresh no longer looks the profile up; ChatGPT's no longer replays a lost answer, honours Retry-After and names the end of a sign-in. |
+| `internal/runtime/executor/claude_executor_auth.go`, `codex_executor_auth.go`, `cmd/fetch_codex_models/main.go` | Call `RefreshTokens` with the credential's name; Claude's executor looks the profile up after it. |
 | `internal/auth/claude/token.go`, `internal/auth/codex/token.go`, `internal/auth/kimi/token.go`, `internal/auth/xai/token.go`, `internal/auth/vertex/vertex_credentials.go` | `SaveTokenToFile` writes through `authseal.WriteJSON` (the bytes its encoder wrote, sealed with a key, replaced atomically) in place of `os.Create` and the encoder. |
 | `internal/auth/meta/meta.go` | `SaveTokenToFile` reads the old file through `authseal.ReadFile` and writes through `authseal.WriteFile` in place of its own temporary file and rename. |
 | `internal/api/handlers/management/config_basic.go` | `normalizeRoutingStrategy` accepts `expiring-first`, so `PUT /routing/strategy` does too. |
@@ -314,6 +318,31 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 If upstream deletes the `/v0/management` routes, `TestT3Hub_*` fails first. Restore the three routes T3 uses (`GET auth-files`, `POST api-call`, `POST reset-quota`) in `internal/api/devyre_v0_shim.go`.
 
 Upstream main has had its own `response.interrupt` support since after this fork's last sync (`6331b38b` and `d318bcc3`, upstream issues #6456 and #6483), with a reader in the same places. On the sync that brings it, keep upstream's reader and executor method and drop ours, then check what upstream still lacks and re-apply only that, with the `TestDevyre*Interrupt*` and `TestDevyreResponsesClientDisconnect*` tests as the check. In October 2026 it still answered an interrupt it could not forward with an `error` event, the failure described in [Codex response.interrupt](#codex-responseinterrupt), and still reported an interrupted response that ended without output as an empty-response failure.
+
+## A sign-in's life
+
+Each Claude and ChatGPT account is a sign-in that lasts until its provider ends it, kept alive by
+refreshing its access token. A refresh token is single use: once the provider has answered a
+refresh, the old one is spent, so an answer that never reaches the token file is a sign-in lost.
+
+### One refresh policy
+
+Claude's and ChatGPT's refreshes go through `internal/auth/tokenrefresh`, which both had their own
+copy of before. ChatGPT's sent a request again, three times in three seconds, after any failure
+but `refresh_token_reused`, including one whose answer was lost on the way back: the provider may
+have spent the token, and the replay then fails for good. Now, for both:
+
+- One request at a time a refresh token (a single flight), at most two refreshes at once a
+  provider, and each refresh bounded by its own 30 s, which outlives its caller: a request whose
+  client went away still lands its answer.
+- A request goes again only after a 5xx, at +1 s and +2 s: the server took nothing. Never after a
+  transport error once the request went out, nor after a 200 that cannot be read.
+- A 429 holds every refresh of its provider until its Retry-After (seconds, a date or
+  `Retry-After-Ms`, within 5 s and 5 min); the ones in the hold send nothing.
+- The failure says what it means for the sign-in (`tokenrefresh.Kind`): ended, reused, revoked,
+  on hold or refused, which no retry can change; unreachable (the request never left: no
+  connection, by the HTTP trace, or a DNS or dial error), lost (it left and no readable answer
+  came), rate limited, a server error, blocked (a Cloudflare page), or another 4xx.
 
 ## Routing and quota readings
 
@@ -871,6 +900,7 @@ go test ./internal/api/ -run 'T3Hub|QuotaReadings|RoutingFocus|TailnetAuth|Devyr
 go test ./internal/cmd/ -run 'Lifeline|PasswordLine|ReportListen|TakenPort|KeyLine'
 go test ./cmd/server/ -run 'LifelineStdin|PasswordStdin|AuthFilesKeyStdin|DevyreSealAuthDir'
 go test ./internal/authseal/
+go test ./internal/auth/tokenrefresh/ ./internal/auth/claude/ ./internal/auth/codex/ -run "Refresh|Answers|Request|Transport|Unreadable|429|RetryAfter|Answer|OneRefresh"
 go test ./internal/watcher/ -run Devyre
 go test ./sdk/auth/ -run Devyre
 go test ./internal/managementasset/ -run DevyrePanel

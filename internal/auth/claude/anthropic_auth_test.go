@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/tokenrefresh"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -25,8 +27,8 @@ func TestNewAnthropicHttpClientDoesNotSetRequestTimeout(t *testing.T) {
 }
 
 func TestRefreshTokens_UsesIndependentTimeout(t *testing.T) {
-	resetClaudeRefreshState()
-	defer resetClaudeRefreshState()
+	tokenrefresh.Reset()
+	defer tokenrefresh.Reset()
 
 	callerCtx, cancelCaller := context.WithCancel(context.Background())
 	cancelCaller()
@@ -52,7 +54,7 @@ func TestRefreshTokens_UsesIndependentTimeout(t *testing.T) {
 		},
 	}
 
-	_, err := auth.RefreshTokens(callerCtx, "independent-timeout-token")
+	_, err := auth.RefreshTokens(callerCtx, "claude-test.json", "independent-timeout-token")
 	if err == nil {
 		t.Fatal("expected refresh error")
 	}
@@ -273,9 +275,9 @@ func (r *errorReader) Close() error {
 	return nil
 }
 
-func TestRefreshTokensWithRetry_DoesNotReplayAfterResponseReadError(t *testing.T) {
-	resetClaudeRefreshState()
-	defer resetClaudeRefreshState()
+func TestRefreshTokens_DoesNotReplayAfterResponseReadError(t *testing.T) {
+	tokenrefresh.Reset()
+	defer tokenrefresh.Reset()
 
 	var calls int32
 	auth := &ClaudeAuth{
@@ -291,7 +293,7 @@ func TestRefreshTokensWithRetry_DoesNotReplayAfterResponseReadError(t *testing.T
 		},
 	}
 
-	_, err := auth.RefreshTokensWithRetry(context.Background(), "single-use-refresh-token", 3)
+	_, err := auth.RefreshTokens(context.Background(), "claude-test.json", "single-use-refresh-token")
 	if err == nil {
 		t.Fatal("expected refresh error")
 	}
@@ -300,9 +302,9 @@ func TestRefreshTokensWithRetry_DoesNotReplayAfterResponseReadError(t *testing.T
 	}
 }
 
-func TestRefreshTokensWithRetry_DoesNotReplayAfterJSONDecodeError(t *testing.T) {
-	resetClaudeRefreshState()
-	defer resetClaudeRefreshState()
+func TestRefreshTokens_DoesNotReplayAfterJSONDecodeError(t *testing.T) {
+	tokenrefresh.Reset()
+	defer tokenrefresh.Reset()
 
 	var calls int32
 	auth := &ClaudeAuth{
@@ -318,7 +320,7 @@ func TestRefreshTokensWithRetry_DoesNotReplayAfterJSONDecodeError(t *testing.T) 
 		},
 	}
 
-	_, err := auth.RefreshTokensWithRetry(context.Background(), "single-use-refresh-token", 3)
+	_, err := auth.RefreshTokens(context.Background(), "claude-test.json", "single-use-refresh-token")
 	if err == nil {
 		t.Fatal("expected refresh error")
 	}
@@ -327,9 +329,9 @@ func TestRefreshTokensWithRetry_DoesNotReplayAfterJSONDecodeError(t *testing.T) 
 	}
 }
 
-func TestRefreshTokensWithRetry_DoesNotReplayAfterTransportError(t *testing.T) {
-	resetClaudeRefreshState()
-	defer resetClaudeRefreshState()
+func TestRefreshTokens_DoesNotReplayAfterTransportError(t *testing.T) {
+	tokenrefresh.Reset()
+	defer tokenrefresh.Reset()
 
 	var calls int32
 	auth := &ClaudeAuth{
@@ -341,7 +343,7 @@ func TestRefreshTokensWithRetry_DoesNotReplayAfterTransportError(t *testing.T) {
 		},
 	}
 
-	_, err := auth.RefreshTokensWithRetry(context.Background(), "single-use-refresh-token", 3)
+	_, err := auth.RefreshTokens(context.Background(), "claude-test.json", "single-use-refresh-token")
 	if err == nil {
 		t.Fatal("expected refresh error")
 	}
@@ -350,9 +352,9 @@ func TestRefreshTokensWithRetry_DoesNotReplayAfterTransportError(t *testing.T) {
 	}
 }
 
-func TestRefreshTokensWithRetry_429BlocksImmediateReplay(t *testing.T) {
-	resetClaudeRefreshState()
-	defer resetClaudeRefreshState()
+func TestRefreshTokens_429BlocksImmediateReplay(t *testing.T) {
+	tokenrefresh.Reset()
+	defer tokenrefresh.Reset()
 
 	var calls int32
 	auth := &ClaudeAuth{
@@ -369,7 +371,7 @@ func TestRefreshTokensWithRetry_429BlocksImmediateReplay(t *testing.T) {
 		},
 	}
 
-	_, err := auth.RefreshTokensWithRetry(context.Background(), "dummy_refresh_token", 3)
+	_, err := auth.RefreshTokens(context.Background(), "claude-test.json", "dummy_refresh_token")
 	if err == nil {
 		t.Fatalf("expected 429 refresh error")
 	}
@@ -380,21 +382,21 @@ func TestRefreshTokensWithRetry_429BlocksImmediateReplay(t *testing.T) {
 		t.Fatalf("expected 1 refresh attempt after 429, got %d", got)
 	}
 
-	_, err = auth.RefreshTokensWithRetry(context.Background(), "dummy_refresh_token", 3)
+	_, err = auth.RefreshTokens(context.Background(), "claude-test.json", "dummy_refresh_token")
 	if err == nil {
 		t.Fatalf("expected immediate blocked refresh error")
 	}
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("expected blocked retry to avoid a second refresh call, got %d attempts", got)
 	}
-	if blockedUntil := claudeRefreshBlockedUntil("dummy_refresh_token"); !blockedUntil.After(time.Now()) {
-		t.Fatalf("expected blocked-until timestamp to be set, got %v", blockedUntil)
+	if heldUntil := tokenrefresh.HeldUntil("claude"); !heldUntil.After(time.Now()) {
+		t.Fatalf("expected Claude's refreshes to be held, got %v", heldUntil)
 	}
 }
 
 func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
-	resetClaudeRefreshState()
-	defer resetClaudeRefreshState()
+	tokenrefresh.Reset()
+	defer tokenrefresh.Reset()
 
 	var tokenCalls int32
 	var profileCalls int32
@@ -444,7 +446,7 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 	results := make(chan *ClaudeTokenData, 2)
 	errs := make(chan error, 2)
 	runRefresh := func() {
-		td, err := auth.RefreshTokens(context.Background(), "shared-refresh-token")
+		td, err := auth.RefreshTokens(context.Background(), "claude-test.json", "shared-refresh-token")
 		results <- td
 		errs <- err
 	}
@@ -464,27 +466,22 @@ func TestRefreshTokens_DeduplicatesConcurrentRefresh(t *testing.T) {
 			t.Fatalf("expected refresh to succeed, got %v", err)
 		}
 		td := <-results
-		if td == nil || td.AccessToken != "new-access" {
-			t.Fatalf("expected refreshed access token, got %#v", td)
-		}
-		if td.AccountUUID != "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" {
-			t.Fatalf("account UUID = %q, want OAuth response account", td.AccountUUID)
-		}
-		if td.OrganizationUUID != "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" || td.OrganizationName != "Shared Org" {
-			t.Fatalf("organization = %q/%q, want OAuth response organization", td.OrganizationUUID, td.OrganizationName)
+		if td == nil || td.AccessToken != "new-access" || td.RefreshToken != "new-refresh" {
+			t.Fatalf("expected refreshed tokens, got %#v", td)
 		}
 	}
 	if got := atomic.LoadInt32(&tokenCalls); got != 1 {
 		t.Fatalf("expected exactly 1 upstream refresh call, got %d", got)
 	}
-	if got := atomic.LoadInt32(&profileCalls); got != 1 {
-		t.Fatalf("expected exactly 1 OAuth profile call, got %d", got)
+	// The profile is the caller's to look up once the rotated tokens are saved.
+	if got := atomic.LoadInt32(&profileCalls); got != 0 {
+		t.Fatalf("expected no OAuth profile call during the refresh, got %d", got)
 	}
 }
 
 func TestRefreshTokensUsesNative220ControlPlaneShape(t *testing.T) {
-	resetClaudeRefreshState()
-	defer resetClaudeRefreshState()
+	tokenrefresh.Reset()
+	defer tokenrefresh.Reset()
 
 	const refreshToken = "placeholder-refresh"
 	auth := &ClaudeAuth{
@@ -542,15 +539,15 @@ func TestRefreshTokensUsesNative220ControlPlaneShape(t *testing.T) {
 		},
 	}
 
-	tokenData, errRefresh := auth.RefreshTokens(t.Context(), refreshToken)
+	tokenData, errRefresh := auth.RefreshTokens(t.Context(), "claude-test.json", refreshToken)
 	if errRefresh != nil {
 		t.Fatalf("RefreshTokens() error = %v", errRefresh)
 	}
 	if tokenData.RefreshToken != refreshToken {
 		t.Fatalf("refresh token fallback = %q, want original placeholder", tokenData.RefreshToken)
 	}
-	if tokenData.AccountUUID == "" || tokenData.Email == "" || tokenData.OrganizationUUID == "" {
-		t.Fatalf("profile identity was not populated: %#v", tokenData)
+	if tokenData.AccountUUID != "" || tokenData.Email != "" {
+		t.Fatalf("the refresh looked the profile up: %#v", tokenData)
 	}
 }
 

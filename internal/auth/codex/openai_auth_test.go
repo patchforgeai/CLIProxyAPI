@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -10,8 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/tokenrefresh"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
-	"golang.org/x/sync/singleflight"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -54,7 +55,7 @@ func TestRefreshTokens_UsesIndependentTimeout(t *testing.T) {
 		},
 	}
 
-	_, err := auth.RefreshTokens(callerCtx, "independent-timeout-token")
+	_, err := auth.RefreshTokens(callerCtx, "codex-test.json", "independent-timeout-token")
 	if err == nil {
 		t.Fatal("expected refresh error")
 	}
@@ -64,10 +65,12 @@ func TestRefreshTokens_UsesIndependentTimeout(t *testing.T) {
 }
 
 func resetCodexRefreshGroupForTest() {
-	codexRefreshGroup = singleflight.Group{}
+	tokenrefresh.Reset()
 }
 
-func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
+func TestRefreshTokens_NonRetryableOnlyAttemptsOnce(t *testing.T) {
+	resetCodexRefreshGroupForTest()
+	defer resetCodexRefreshGroupForTest()
 	var calls int32
 	auth := &CodexAuth{
 		httpClient: &http.Client{
@@ -83,7 +86,7 @@ func TestRefreshTokensWithRetry_NonRetryableOnlyAttemptsOnce(t *testing.T) {
 		},
 	}
 
-	_, err := auth.RefreshTokensWithRetry(context.Background(), "dummy_refresh_token", 3)
+	_, err := auth.RefreshTokens(context.Background(), "codex-test.json", "dummy_refresh_token")
 	if err == nil {
 		t.Fatalf("expected error for non-retryable refresh failure")
 	}
@@ -129,7 +132,7 @@ func TestRefreshTokens_DeduplicatesConcurrentRefreshAcrossInstances(t *testing.T
 		if launched != nil {
 			close(launched)
 		}
-		tokenData, errRefresh := auth.RefreshTokens(context.Background(), "shared-refresh-token")
+		tokenData, errRefresh := auth.RefreshTokens(context.Background(), "codex-test.json", "shared-refresh-token")
 		results <- tokenData
 		errs <- errRefresh
 	}
@@ -219,7 +222,7 @@ func TestRefreshTokens_PlanTypeDefaultsToFreeWhenMissing(t *testing.T) {
 		},
 	}
 
-	tokenData, errRefresh := auth.RefreshTokens(context.Background(), "dummy-refresh")
+	tokenData, errRefresh := auth.RefreshTokens(context.Background(), "codex-test.json", "dummy-refresh")
 	if errRefresh != nil {
 		t.Fatalf("RefreshTokens failed: %v", errRefresh)
 	}
@@ -257,7 +260,7 @@ func TestRefreshTokens_ExtractsPlanTypeWhenPresent(t *testing.T) {
 		},
 	}
 
-	tokenData, errRefresh := auth.RefreshTokens(context.Background(), "dummy-refresh")
+	tokenData, errRefresh := auth.RefreshTokens(context.Background(), "codex-test.json", "dummy-refresh")
 	if errRefresh != nil {
 		t.Fatalf("RefreshTokens failed: %v", errRefresh)
 	}
@@ -303,4 +306,78 @@ func TestCreateAndUpdateTokenStorage_PlanType(t *testing.T) {
 	if storage.PlanType != "free" {
 		t.Fatalf("updated storage.PlanType = %q, want free", storage.PlanType)
 	}
+}
+
+// ChatGPT's refresh follows Claude's policy: a request whose answer may have been lost is never
+// sent again with the same single-use token (before, it went out three times in 3 s).
+func TestRefreshTokens_DoesNotReplayAfterTransportError(t *testing.T) {
+	resetCodexRefreshGroupForTest()
+	defer resetCodexRefreshGroupForTest()
+	var calls int32
+	auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return nil, errors.New("read: connection reset by peer")
+	})}}
+	_, err := auth.RefreshTokens(context.Background(), "codex-test.json", "single-use-refresh-token")
+	failure, ok := tokenrefresh.AsFailure(err)
+	if !ok || failure.Kind != tokenrefresh.KindLost {
+		t.Fatalf("error = %v, want a lost answer", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("expected one refresh attempt after an ambiguous transport error, got %d", got)
+	}
+}
+
+// A 429 holds ChatGPT's refreshes until its Retry-After: the next one sends nothing.
+func TestRefreshTokens_HonoursRetryAfter(t *testing.T) {
+	resetCodexRefreshGroupForTest()
+	defer resetCodexRefreshGroupForTest()
+	var calls int32
+	auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		atomic.AddInt32(&calls, 1)
+		return &http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"rate_limit_exceeded"}}`)),
+			Header:     http.Header{"Retry-After": []string{"120"}},
+			Request:    req,
+		}, nil
+	})}}
+	if _, err := auth.RefreshTokens(context.Background(), "codex-a.json", "token-a"); err == nil {
+		t.Fatal("expected a 429")
+	}
+	_, err := auth.RefreshTokens(context.Background(), "codex-b.json", "token-b")
+	failure, ok := tokenrefresh.AsFailure(err)
+	if !ok || !failure.Held || failure.Wait <= 100*time.Second {
+		t.Fatalf("second refresh: %v, want held for what is left of 120 s", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("requests = %d, want the 429's only", got)
+	}
+}
+
+// OpenAI's terminal refresh errors, as Codex 0.162.1 names them, end the refresh at once.
+func TestRefreshTokens_NamesTheEndOfTheSignIn(t *testing.T) {
+	for code, want := range map[string]tokenrefresh.Kind{
+		"refresh_token_expired":     tokenrefresh.KindEnded,
+		"refresh_token_reused":      tokenrefresh.KindReused,
+		"refresh_token_invalidated": tokenrefresh.KindRevoked,
+	} {
+		resetCodexRefreshGroupForTest()
+		var calls int32
+		auth := &CodexAuth{httpClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			atomic.AddInt32(&calls, 1)
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"x","type":"invalid_request_error","code":"` + code + `"}}`)),
+				Header:     make(http.Header),
+				Request:    req,
+			}, nil
+		})}}
+		_, err := auth.RefreshTokens(context.Background(), "codex-test.json", "dead-token")
+		failure, ok := tokenrefresh.AsFailure(err)
+		if !ok || failure.Kind != want || !failure.Kind.Terminal() || calls != 1 {
+			t.Fatalf("%s: %v after %d requests, want %s after 1", code, err, calls, want)
+		}
+	}
+	resetCodexRefreshGroupForTest()
 }
