@@ -25,7 +25,8 @@ func devyreAddAccountUUID(entry gin.H, auth *coreauth.Auth) {
 // deprecated /v0 listing stays as upstream has it; devyre/README.md, "A sign-in's life"):
 //
 //   - `ends_at`: when the provider ends the sign-in, while an answer has said;
-//   - `access_expires_at`: when its access token runs out;
+//   - `access_expires_at`: when its access token runs out, and `renews`: whether the router
+//     renews it by itself (coreauth.RenewsAccessToken);
 //   - `state`: `retrying` (its last refresh failed in passing, tried again at `next_try_at`) or
 //     `ended` (the provider ended the sign-in), absent while it is fine, with `reason` (a
 //     tokenrefresh.Kind), `answer` (the provider's, in a few words) and `since`.
@@ -39,6 +40,7 @@ func devyreAddSignIn(entry gin.H, auth *coreauth.Auth) {
 	}
 	if expires, ok := auth.AccessTokenExpirationTime(); ok && !expires.IsZero() {
 		signIn["access_expires_at"] = expires.UTC()
+		signIn["renews"] = coreauth.RenewsAccessToken(auth)
 	}
 	status := coreauth.SignInStatusOf(auth)
 	if status.State != coreauth.SignInFine {

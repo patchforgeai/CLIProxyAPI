@@ -85,4 +85,27 @@ func TestDevyreTheV8ListingSaysHowTheSignInStands(t *testing.T) {
 	if _, retried := signIn["next_try_at"]; retried {
 		t.Fatalf("an ended sign-in lists a next try: %#v", signIn)
 	}
+	if signIn["renews"] != false {
+		t.Fatalf("an ended sign-in is listed as renewed: %#v", signIn)
+	}
+}
+
+func TestDevyreTheV8ListingSaysWhetherTheRouterRenewsTheToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: "claude-b@example.com.json", FileName: "claude-b@example.com.json", Provider: "claude",
+		Attributes: map[string]string{"runtime_only": "true"},
+		Metadata: map[string]any{
+			"email": "b@example.com", "access_token": "not-a-real-token", "refresh_token": "not-a-real-refresh-token",
+			"expired": "2026-11-26T10:00:00Z",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	signIn, _ := devyreListCredentials(t, h, true)["sign_in"].(map[string]any)
+	if signIn["renews"] != true || signIn["state"] != nil {
+		t.Fatalf("v8 sign_in = %#v, want renewed and fine", signIn)
+	}
 }

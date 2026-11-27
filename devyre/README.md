@@ -83,7 +83,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/devyre_tailnet_auth.go` | Keyless proxy API for trusted requests (`proxy-api`), the key-only `/v1/ws` wrapper and the anti-framing headers of the panel pages |
 | `internal/api/devyre_tailnet_auth_test.go` | Full-stack `tailnet-auth` tests through the real server and config loader: session endpoint, token-bearing routes, CORS, proxy principal, `/v1/ws`, framing, the tailnet name on the API port, the rendered proxy debug lines |
 | `internal/api/handlers/management/devyre_auth_files.go` | `devyreAddAccountUUID`: the auth-file listing's `account_uuid`; `devyreAddSignIn`: the v8 listing's `sign_in` |
-| `internal/api/handlers/management/devyre_sign_in_listing_test.go` | The v8 listing's `sign_in` (its end, its access token's, how it stands), which the v0 listing leaves out |
+| `internal/api/handlers/management/devyre_sign_in_listing_test.go` | The v8 listing's `sign_in` (its end, its access token's and whether the router renews it, how it stands), which the v0 listing leaves out |
 | `internal/api/handlers/management/devyre_auth_seal_test.go` | With a key, through the routes: an upload stored sealed, the listing's `account_uuid`, a download answering the JSON, a status change written sealed |
 | `internal/api/handlers/management/devyre_codex_recovery_test.go` | Through `APICall` and the poller: a fresh usage response lifts a ChatGPT account's usage-limit hold; one that shows a limit reached anywhere, a cached one and a malformed one do not; a per-minute rate limit stands; another account's usage lifts nothing |
 | `internal/api/handlers/management/devyre_oauth_redirect.go` | `redirect_port` on the Claude, Codex and Antigravity OAuth starts: parsing, the refusals, and the redirect-aware authorize URL and exchange |
@@ -442,7 +442,9 @@ clock, means the computer slept. A refresh at once would fail before it left at 
 in 10 s), and at worst leave on a half-up link whose answer is lost, which may spend the token.
 
 The v8 listing's `sign_in` says all of it: `state` (`retrying` or `ended`, absent while fine),
-`reason`, `answer`, `since`, `next_try_at`, `access_expires_at` and `ends_at`.
+`reason`, `answer`, `since`, `next_try_at`, `access_expires_at`, `renews` (whether the router renews
+the access token by itself: an OAuth credential with a refresh token whose sign-in has not ended)
+and `ends_at`.
 
 ### Refreshes spread out
 

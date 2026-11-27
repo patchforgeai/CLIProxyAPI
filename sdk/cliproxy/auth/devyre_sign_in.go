@@ -103,6 +103,13 @@ func SignInStatusOf(auth *Auth) SignInStatus {
 	return SignInStatus{}
 }
 
+// RenewsAccessToken reports whether the router renews auth's access token by itself, as it runs
+// out: an OAuth credential with a refresh token whose sign-in has not ended. A supervising app
+// says "refreshing" of one whose token ran out only then.
+func RenewsAccessToken(auth *Auth) bool {
+	return auth != nil && auth.AuthKind() != AuthKindAPIKey && authHasRefreshCredential(auth) && !hasEndedSignIn(auth)
+}
+
 // signInEnded reads the ended sign-in the token file keeps.
 func signInEnded(auth *Auth) (SignInStatus, bool) {
 	if auth == nil || auth.Metadata == nil {
