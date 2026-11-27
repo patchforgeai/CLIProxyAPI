@@ -92,6 +92,7 @@ func (s *Service) Run(ctx context.Context) error {
 			auths:           s.coreManager.List(),
 		})
 		interval := 15 * time.Minute
+		s.devyreLookAtTheNetwork() // devyre: a wake's wait for the network ends when it answers
 		s.coreManager.StartAutoRefresh(ctx, interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 	}

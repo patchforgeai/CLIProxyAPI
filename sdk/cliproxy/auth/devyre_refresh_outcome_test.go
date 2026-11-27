@@ -310,13 +310,13 @@ func TestDevyreAWakeHoldsDueRefreshesForTheNetwork(t *testing.T) {
 	loop.timerArmed = true
 	loop.notePass(start)
 	loop.notePass(start.Add(30 * time.Second))
-	if !loop.settleUntil.IsZero() {
+	if !loop.wake.until.IsZero() {
 		t.Fatal("a pass on time reads as a wake")
 	}
 	woke := start.Add(9 * time.Hour)
 	loop.notePass(woke)
-	if !loop.settleUntil.Equal(woke.Add(wakeSettle)) {
-		t.Fatalf("settle until %s, want %s", loop.settleUntil, woke.Add(wakeSettle))
+	if !loop.wake.until.Equal(woke.Add(wakeSettle)) {
+		t.Fatalf("settle until %s, want %s", loop.wake.until, woke.Add(wakeSettle))
 	}
 	if !loop.waitForNetwork([]string{"a.json"}, woke) {
 		t.Fatal("due refreshes went out right after a wake")
@@ -332,7 +332,7 @@ func TestDevyreAWakeHoldsDueRefreshesForTheNetwork(t *testing.T) {
 	idle := newAuthAutoRefreshLoop(NewManager(nil, nil, nil), time.Second, 1)
 	idle.notePass(start)
 	idle.notePass(start.Add(9 * time.Hour))
-	if !idle.settleUntil.IsZero() {
+	if !idle.wake.until.IsZero() {
 		t.Fatal("an idle loop read its own sleep as a wake")
 	}
 }
@@ -371,5 +371,46 @@ func TestDevyreTheBackoffSurvivesTheFileReadAgain(t *testing.T) {
 	got := currentAuth(t, manager, auth.ID)
 	if wait := got.NextRefreshAfter.Sub(before); wait < 19*time.Second || wait > 21*time.Second {
 		t.Fatalf("second failure waits %s, want 20 s (the count kept across the file read again)", wait)
+	}
+}
+
+// After a wake, the wait ends as soon as the network answers: the refreshes it held go out then,
+// not 20 s later.
+func TestDevyreTheWakeWaitEndsWhenTheNetworkAnswers(t *testing.T) {
+	every := wakeProbeEvery
+	wakeProbeEvery = 5 * time.Millisecond
+	t.Cleanup(func() { wakeProbeEvery = every })
+	manager := NewManager(nil, nil, nil)
+	var looks atomic.Int32
+	manager.SetNetworkProbe(func(context.Context) bool { return looks.Add(1) >= 3 })
+	loop := newAuthAutoRefreshLoop(manager, time.Second, 1)
+	loop.timerArmed = true
+	now := time.Now()
+	loop.notePass(now.Add(-9 * time.Hour))
+	loop.notePass(now)
+	if !loop.waitForNetwork([]string{"a.json"}, now) {
+		t.Fatal("due refreshes went out right after a wake")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		loop.wake.mu.Lock()
+		ended := loop.wake.until.IsZero()
+		loop.wake.mu.Unlock()
+		if ended {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if loop.waitForNetwork([]string{"a.json"}, time.Now()) {
+		t.Fatal("the wait did not end once the network answered")
+	}
+	if got := looks.Load(); got != 3 {
+		t.Fatalf("the network was looked at %d times, want until it answered (3)", got)
+	}
+	loop.mu.Lock()
+	_, dirty := loop.dirty["a.json"]
+	loop.mu.Unlock()
+	if !dirty {
+		t.Fatal("the refresh the wait held is not due again")
 	}
 }

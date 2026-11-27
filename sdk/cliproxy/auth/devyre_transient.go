@@ -56,6 +56,9 @@ type devyreManagerState struct {
 	spent sync.Map
 	// refreshes are the refreshes in flight, which a shutdown waits for (devyre_drain.go).
 	refreshes devyreRefreshDrain
+	// networkUp looks at the network after a wake (devyre_wake.go); nil waits it out. Guarded by
+	// the manager's mu.
+	networkUp func(ctx context.Context) bool
 }
 
 // devyreMarkBound tells the conductor that the request's session was already

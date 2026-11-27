@@ -29,11 +29,11 @@ type authAutoRefreshLoop struct {
 	wakeCh chan struct{}
 	jobs   chan *authRefreshJob
 
-	// devyre: the loop's last pass, and until when due refreshes wait for the network after a
-	// wake (devyre_wake.go). Touched by the loop's goroutine alone.
-	lastPass    time.Time
-	settleUntil time.Time
-	timerArmed  bool
+	// devyre: the loop's last pass and whether its timer was armed (the loop's goroutine alone),
+	// and the wait for the network after a wake (devyre_wake.go).
+	lastPass   time.Time
+	timerArmed bool
+	wake       wakeWait
 }
 
 type authRefreshJob struct {

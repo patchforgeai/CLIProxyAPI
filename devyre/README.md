@@ -218,7 +218,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/cliproxy/auth/devyre_drain_test.go` | A shutdown waits for a loop refresh on the wire and saves its answer; the wait is bounded and names what it leaves |
 | `sdk/cliproxy/auth/devyre_refresh_spread.go` | Each credential's stable offset into its provider's lead (`refreshSpread`, `spreadLead`) |
 | `sdk/cliproxy/auth/devyre_refresh_spread_test.go` | Seven accounts refreshed in one second come due apart, each within the first half of its lead, stably; the offset stays under half the lead |
-| `sdk/cliproxy/auth/devyre_wake.go` | After a wake (a pass of the refresh loop far later than its timer allows, by either clock), due refreshes wait 20 s for the network |
+| `sdk/cliproxy/auth/devyre_wake.go` | After a wake (a pass of the refresh loop far later than its timer allows, by either clock), due refreshes wait for the network: until the network probe answers (`SetNetworkProbe`), 20 s at most |
+| `sdk/cliproxy/devyre_network.go`, `devyre_network_test.go` | The probe: a TCP connection to the token endpoints, or to the configured proxy; tested against a refused and an answering address |
 | `sdk/cliproxy/auth/devyre_focus.go` | `devyreFocusTakesOver`: whether session affinity gives a bound session up to a usable focus |
 | `sdk/cliproxy/auth/devyre_focus_test.go` | The focus in the selector (urgency, 5h, 7d and model-scoped gates, tiers, other providers, ends, rotation, the `focus` log reason) and under session affinity (explicit sessions, the fallback key, LCP, the log line, through the manager) |
 | `sdk/cliproxy/auth/devyre_limit_refusal.go` | `devyreLimitSummary`: a request no credential can take, while each one that takes it again in time is held for a limit, is refused as that limit (the model cooldown, ending as the first hold does) whatever keeps the others out until someone acts, a refused sign-in among it (`devyreSignedOut`); `devyreLimitOverSignIn`: a request whose last try met a refused sign-in while the rest are so held ends as the limit too |
@@ -263,7 +264,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 
 | File | Our change |
 |---|---|
-| `cmd/server/main.go` | `argvFlagConsumesValue` lists `lifeline-stdin`, `password-stdin` and `auth-files-key-stdin` among the flags that take no value; right after `flag.Parse` one call reads the password line (`devyreApplyPasswordStdin`) and the next the key line (`devyreApplyAuthFilesKeyStdin`), and one right after the auth dir is resolved seals its plaintext files (`devyreSealAuthDir`). The flags themselves are registered in `cmd/server/devyre_lifeline.go` and `devyre_auth_seal.go`. |
+| `cmd/server/main.go` | `argvFlagConsumesValue` lists `lifeline-stdin`, `password-stdin` and `auth-files-key-stdin` among the flags that take no value; right after `flag.Parse` one call reads the password line (`devyreApplyPasswordStdin`) and the next the key line (`devyreApplyAuthFilesKeyStdin`), and one right after the auth dir is resolved seals its plaintext files (`devyreSealAuthDir`). The flags themselves are registered in `cmd/server/devyre_lifeline.go` and `devyre_auth_seal.go`. It exits 1 when the service could not run (another router holds the auth folder), so a supervisor sees a failure. |
 | `config.example.yaml` | A `devyre:` comment above `disable-control-panel` says the panel is built in, so `disable-auto-update-panel` and `panel-github-repository` have no effect, and `panel-github-repository` names the panel fork; a commented `management.tailnet-auth` block with every setting off; `routing:` documents `expiring-first`, a commented `session-affinity-persist` (whose comment also names `claude-continuity.json`), and the `expiring-first` (gate, headroom, log) and `quota-observation` blocks; `upstream.claude` documents a commented `mcp-alias-secret`. |
 | `go.mod`, `go.sum` | `golang.org/x/net` at least v0.60.0, `golang.org/x/crypto` v0.57.0, `golang.org/x/text` v0.42.0 and `github.com/go-git/go-git/v6` v6.0.0-alpha.5, `github.com/andybalholm/brotli` v1.2.7 and `github.com/klauspost/compress` v1.20.3: the releases that fix GO-2026-6603, -6610, -6611, -6612, -6617, -6629, -6354, -6355, -6213, -6214, -6888 and -6865, which govulncheck found the server reaching. On a conflict take the newer of upstream's version and ours. |
 | `internal/api/handlers/management/api_tools.go` | Three hunks hook the usage cache into `APICall`: a lookup after `auth_index` and `url` are parsed, complete or fail after the upstream call, and a record on success. `/v0` and `/v8` share this handler. |
@@ -295,7 +296,6 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/api/server_options.go` | The `devyreKeepAliveProbe` and `devyreListenReport` fields that `WithDevyreKeepAliveProbe` and `WithDevyreListenReport` set. |
 | `internal/api/server_routes.go` | `AttachWebsocketRoute` uses `devyreKeyOnlyAuthMiddleware`, so `/v1/ws` is never keyless. |
 | `internal/cmd/run.go` | With the stdin lifeline on, `StartServiceWithPluginHost` runs until the lifeline ends (`devyreWithLifeline`) instead of applying the 10-second keep-alive idle limit. `StartService` and `StartServiceWithPluginHost` return why the service could not run. |
-| `cmd/server/main.go` (also) | Exits 1 when the service could not run (another router holds the auth folder), so a supervisor sees a failure. |
 | `internal/client/codex/models/models.go` | `loadCodexClientModelTemplates` returns its templates through `devyreWithAccountTemplates`. |
 | `internal/registry/model_updater.go`, `codex_client_models_updater.go`, `devin_models_updater.go` | Each `run…Updater` is one `devyreRefreshLoop` call in place of the start refresh and the ticker loop (upstream's `periodicRefresh`, `tryPeriodicRefresh` and `tryStartupRefresh` went with it), and each `tryRefresh…` returns whether the catalog was fetched and taken. |
 | `internal/config/config_defaults.go` | `DefaultPanelGitHubRepository` points at the panel fork; nothing fetches from it. |
@@ -343,7 +343,7 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `sdk/cliproxy/antigravity_models.go` | The request of `fetchAntigravityModelHintsFromURL` moved into `fetchAntigravityAvailableModels`, which takes the request body and returns the answer's body and an error naming the status, for the Antigravity learner too; `asyncProbeAntigravityCapabilities` returns right after its first check when `devyreAntigravityLearnerProbes` says the learner's answer for the account takes its place. |
 | `sdk/cliproxy/service.go` | The `devyreSessions` field (`devyreSessionState`) and the `devyreAuthDir` field (the held auth folder) on `Service`. |
 | `sdk/cliproxy/service_config.go` | `expiring-first` aliases in `normalizedRoutingRuntimeState`, construction in `newRoutingSelector`, and the gate, headroom and log settings in `routingRuntimeState`. That struct must stay comparable: no pointers, maps or slices. `applyManagerConfig` builds a changed selector through `devyreRoutingSelector`, which carries the session bindings over, and then calls `devyreApplySessionPersistence`. |
-| `sdk/cliproxy/service_lifecycle.go` | `Run` calls `devyreStartSessionPersistence` right before the server starts, and `devyreStartCodexAccountModels`, `devyreStartClaudeAccountModels` and `devyreStartAntigravityAccountModels` right after `registerModelRefreshCallback`; `Run` holds the auth folder (`devyreHoldAuthDir`) right after it makes sure it exists; `Shutdown` calls `devyreSettleCredentials` and `devyreStopAntigravityAccountModels` right after `StopAutoRefresh`, and `devyreStopSessionPersistence`, `devyreFlushCredentials` and `devyreReleaseAuthDir` right after the server stopped. |
+| `sdk/cliproxy/service_lifecycle.go` | `Run` calls `devyreStartSessionPersistence` right before the server starts, and `devyreStartCodexAccountModels`, `devyreStartClaudeAccountModels` and `devyreStartAntigravityAccountModels` right after `registerModelRefreshCallback`; `Run` holds the auth folder (`devyreHoldAuthDir`) right after it makes sure it exists, and gives the refresh loop its network probe (`devyreLookAtTheNetwork`) right before it starts it; `Shutdown` calls `devyreSettleCredentials` and `devyreStopAntigravityAccountModels` right after `StopAutoRefresh`, and `devyreStopSessionPersistence`, `devyreFlushCredentials` and `devyreReleaseAuthDir` right after the server stopped. |
 | `sdk/cliproxy/service_models.go` | The Codex OAuth branch of `registerModelsForAuthWithCache` passes the plan's catalog models through `devyreWithAccountCodexModels` before the exclusions, and the Claude branch, unless a configured key names its own models (`configuredModels`), through `devyreWithAccountClaudeModels`. The Antigravity branch passes the catalog's models, after the exclusions, through `devyreWithAccountAntigravityModels` with the exclusions. |
 
 If upstream deletes the `/v0/management` routes, `TestT3Hub_*` fails first. Restore the three routes T3 uses (`GET auth-files`, `POST api-call`, `POST reset-quota`) in `internal/api/devyre_v0_shim.go`.
@@ -447,10 +447,14 @@ run out the credential is unavailable meanwhile, with the status `refresh retryi
 that read `token expired`, which Anvil showed as "Sign in again" while the router tried again by
 itself. A refresh that works clears it and logs how long it lasted.
 
-After a wake the refreshes due wait 20 s for the network (`devyre_wake.go`): a pass of the refresh
+After a wake the refreshes due wait for the network (`devyre_wake.go`): a pass of the refresh
 loop more than two minutes later than its 30-second timer allows, by the monotonic or the wall
 clock, means the computer slept. A refresh at once would fail before it left at best (tried again
 in 10 s), and at worst leave on a half-up link whose answer is lost, which may spend the token.
+The wait ends as soon as a token endpoint (`platform.claude.com`, `auth.openai.com`), or the
+configured proxy, takes a TCP connection, looked at every second (`devyre_network.go`), and after
+20 s whatever the look says. Before the look, it was a fixed 20 s after every overnight sleep,
+with every Claude token run out.
 
 The v8 listing's `sign_in`, on every credential (`{}` with nothing to say, so a reader knows the
 router says it), says all of it: `state` (`retrying` or `ended`, absent while fine),
@@ -1100,7 +1104,8 @@ go test ./sdk/cliproxy/auth/ ./internal/api/handlers/management/ -run "DevyreA|D
 go test ./internal/runtime/executor/ -run DevyreClaudeLooks
 go test ./sdk/cliproxy/auth/ -run "DevyreAFailed|DevyreAShutdown|DevyreTheSave|DevyreAFile|DevyreARefresh"
 go test ./internal/authdir/ ./sdk/cliproxy/ -run "OneRouter|DevyreASecond"
-go test ./sdk/cliproxy/auth/ -run "DevyreAccountsRefreshed|DevyreTheSpread|NextRefreshCheckAt"
+go test ./sdk/cliproxy/auth/ -run "DevyreAccountsRefreshed|DevyreTheSpread|NextRefreshCheckAt|Wake"
+go test ./sdk/cliproxy/ -run "DevyreTheNetwork|DevyreAFolder"
 go test ./internal/watcher/ -run Devyre
 go test ./sdk/auth/ -run Devyre
 go test ./internal/managementasset/ -run DevyrePanel
