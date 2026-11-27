@@ -148,6 +148,8 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 		IDToken      string `json:"id_token"`
 		TokenType    string `json:"token_type"`
 		ExpiresIn    int    `json:"expires_in"`
+		// RefreshTokenExpiresIn is how long the sign-in lasts, if the answer says.
+		RefreshTokenExpiresIn *int64 `json:"refresh_token_expires_in"`
 	}
 
 	if err = json.Unmarshal(body, &tokenResp); err != nil {
@@ -170,6 +172,7 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 	}
 
 	// Create token data
+	answeredAt := time.Now()
 	tokenData := CodexTokenData{
 		IDToken:      tokenResp.IDToken,
 		AccessToken:  tokenResp.AccessToken,
@@ -177,7 +180,11 @@ func (o *CodexAuth) ExchangeCodeForTokensWithRedirect(ctx context.Context, code,
 		AccountID:    accountID,
 		Email:        email,
 		PlanType:     planType,
-		Expire:       time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+		Expire:       answeredAt.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+	}
+	// devyre: the end of the sign-in only when the answer gives it; the ID token says nothing of it.
+	if ends, ok := tokenrefresh.SignInEnd(answeredAt, tokenResp.RefreshTokenExpiresIn); ok {
+		tokenData.RefreshTokenExpiresAt = tokenrefresh.FormatEnd(ends)
 	}
 
 	// Create auth bundle
@@ -239,7 +246,7 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, account, refreshToken str
 		planType = claims.GetPlanType()
 	}
 
-	return &CodexTokenData{
+	tokenData := &CodexTokenData{
 		IDToken:      answer.IDToken,
 		AccessToken:  answer.AccessToken,
 		RefreshToken: answer.RefreshToken,
@@ -247,7 +254,11 @@ func (o *CodexAuth) RefreshTokens(ctx context.Context, account, refreshToken str
 		Email:        email,
 		PlanType:     planType,
 		Expire:       answer.ExpiresAt().Format(time.RFC3339),
-	}, nil
+	}
+	if ends, ok := answer.SignInEndsAt(); ok {
+		tokenData.RefreshTokenExpiresAt = tokenrefresh.FormatEnd(ends)
+	}
+	return tokenData, nil
 }
 
 // CreateTokenStorage creates a new CodexTokenStorage from a CodexAuthBundle.
@@ -266,6 +277,8 @@ func (o *CodexAuth) CreateTokenStorage(bundle *CodexAuthBundle) *CodexTokenStora
 		Email:        bundle.TokenData.Email,
 		Expire:       bundle.TokenData.Expire,
 		PlanType:     planType,
+
+		RefreshTokenExpiresAt: bundle.TokenData.RefreshTokenExpiresAt,
 	}
 
 	return storage
@@ -284,6 +297,7 @@ func (o *CodexAuth) UpdateTokenStorage(storage *CodexTokenStorage, tokenData *Co
 	storage.LastRefresh = time.Now().Format(time.RFC3339)
 	storage.Email = tokenData.Email
 	storage.Expire = tokenData.Expire
+	storage.RefreshTokenExpiresAt = tokenrefresh.EndAfterRefresh(storage.RefreshTokenExpiresAt, tokenData.RefreshTokenExpiresAt)
 	planType := DefaultPlanType
 	if strings.TrimSpace(tokenData.PlanType) != "" {
 		planType = strings.TrimSpace(tokenData.PlanType)

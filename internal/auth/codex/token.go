@@ -34,6 +34,9 @@ type CodexTokenStorage struct {
 	Expire string `json:"expired"`
 	// PlanType indicates the ChatGPT subscription plan type, defaults to "free" if not present.
 	PlanType string `json:"plan_type,omitempty"`
+	// RefreshTokenExpiresAt is when the sign-in ends (RFC 3339), only when a token answer said
+	// (refresh_token_expires_in); never guessed.
+	RefreshTokenExpiresAt string `json:"refresh_token_expires_at,omitempty"`
 
 	// Metadata holds arbitrary key-value pairs injected via hooks.
 	// It is not exported to JSON directly to allow flattening during serialization.

@@ -50,6 +50,7 @@ func (e *CodexExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*
 	auth.Metadata["email"] = td.Email
 	// Use unified key in files
 	auth.Metadata["expired"] = td.Expire
+	cliproxyauth.NoteSignInEnd(auth, td.RefreshTokenExpiresAt)
 	auth.Metadata["type"] = "codex"
 	now := time.Now().Format(time.RFC3339)
 	auth.Metadata["last_refresh"] = now

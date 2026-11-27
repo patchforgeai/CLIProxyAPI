@@ -332,3 +332,20 @@ func TestARefreshOutlivesItsCaller(t *testing.T) {
 		t.Fatalf("deadline = %s, want within %s", deadline, timeout)
 	}
 }
+
+func TestARefreshNeverMakesASignInLastLonger(t *testing.T) {
+	const early, late = "2026-12-01T10:00:00Z", "2026-12-20T10:00:00Z"
+	cases := []struct{ kept, answered, want string }{
+		{early, late, early},
+		{late, early, early},
+		{"", late, late},   // a sign-in made before ends were kept learns its end
+		{early, "", early}, // an answer that gives none keeps the one kept
+		{"", "", ""},       // never a guess
+		{"not a time", "", ""},
+	}
+	for _, tc := range cases {
+		if got := EndAfterRefresh(tc.kept, tc.answered); got != tc.want {
+			t.Fatalf("EndAfterRefresh(%q, %q) = %q, want %q", tc.kept, tc.answered, got, tc.want)
+		}
+	}
+}

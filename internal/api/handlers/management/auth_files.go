@@ -127,6 +127,7 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 	auths := h.authManager.List()
 	observedAt := time.Now().UTC()
 	cooldownsKnown := !h.authManager.HomeEnabled()
+	signIns := c.GetBool(ConfigV8ContextKey) // devyre: the sign-in is listed on /v8 alone
 	if pagination.enabled {
 		matching := make([]*coreauth.Auth, 0, len(auths))
 		for _, auth := range auths {
@@ -147,6 +148,9 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 				if cooldownsKnown {
 					entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
 				}
+				if signIns {
+					devyreAddSignIn(entry, auth)
+				}
 				files = append(files, entry)
 			}
 		}
@@ -162,6 +166,9 @@ func (h *Handler) ListAuthFiles(c *gin.Context) {
 			entry["cooldowns"] = nil
 			if cooldownsKnown {
 				entry["cooldowns"] = coreauth.CooldownSnapshotForAuth(auth, observedAt)
+			}
+			if signIns {
+				devyreAddSignIn(entry, auth)
 			}
 			files = append(files, entry)
 		}

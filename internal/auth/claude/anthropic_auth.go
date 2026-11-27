@@ -42,7 +42,9 @@ type tokenResponse struct {
 	RefreshToken string `json:"refresh_token"`
 	TokenType    string `json:"token_type"`
 	ExpiresIn    int    `json:"expires_in"`
-	Organization struct {
+	// RefreshTokenExpiresIn is how long the sign-in lasts from this answer, when it says.
+	RefreshTokenExpiresIn *int64 `json:"refresh_token_expires_in"`
+	Organization          struct {
 		UUID string `json:"uuid"`
 		Name string `json:"name"`
 	} `json:"organization"`
@@ -357,6 +359,7 @@ func (o *ClaudeAuth) exchangeCodeForTokens(ctx context.Context, code, state stri
 	}
 
 	// Create token data.
+	answeredAt := time.Now()
 	tokenData := ClaudeTokenData{
 		AccessToken:      tokenResp.AccessToken,
 		RefreshToken:     tokenResp.RefreshToken,
@@ -364,7 +367,11 @@ func (o *ClaudeAuth) exchangeCodeForTokens(ctx context.Context, code, state stri
 		AccountUUID:      tokenResp.Account.UUID,
 		OrganizationUUID: tokenResp.Organization.UUID,
 		OrganizationName: tokenResp.Organization.Name,
-		Expire:           time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+		Expire:           answeredAt.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339),
+	}
+	// devyre: a new sign-in's end is the one its answer gives, never one kept from before.
+	if ends, ok := tokenrefresh.SignInEnd(answeredAt, tokenResp.RefreshTokenExpiresIn); ok {
+		tokenData.RefreshTokenExpiresAt = tokenrefresh.FormatEnd(ends)
 	}
 
 	// Replay the native login companion lookups and let the profile response win
@@ -395,7 +402,8 @@ func (o *ClaudeAuth) exchangeCodeForTokens(ctx context.Context, code, state stri
 }
 
 // RefreshTokens spends the refresh token at Claude's token endpoint, by the one refresh policy
-// (internal/auth/tokenrefresh), and returns the new tokens. It does not look the account's profile up: the caller saves the rotated
+// (internal/auth/tokenrefresh), and returns the new tokens with the end of the sign-in when the
+// answer gives it. It does not look the account's profile up: the caller saves the rotated
 // tokens first (FetchOAuthProfile after), so a lookup that fails or hangs never holds them off
 // disk. account names the credential in logs.
 func (o *ClaudeAuth) RefreshTokens(ctx context.Context, account, refreshToken string) (*ClaudeTokenData, error) {
@@ -437,6 +445,9 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, account, refreshToken st
 		RefreshToken: answer.RefreshToken,
 		Expire:       answer.ExpiresAt().Format(time.RFC3339),
 	}
+	if ends, ok := answer.SignInEndsAt(); ok {
+		tokenData.RefreshTokenExpiresAt = tokenrefresh.FormatEnd(ends)
+	}
 	return tokenData, nil
 }
 
@@ -460,6 +471,8 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 		OrganizationName: bundle.TokenData.OrganizationName,
 		DeviceIDs:        append([]string(nil), bundle.DeviceIDs...),
 		Expire:           bundle.TokenData.Expire,
+
+		RefreshTokenExpiresAt: bundle.TokenData.RefreshTokenExpiresAt,
 	}
 
 	return storage
@@ -489,4 +502,5 @@ func (o *ClaudeAuth) UpdateTokenStorage(storage *ClaudeTokenStorage, tokenData *
 		storage.OrganizationName = tokenData.OrganizationName
 	}
 	storage.Expire = tokenData.Expire
+	storage.RefreshTokenExpiresAt = tokenrefresh.EndAfterRefresh(storage.RefreshTokenExpiresAt, tokenData.RefreshTokenExpiresAt)
 }

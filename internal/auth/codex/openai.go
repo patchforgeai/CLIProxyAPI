@@ -27,6 +27,9 @@ type CodexTokenData struct {
 	Expire string `json:"expired"`
 	// PlanType is the subscription plan type (e.g. "free", "plus", "pro", "team")
 	PlanType string `json:"plan_type,omitempty"`
+	// RefreshTokenExpiresAt is when the sign-in ends (RFC 3339), when the token answer gave
+	// refresh_token_expires_in; empty otherwise (OpenAI's answers have not, so far).
+	RefreshTokenExpiresAt string `json:"refresh_token_expires_at,omitempty"`
 }
 
 // CodexAuthBundle aggregates all authentication-related data after the OAuth flow is complete.

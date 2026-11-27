@@ -82,7 +82,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/devyre_t3_hub_contract_test.go` | `TestT3Hub_*`, the T3 Code hub contract |
 | `internal/api/devyre_tailnet_auth.go` | Keyless proxy API for trusted requests (`proxy-api`), the key-only `/v1/ws` wrapper and the anti-framing headers of the panel pages |
 | `internal/api/devyre_tailnet_auth_test.go` | Full-stack `tailnet-auth` tests through the real server and config loader: session endpoint, token-bearing routes, CORS, proxy principal, `/v1/ws`, framing, the tailnet name on the API port, the rendered proxy debug lines |
-| `internal/api/handlers/management/devyre_auth_files.go` | `devyreAddAccountUUID`: the auth-file listing's `account_uuid` |
+| `internal/api/handlers/management/devyre_auth_files.go` | `devyreAddAccountUUID`: the auth-file listing's `account_uuid`; `devyreAddSignIn`: the v8 listing's `sign_in` |
+| `internal/api/handlers/management/devyre_sign_in_listing_test.go` | The v8 listing's `sign_in`, which the v0 listing leaves out |
 | `internal/api/handlers/management/devyre_auth_seal_test.go` | With a key, through the routes: an upload stored sealed, the listing's `account_uuid`, a download answering the JSON, a status change written sealed |
 | `internal/api/handlers/management/devyre_codex_recovery_test.go` | Through `APICall` and the poller: a fresh usage response lifts a ChatGPT account's usage-limit hold; one that shows a limit reached anywhere, a cached one and a malformed one do not; a per-minute rate limit stands; another account's usage lifts nothing |
 | `internal/api/handlers/management/devyre_oauth_redirect.go` | `redirect_port` on the Claude, Codex and Antigravity OAuth starts: parsing, the refusals, and the redirect-aware authorize URL and exchange |
@@ -124,6 +125,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/authseal/authseal.go` | The auth files' key (`SetKey`), the sealed format (`Seal`, `Open`, the name as associated data), and the reads and writes every auth file goes through (`ReadFile`, `WriteFile`, `WriteJSON`) |
 | `internal/authseal/replace.go`, `replace_windows.go`, `replace_darwin.go`, `replace_other.go` | The atomic replace: a temporary file beside the auth file, its creation time kept (Windows, macOS), the rename tried again while another handle holds the file (Windows) |
 | `internal/auth/tokenrefresh/tokenrefresh.go` | The one refresh policy of Claude's and ChatGPT's accounts (`Refresh`): one request at a time a token, at most two a provider, a 429 holding the provider's next refreshes until its Retry-After, a replay only after a 5xx, and a `Failure` whose `Kind` says what it means for the sign-in (see [A sign-in's life](#a-sign-ins-life)) |
+| `internal/auth/claude/devyre_sign_in_end_test.go` | A sign-in keeps the end Claude's answer gives, a refresh the earlier one, an answer without one leaves it unknown |
 | `internal/auth/tokenrefresh/tokenrefresh_test.go` | Each answer Claude Code 2.1.332 and Codex 0.162.1 name, and what it means; a request that never left told from one whose answer was lost, through a real listener; an unreadable 200 never replayed; a 429's hold on its provider alone; Retry-After's forms and bounds; the end of a sign-in an answer gives; one request a token and two a provider; a refresh that outlives its caller |
 | `internal/authseal/migrate.go` | `SealDir`: the plaintext auth files sealed at start, the rest left as they are |
 | `internal/authseal/authseal_test.go`, `migrate_test.go`, `replace_windows_test.go`, `replace_darwin_test.go`, `replace_other_test.go` | Round trips and every refusal (another key, another name, a changed byte, malformed, no key); plaintext read with and without a key; the mode, no temporary file left, the creation time kept, the rename while a reader holds the file, writes through a link, the encoder's bytes; the migration: what it seals and what it leaves, run twice, creation times, without a key |
@@ -198,6 +200,8 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/api/handlers/openai/devyre_responses_interrupt_test.go` | In both modes: what Codex does on a steer (the interrupt unchanged on the upstream socket, its zero-output end passed through, the next create on the same socket, no error); interrupts before any response, after one ended and for an unknown id, answered without reaching upstream; the disabled-credential refusal |
 | `sdk/auth/devyre_filestore_seal_test.go` | The store with a key: a sign-in's file and a refresh's written sealed and listed back, an unchanged save not written, another key's file replaced by a save, nothing sealed listed without the key |
 | `sdk/cliproxy/auth/devyre_codex_recovery_test.go` | ChatGPT recovery lifts the credential-wide usage-limit block for every model, several models rejected together in either order, and a model-scoped usage limit; it needs new evidence and a response with room, keeps a per-minute rate limit, a model at capacity and a rejection that raced the usage call, and each provider's response lifts its own holds alone |
+| `sdk/cliproxy/auth/devyre_sign_in.go` | A sign-in's life: its end in the token file (`MetadataSignInEndsAt`, `SignInEndsAt`, `NoteSignInEnd`) |
+| `sdk/cliproxy/auth/devyre_sign_in_test.go` | A refresh keeps the earlier end, learns one it had none of, never guesses; a new sign-in takes nothing of the old one's end |
 | `sdk/cliproxy/auth/devyre_focus.go` | `devyreFocusTakesOver`: whether session affinity gives a bound session up to a usable focus |
 | `sdk/cliproxy/auth/devyre_focus_test.go` | The focus in the selector (urgency, 5h, 7d and model-scoped gates, tiers, other providers, ends, rotation, the `focus` log reason) and under session affinity (explicit sessions, the fallback key, LCP, the log line, through the manager) |
 | `sdk/cliproxy/auth/devyre_limit_refusal.go` | `devyreLimitSummary`: a request no credential can take, while each one that takes it again in time is held for a limit, is refused as that limit (the model cooldown, ending as the first hold does) whatever keeps the others out until someone acts, a refused sign-in among it (`devyreSignedOut`); `devyreLimitOverSignIn`: a request whose last try met a refused sign-in while the rest are so held ends as the limit too |
@@ -247,15 +251,17 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `go.mod`, `go.sum` | `golang.org/x/net` at least v0.60.0, `golang.org/x/crypto` v0.57.0, `golang.org/x/text` v0.42.0 and `github.com/go-git/go-git/v6` v6.0.0-alpha.5, `github.com/andybalholm/brotli` v1.2.7 and `github.com/klauspost/compress` v1.20.3: the releases that fix GO-2026-6603, -6610, -6611, -6612, -6617, -6629, -6354, -6355, -6213, -6214, -6888 and -6865, which govulncheck found the server reaching. On a conflict take the newer of upstream's version and ours. |
 | `internal/api/handlers/management/api_tools.go` | Three hunks hook the usage cache into `APICall`: a lookup after `auth_index` and `url` are parsed, complete or fail after the upstream call, and a record on success. `/v0` and `/v8` share this handler. |
 | `internal/api/handlers/management/quota.go` | Two hunks in `ResetQuota`: the body's `observed_before`, read by `h.devyreResetAt`, which may answer `kept` before upstream resets anything; and after upstream reset the cooldown, `h.devyreQuotaReset(updated, resetAt)` forgets the credential's readings up to that time (`devyre_quota_reset.go`). |
-| `internal/api/handlers/management/auth_files.go` | `extractCodexIDTokenClaims` also emits `chatgpt_plan_type`, the key T3 Code reads. `listAuthFilesFromDisk` reads through `authseal.ReadFile`, and `buildAuthFileEntryLocked` lists `account_uuid` (`devyreAddAccountUUID`). |
+| `internal/api/handlers/management/auth_files.go` | `extractCodexIDTokenClaims` also emits `chatgpt_plan_type`, the key T3 Code reads. `listAuthFilesFromDisk` reads through `authseal.ReadFile`, and `buildAuthFileEntryLocked` lists `account_uuid` (`devyreAddAccountUUID`). `ListAuthFiles` adds `sign_in` (`devyreAddSignIn`) to each entry of a v8 listing. |
 | `internal/api/handlers/management/auth_files_crud.go` | `DownloadAuthFile` and `buildAuthFromFileData` read through `authseal.ReadFile`, `writeAuthFile` writes through `authseal.WriteFile`. |
 | `internal/api/handlers/management/auth_files_fields.go` | `setSourceAuthFileDisabled` reads and writes through `authseal`, `mergeExistingAuthFileMetadata` and `saveTokenRecord` read through `authseal.ReadFile`. |
 | `internal/api/handlers/management/auth_files_provider_oauth.go` | `RequestAnthropicToken`, `RequestCodexToken` and `RequestAntigravityToken` read `redirect_port` first (`devyreOAuthRedirect`; Antigravity's redirect is `antigravity.LoopbackRedirectURI`, in `internal/auth/antigravity/devyre_redirect.go`), and build the authorize URL and exchange the code through `devyreClaudeAuthURL`/`devyreClaudeExchange` and `devyreCodexAuthURL`/`devyreCodexExchange`, which fall back to upstream's calls without it. |
 | `internal/auth/claude/anthropic_auth.go` | `GenerateAuthURL` and `ExchangeCodeForTokens` became wrappers passing `RedirectURI` to unexported `generateAuthURL` and `exchangeCodeForTokens`, which take the redirect as a parameter. `RefreshTokens` takes the credential's name and sends its request through `tokenrefresh.Refresh`, without the profile lookup; the refresh's own block, single flight and retry loop (`RefreshTokensWithRetry`) are gone. |
 | `internal/auth/codex/openai_auth.go` | `GenerateAuthURL` became a wrapper passing `RedirectURI` to an unexported `generateAuthURL`. `RefreshTokens` takes the credential's name and sends its request through `tokenrefresh.Refresh`; its single flight and retry loop (`RefreshTokensWithRetry`, `isNonRetryableRefreshErr`) are gone. |
 | `internal/auth/claude/anthropic_auth_test.go`, `internal/auth/codex/openai_auth_test.go` | The refresh tests call `RefreshTokens` with a credential name and reset `tokenrefresh`; a Claude refresh no longer looks the profile up; ChatGPT's no longer replays a lost answer, honours Retry-After and names the end of a sign-in. |
-| `internal/runtime/executor/claude_executor_auth.go`, `codex_executor_auth.go`, `cmd/fetch_codex_models/main.go` | Call `RefreshTokens` with the credential's name; Claude's executor looks the profile up after it. |
-| `internal/auth/claude/token.go`, `internal/auth/codex/token.go`, `internal/auth/kimi/token.go`, `internal/auth/xai/token.go`, `internal/auth/vertex/vertex_credentials.go` | `SaveTokenToFile` writes through `authseal.WriteJSON` (the bytes its encoder wrote, sealed with a key, replaced atomically) in place of `os.Create` and the encoder. |
+| `internal/runtime/executor/claude_executor_auth.go`, `codex_executor_auth.go`, `cmd/fetch_codex_models/main.go` | Call `RefreshTokens` with the credential's name; Claude's executor looks the profile up after it. The executors keep the answer's end of the sign-in (`NoteSignInEnd`). |
+| `internal/auth/claude/token.go`, `internal/auth/codex/token.go`, `internal/auth/kimi/token.go`, `internal/auth/xai/token.go`, `internal/auth/vertex/vertex_credentials.go` | `SaveTokenToFile` writes through `authseal.WriteJSON` (the bytes its encoder wrote, sealed with a key, replaced atomically) in place of `os.Create` and the encoder. Claude's and Codex's storages carry `RefreshTokenExpiresAt` (`refresh_token_expires_at`). |
+| `internal/auth/claude/anthropic.go`, `internal/auth/codex/openai.go` | `ClaudeTokenData` and `CodexTokenData` carry `RefreshTokenExpiresAt`, which the code exchange sets from the answer's `refresh_token_expires_in`, `CreateTokenStorage` copies and `UpdateTokenStorage` keeps the earlier of (`tokenrefresh.EndAfterRefresh`). |
+| `sdk/cliproxy/auth/metadata_merge.go` | `IsAuthTokenPayloadKey` takes `refresh_token_expires_at`: a new sign-in never takes the old one's end, and a refresh's always applies. |
 | `internal/auth/meta/meta.go` | `SaveTokenToFile` reads the old file through `authseal.ReadFile` and writes through `authseal.WriteFile` in place of its own temporary file and rename. |
 | `internal/api/handlers/management/config_basic.go` | `normalizeRoutingStrategy` accepts `expiring-first`, so `PUT /routing/strategy` does too. |
 | `internal/api/handlers/management/handler.go` | Two hunks: `Middleware()` asks `devyreTailnetAuthorize` first and skips the key for a trusted request, and the missing-key branch of `AuthenticateManagementKey` no longer calls `fail()`, so only a wrong key counts toward the ban (RESP's commands before `AUTH`, which ask with an empty key only to learn whether the IP is banned, included). |
@@ -343,6 +349,24 @@ have spent the token, and the replay then fails for good. Now, for both:
   on hold or refused, which no retry can change; unreachable (the request never left: no
   connection, by the HTTP trace, or a DNS or dial error), lost (it left and no readable answer
   came), rate limited, a server error, blocked (a Cloudflare page), or another 4xx.
+
+### When a sign-in ends
+
+Claude ends a sign-in about four weeks after it was made (Machine's log, 2026-11-17 to 11-26: four
+accounts refused at a routine refresh with `invalid_grant` "Refresh token expired", 27 to 29 days
+after their first sign-in, the refresh four hours before having worked). Its token answer says
+when, in `refresh_token_expires_in`, and Claude Code 2.1.332 keeps it as `refreshTokenExpiresAt`:
+now plus it at a sign-in, the earlier of the kept and the new one at a refresh, since refreshing
+never extends a sign-in.
+
+The fork keeps it the same way in the sealed token file, as `refresh_token_expires_at`
+(`sdk/cliproxy/auth/devyre_sign_in.go`), and lists it in the v8 credential listing as
+`sign_in.ends_at` (never in `/v0`). A new sign-in replaces it: the key is a token payload key, which
+a sign-in never takes from the file it replaces. ChatGPT's end is kept only if its answer gives
+`refresh_token_expires_in`; its ID token says nothing of it. A sign-in made before ends were kept
+has none until an answer gives one (Claude Code, which would keep it unknown, defaults a sign-in
+without one to 30 days; this guesses nothing), and none is ever inferred from a file's times:
+Windows and macOS keep a file's creation time across a sign-in again.
 
 ## Routing and quota readings
 
@@ -900,7 +924,8 @@ go test ./internal/api/ -run 'T3Hub|QuotaReadings|RoutingFocus|TailnetAuth|Devyr
 go test ./internal/cmd/ -run 'Lifeline|PasswordLine|ReportListen|TakenPort|KeyLine'
 go test ./cmd/server/ -run 'LifelineStdin|PasswordStdin|AuthFilesKeyStdin|DevyreSealAuthDir'
 go test ./internal/authseal/
-go test ./internal/auth/tokenrefresh/ ./internal/auth/claude/ ./internal/auth/codex/ -run "Refresh|Answers|Request|Transport|Unreadable|429|RetryAfter|Answer|OneRefresh"
+go test ./internal/auth/tokenrefresh/ ./internal/auth/claude/ ./internal/auth/codex/ -run "Refresh|Answers|Request|Transport|Unreadable|429|RetryAfter|Answer|OneRefresh|Longer|Devyre"
+go test ./sdk/cliproxy/auth/ ./internal/api/handlers/management/ -run "DevyreA|DevyreTheV8"
 go test ./internal/watcher/ -run Devyre
 go test ./sdk/auth/ -run Devyre
 go test ./internal/managementasset/ -run DevyrePanel

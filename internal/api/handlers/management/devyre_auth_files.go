@@ -20,3 +20,20 @@ func devyreAddAccountUUID(entry gin.H, auth *coreauth.Auth) {
 		}
 	}
 }
+
+// devyreAddSignIn lists the credential's sign-in, on /v8/management/credentials alone (the
+// deprecated /v0 listing stays as upstream has it): `sign_in.ends_at`, when the provider ends
+// the sign-in, while an answer has said (coreauth.SignInEndsAt; devyre/README.md, "A sign-in's
+// life").
+func devyreAddSignIn(entry gin.H, auth *coreauth.Auth) {
+	if entry == nil || auth == nil {
+		return
+	}
+	signIn := gin.H{}
+	if ends, ok := coreauth.SignInEndsAt(auth); ok {
+		signIn["ends_at"] = ends.UTC()
+	}
+	if len(signIn) > 0 {
+		entry["sign_in"] = signIn
+	}
+}

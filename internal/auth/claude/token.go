@@ -49,6 +49,11 @@ type ClaudeTokenStorage struct {
 	// Expire is the timestamp when the current access token expires.
 	Expire string `json:"expired"`
 
+	// RefreshTokenExpiresAt is when the sign-in ends (RFC 3339): Claude ends a sign-in at a time
+	// it gives at sign-in (refresh_token_expires_in), which refreshing never moves later. Empty
+	// while no answer has said.
+	RefreshTokenExpiresAt string `json:"refresh_token_expires_at,omitempty"`
+
 	// Metadata holds arbitrary key-value pairs injected via hooks.
 	// It is not exported to JSON directly to allow flattening during serialization.
 	Metadata map[string]any `json:"-"`

@@ -227,6 +227,44 @@ func SignInEnd(receivedAt time.Time, expiresIn *int64) (time.Time, bool) {
 	return receivedAt.Add(time.Duration(*expiresIn) * time.Second).UTC().Truncate(time.Second), true
 }
 
+// EndAfterRefresh is when a sign-in ends once a refresh answered (RFC 3339, empty when unknown):
+// the earlier of the end it kept and the end the answer gave, as Claude Code keeps it, since a
+// refresh never makes a sign-in last longer; the answer's when none was kept (a sign-in made
+// before ends were kept learns its end from the first answer that gives one); the kept one when
+// the answer gave none. Never a guess: an end no answer gave stays unknown.
+func EndAfterRefresh(kept, answered string) string {
+	keptAt, keptOK := ParseEnd(kept)
+	answeredAt, answeredOK := ParseEnd(answered)
+	switch {
+	case keptOK && answeredOK && answeredAt.Before(keptAt):
+		return FormatEnd(answeredAt)
+	case keptOK:
+		return FormatEnd(keptAt)
+	case answeredOK:
+		return FormatEnd(answeredAt)
+	default:
+		return ""
+	}
+}
+
+// ParseEnd reads an end as the token files keep it (RFC 3339).
+func ParseEnd(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	at, err := time.Parse(time.RFC3339, value)
+	if err != nil || at.IsZero() {
+		return time.Time{}, false
+	}
+	return at, true
+}
+
+// FormatEnd writes an end as the token files keep it: RFC 3339 in UTC, to the second.
+func FormatEnd(at time.Time) string {
+	return at.UTC().Truncate(time.Second).Format(time.RFC3339)
+}
+
 // Exchange is one provider's refresh request.
 type Exchange struct {
 	// Provider names the provider ("claude", "codex"): its refreshes share the hold and slots.
