@@ -109,3 +109,19 @@ func TestDevyreTheV8ListingSaysWhetherTheRouterRenewsTheToken(t *testing.T) {
 		t.Fatalf("v8 sign_in = %#v, want renewed and fine", signIn)
 	}
 }
+
+func TestDevyreTheV8ListingListsASignInWithNothingToSay(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID: "claude-c@example.com.json", FileName: "claude-c@example.com.json", Provider: "claude",
+		Attributes: map[string]string{"runtime_only": "true"},
+		Metadata:   map[string]any{"email": "c@example.com"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if signIn, ok := devyreListCredentials(t, h, true)["sign_in"].(map[string]any); !ok || len(signIn) != 0 {
+		t.Fatalf("v8 sign_in = %#v, want an empty object", signIn)
+	}
+}

@@ -348,3 +348,28 @@ func TestDevyreARefreshNotSentChangesNothing(t *testing.T) {
 		t.Fatalf("sign-in = %+v, status %q, want untouched", status, got.StatusMessage)
 	}
 }
+
+// The backoff of a request that never left grows from the sign-in's own count, which the same
+// tokens read again (the start's first full load) do not reset.
+func TestDevyreTheBackoffSurvivesTheFileReadAgain(t *testing.T) {
+	unreachable := &tokenrefresh.Failure{Provider: "claude", Kind: tokenrefresh.KindUnreachable, Err: errors.New("dial: no route to host")}
+	manager, _, _, auth := signInTestManager(t, -time.Hour, unreachable, unreachable)
+	manager.refreshAuth(context.Background(), auth.ID)
+	echo := currentAuth(t, manager, auth.ID)
+	fresh := &Auth{ID: auth.ID, Provider: "claude", Status: StatusActive, Metadata: map[string]any{}}
+	for key, value := range echo.Metadata {
+		fresh.Metadata[key] = value
+	}
+	if _, err := manager.Update(WithSkipPersist(context.Background()), fresh); err != nil {
+		t.Fatal(err)
+	}
+	manager.mu.Lock()
+	manager.auths[auth.ID].NextRefreshAfter = time.Time{}
+	manager.mu.Unlock()
+	before := time.Now()
+	manager.refreshAuth(context.Background(), auth.ID)
+	got := currentAuth(t, manager, auth.ID)
+	if wait := got.NextRefreshAfter.Sub(before); wait < 19*time.Second || wait > 21*time.Second {
+		t.Fatalf("second failure waits %s, want 20 s (the count kept across the file read again)", wait)
+	}
+}

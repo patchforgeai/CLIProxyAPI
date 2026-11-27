@@ -137,15 +137,13 @@ func applyRefreshFailure(current *Auth, err error, failedAccessToken string, now
 	}
 
 	current.LastError = refreshErrorFromError(err)
-	failures := current.RefreshFailures + 1
-	if result.from.State != SignInRetrying {
-		failures = 1
+	// Counted by the sign-in's own state, which the same tokens read again keep: the file's
+	// first read after a start replaces the credential, RefreshFailures with it.
+	failures, since := 1, now
+	if retry := current.devyreSignIn; retry.active() {
+		failures, since = retry.failures+1, retry.since
 	}
 	current.RefreshFailures = failures
-	since := now
-	if retry := current.devyreSignIn; retry.active() {
-		since = retry.since
-	}
 	current.devyreSignIn = signInRetry{reason: outcome.kind, answer: outcome.answer, since: since, failures: failures}
 	nextTry := now.Add(passingRefreshBackoff(outcome, failures))
 	switch {

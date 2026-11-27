@@ -21,8 +21,9 @@ func devyreAddAccountUUID(entry gin.H, auth *coreauth.Auth) {
 	}
 }
 
-// devyreAddSignIn lists the credential's sign-in, on /v8/management/credentials alone (the
-// deprecated /v0 listing stays as upstream has it; devyre/README.md, "A sign-in's life"):
+// devyreAddSignIn lists the credential's sign-in on /v8/management/credentials alone, for every
+// credential, empty when there is nothing to say (the deprecated /v0 listing stays as upstream
+// has it; devyre/README.md, "A sign-in's life"):
 //
 //   - `ends_at`: when the provider ends the sign-in, while an answer has said;
 //   - `access_expires_at`: when its access token runs out, and `renews`: whether the router
@@ -56,7 +57,7 @@ func devyreAddSignIn(entry gin.H, auth *coreauth.Auth) {
 			signIn["next_try_at"] = status.NextTryAt.UTC()
 		}
 	}
-	if len(signIn) > 0 {
-		entry["sign_in"] = signIn
-	}
+	// Listed even with nothing to say: a supervising app then knows this router says it, and
+	// reads an end it does not give as unknown rather than as a router that never would.
+	entry["sign_in"] = signIn
 }

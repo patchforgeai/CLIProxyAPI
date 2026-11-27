@@ -87,7 +87,7 @@ func (m *Manager) DrainRefreshes(wait time.Duration) []string {
 	sort.Strings(left)
 	for _, id := range left {
 		log.WithFields(log.Fields{"credential": id, "step": "shutdown"}).
-			Warnf("the refresh of %s is still in flight after %s at shutdown: its answer may be lost", id, wait)
+			Warnf("the refresh of %s is still in flight after %s at shutdown and is abandoned: if its request reached the provider, the refresh token it sent is spent and its answer lost", id, wait)
 	}
 	return left
 }
