@@ -105,6 +105,8 @@ type Auth struct {
 
 	recentRequests recentRequestRing `json:"-"`
 	indexAssigned  bool              `json:"-"`
+	// devyre: a passing refresh failure (devyre_sign_in.go), in memory.
+	devyreSignIn signInRetry
 }
 
 const (

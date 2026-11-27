@@ -147,7 +147,9 @@ func TestRefreshAuthForRequest_DisabledAuth_InvalidGrant_NeverRetries(t *testing
 	}
 }
 
-func TestRefreshAuthForRequest_EnabledAuth_InvalidGrant_ExponentialBackoff(t *testing.T) {
+// devyre: an invalid grant ends the sign-in at once (devyre_refresh_outcome.go). Upstream
+// replayed the dead token every 1 to 30 minutes for good.
+func TestRefreshAuthForRequest_EnabledAuth_InvalidGrant_EndsTheSignIn(t *testing.T) {
 	ctx := context.Background()
 	manager := NewManager(nil, &RoundRobinSelector{}, nil)
 	invalidGrantErr := oauthStatusError{
@@ -177,49 +179,22 @@ func TestRefreshAuthForRequest_EnabledAuth_InvalidGrant_ExponentialBackoff(t *te
 		t.Fatalf("Register error: %v", err)
 	}
 
-	// 1st failure: backoff 1m
-	t1 := time.Now()
 	_, _ = manager.refreshAuthForRequest(ctx, auth.ID, "")
 	manager.mu.RLock()
-	current := manager.auths[auth.ID]
+	current := manager.auths[auth.ID].Clone()
 	manager.mu.RUnlock()
-	if current.Status != StatusError {
-		t.Fatalf("attempt 1: status = %v, want StatusError", current.Status)
+	if status := SignInStatusOf(current); status.State != SignInEnded {
+		t.Fatalf("sign-in = %+v, want ended", status)
 	}
-	if current.RefreshFailures != 1 {
-		t.Fatalf("attempt 1: RefreshFailures = %d, want 1", current.RefreshFailures)
+	if !hasUnauthorizedAuthFailure(current) || !current.NextRefreshAfter.IsZero() {
+		t.Fatalf("an expired credential whose sign-in ended: unavailable %t, next refresh %v", current.Unavailable, current.NextRefreshAfter)
 	}
-	diff1 := current.NextRefreshAfter.Sub(t1)
-	if diff1 < 50*time.Second || diff1 > 70*time.Second {
-		t.Fatalf("attempt 1: backoff diff = %v, want ~1m", diff1)
+	if manager.shouldRefresh(current, now.Add(time.Hour)) {
+		t.Fatal("an ended sign-in is due again")
 	}
-
-	// 2nd failure: backoff 2m
-	t2 := time.Now()
 	_, _ = manager.refreshAuthForRequest(ctx, auth.ID, "")
-	manager.mu.RLock()
-	current = manager.auths[auth.ID]
-	manager.mu.RUnlock()
-	if current.RefreshFailures != 2 {
-		t.Fatalf("attempt 2: RefreshFailures = %d, want 2", current.RefreshFailures)
-	}
-	diff2 := current.NextRefreshAfter.Sub(t2)
-	if diff2 < 110*time.Second || diff2 > 130*time.Second {
-		t.Fatalf("attempt 2: backoff diff = %v, want ~2m", diff2)
-	}
-
-	// 3rd failure: backoff 4m
-	t3 := time.Now()
-	_, _ = manager.refreshAuthForRequest(ctx, auth.ID, "")
-	manager.mu.RLock()
-	current = manager.auths[auth.ID]
-	manager.mu.RUnlock()
-	if current.RefreshFailures != 3 {
-		t.Fatalf("attempt 3: RefreshFailures = %d, want 3", current.RefreshFailures)
-	}
-	diff3 := current.NextRefreshAfter.Sub(t3)
-	if diff3 < 230*time.Second || diff3 > 250*time.Second {
-		t.Fatalf("attempt 3: backoff diff = %v, want ~4m", diff3)
+	if got := executor.refreshCalls.Load(); got != 1 {
+		t.Fatalf("refresh calls = %d, want 1: the dead token was sent again", got)
 	}
 }
 
@@ -296,11 +271,7 @@ func TestRefreshAuthForRequest_RawFmtError_RecognizesInvalidGrant(t *testing.T) 
 	current := manager.auths[auth.ID]
 	manager.mu.RUnlock()
 
-	if current.RefreshFailures != 1 {
-		t.Fatalf("RefreshFailures = %d, want 1 (should recognize raw fmt.Errorf invalid_grant)", current.RefreshFailures)
-	}
-	diff := current.NextRefreshAfter.Sub(now)
-	if diff < 50*time.Second || diff > 70*time.Second {
-		t.Fatalf("backoff diff = %v, want ~1m", diff)
+	if status := SignInStatusOf(current); status.State != SignInEnded || !current.NextRefreshAfter.IsZero() {
+		t.Fatalf("sign-in = %+v, next refresh %v: want a raw fmt.Errorf invalid_grant to end it", status, current.NextRefreshAfter)
 	}
 }

@@ -83,7 +83,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/api/devyre_tailnet_auth.go` | Keyless proxy API for trusted requests (`proxy-api`), the key-only `/v1/ws` wrapper and the anti-framing headers of the panel pages |
 | `internal/api/devyre_tailnet_auth_test.go` | Full-stack `tailnet-auth` tests through the real server and config loader: session endpoint, token-bearing routes, CORS, proxy principal, `/v1/ws`, framing, the tailnet name on the API port, the rendered proxy debug lines |
 | `internal/api/handlers/management/devyre_auth_files.go` | `devyreAddAccountUUID`: the auth-file listing's `account_uuid`; `devyreAddSignIn`: the v8 listing's `sign_in` |
-| `internal/api/handlers/management/devyre_sign_in_listing_test.go` | The v8 listing's `sign_in`, which the v0 listing leaves out |
+| `internal/api/handlers/management/devyre_sign_in_listing_test.go` | The v8 listing's `sign_in` (its end, its access token's, how it stands), which the v0 listing leaves out |
 | `internal/api/handlers/management/devyre_auth_seal_test.go` | With a key, through the routes: an upload stored sealed, the listing's `account_uuid`, a download answering the JSON, a status change written sealed |
 | `internal/api/handlers/management/devyre_codex_recovery_test.go` | Through `APICall` and the poller: a fresh usage response lifts a ChatGPT account's usage-limit hold; one that shows a limit reached anywhere, a cached one and a malformed one do not; a per-minute rate limit stands; another account's usage lifts nothing |
 | `internal/api/handlers/management/devyre_oauth_redirect.go` | `redirect_port` on the Claude, Codex and Antigravity OAuth starts: parsing, the refusals, and the redirect-aware authorize URL and exchange |
@@ -200,8 +200,11 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `sdk/api/handlers/openai/devyre_responses_interrupt_test.go` | In both modes: what Codex does on a steer (the interrupt unchanged on the upstream socket, its zero-output end passed through, the next create on the same socket, no error); interrupts before any response, after one ended and for an unknown id, answered without reaching upstream; the disabled-credential refusal |
 | `sdk/auth/devyre_filestore_seal_test.go` | The store with a key: a sign-in's file and a refresh's written sealed and listed back, an unchanged save not written, another key's file replaced by a save, nothing sealed listed without the key |
 | `sdk/cliproxy/auth/devyre_codex_recovery_test.go` | ChatGPT recovery lifts the credential-wide usage-limit block for every model, several models rejected together in either order, and a model-scoped usage limit; it needs new evidence and a response with room, keeps a per-minute rate limit, a model at capacity and a rejection that raced the usage call, and each provider's response lifts its own holds alone |
-| `sdk/cliproxy/auth/devyre_sign_in.go` | A sign-in's life: its end in the token file (`MetadataSignInEndsAt`, `SignInEndsAt`, `NoteSignInEnd`) |
+| `sdk/cliproxy/auth/devyre_sign_in.go` | A sign-in's life: its end in the token file (`MetadataSignInEndsAt`, `SignInEndsAt`, `NoteSignInEnd`), how it stands (`SignInStatusOf`: fine, retrying or ended), the ended mark the token file keeps (`MetadataSignInEnded`), and what the same tokens read again keep of it (`devyreKeepSignInState`) |
 | `sdk/cliproxy/auth/devyre_sign_in_test.go` | A refresh keeps the earlier end, learns one it had none of, never guesses; a new sign-in takes nothing of the old one's end |
+| `sdk/cliproxy/auth/devyre_refresh_outcome.go` | What a failed refresh does (`applyRefreshFailure`): a sign-in the provider ended, never refreshed again and written to the token file, or one retrying by why it failed (`passingRefreshBackoff`); each change logged at info (`logSignInChange`) |
+| `sdk/cliproxy/auth/devyre_refresh_outcome_test.go` | Claude's time limit ends the sign-in at once and for a restart too; an ended sign-in serves while its access token runs, and a request's 401 sends nothing; passing failures retried in 10, 20, 40 s, 5 min or a 429's wait, retrying since the first, fine again after a refresh that works; the same tokens read again keep it, a new sign-in is a new chance; every change logged; a wake holds due refreshes |
+| `sdk/cliproxy/auth/devyre_wake.go` | After a wake (a pass of the refresh loop far later than its timer allows, by either clock), due refreshes wait 20 s for the network |
 | `sdk/cliproxy/auth/devyre_focus.go` | `devyreFocusTakesOver`: whether session affinity gives a bound session up to a usable focus |
 | `sdk/cliproxy/auth/devyre_focus_test.go` | The focus in the selector (urgency, 5h, 7d and model-scoped gates, tiers, other providers, ends, rotation, the `focus` log reason) and under session affinity (explicit sessions, the fallback key, LCP, the log line, through the manager) |
 | `sdk/cliproxy/auth/devyre_limit_refusal.go` | `devyreLimitSummary`: a request no credential can take, while each one that takes it again in time is held for a limit, is refused as that limit (the model cooldown, ending as the first hold does) whatever keeps the others out until someone acts, a refused sign-in among it (`devyreSignedOut`); `devyreLimitOverSignIn`: a request whose last try met a refused sign-in while the rest are so held ends as the limit too |
@@ -261,7 +264,12 @@ These are all the upstream files the fork edits. Each edit is a small hunk, mark
 | `internal/runtime/executor/claude_executor_auth.go`, `codex_executor_auth.go`, `cmd/fetch_codex_models/main.go` | Call `RefreshTokens` with the credential's name; Claude's executor looks the profile up after it. The executors keep the answer's end of the sign-in (`NoteSignInEnd`). |
 | `internal/auth/claude/token.go`, `internal/auth/codex/token.go`, `internal/auth/kimi/token.go`, `internal/auth/xai/token.go`, `internal/auth/vertex/vertex_credentials.go` | `SaveTokenToFile` writes through `authseal.WriteJSON` (the bytes its encoder wrote, sealed with a key, replaced atomically) in place of `os.Create` and the encoder. Claude's and Codex's storages carry `RefreshTokenExpiresAt` (`refresh_token_expires_at`). |
 | `internal/auth/claude/anthropic.go`, `internal/auth/codex/openai.go` | `ClaudeTokenData` and `CodexTokenData` carry `RefreshTokenExpiresAt`, which the code exchange sets from the answer's `refresh_token_expires_in`, `CreateTokenStorage` copies and `UpdateTokenStorage` keeps the earlier of (`tokenrefresh.EndAfterRefresh`). |
-| `sdk/cliproxy/auth/metadata_merge.go` | `IsAuthTokenPayloadKey` takes `refresh_token_expires_at`: a new sign-in never takes the old one's end, and a refresh's always applies. |
+| `sdk/cliproxy/auth/metadata_merge.go` | `IsAuthTokenPayloadKey` takes `refresh_token_expires_at` and `sign_in_ended`: a new sign-in never takes the old one's end, and a refresh's always applies. `MergeRefreshedAuth` takes the refresh's sign-in state. |
+| `sdk/cliproxy/auth/conductor_refresh.go` | `shouldRefresh`, `markRefreshPending`, `tryRefreshAfterUnauthorized` and `refreshAuthForRequestAtEpoch` (unless forced) leave an ended sign-in alone (`hasEndedSignIn`). A failed refresh goes to `applyRefreshFailure` in place of upstream's branch (and its invalid-grant backoff, `invalidGrantBackoffDuration`, which is gone); one that worked clears the sign-in state and logs the change. |
+| `sdk/cliproxy/auth/auto_refresh_loop.go` | `nextRefreshCheckAt` never schedules an ended sign-in. The loop notes each pass (`notePass`), and `handleDue` lets `waitForNetwork` hold due refreshes after a wake; `resetTimer` records whether the timer is armed. |
+| `sdk/cliproxy/auth/conductor_lifecycle.go` | `updateInternal`, replacing a credential with the same tokens, keeps what their refreshes said (`devyreKeepSignInState`). |
+| `sdk/cliproxy/auth/types.go` | `Auth` carries `devyreSignIn`, a passing refresh failure in memory. |
+| `sdk/cliproxy/auth/conductor_refresh_disabled_test.go`, `conductor_scheduler_refresh_test.go` | An invalid grant, or a 401 at the token endpoint, ends the sign-in instead of being retried with a backoff. |
 | `internal/auth/meta/meta.go` | `SaveTokenToFile` reads the old file through `authseal.ReadFile` and writes through `authseal.WriteFile` in place of its own temporary file and rename. |
 | `internal/api/handlers/management/config_basic.go` | `normalizeRoutingStrategy` accepts `expiring-first`, so `PUT /routing/strategy` does too. |
 | `internal/api/handlers/management/handler.go` | Two hunks: `Middleware()` asks `devyreTailnetAuthorize` first and skips the key for a trusted request, and the missing-key branch of `AuthenticateManagementKey` no longer calls `fail()`, so only a wrong key counts toward the ban (RESP's commands before `AUTH`, which ask with an empty key only to learn whether the IP is banned, included). |
@@ -367,6 +375,59 @@ a sign-in never takes from the file it replaces. ChatGPT's end is kept only if i
 has none until an answer gives one (Claude Code, which would keep it unknown, defaults a sign-in
 without one to 30 days; this guesses nothing), and none is ever inferred from a file's times:
 Windows and macOS keep a file's creation time across a sign-in again.
+
+### A sign-in the provider ended
+
+A refresh the provider refused for good ends the sign-in (`devyre_refresh_outcome.go`): Claude's
+"Refresh token expired" (`invalid_grant`), OpenAI's `refresh_token_expired`, `refresh_token_reused`
+and `refresh_token_invalidated`, Claude's `account_on_hold`, any other `invalid_grant`, and a 401 from
+the token endpoint. The credential is never refreshed again until its tokens change, its status says
+`sign-in ended by the provider (time limit)` (or `refresh token reused`, `revoked`, `account on
+hold`, `refresh token refused`), and its token file keeps `sign_in_ended` (why, the provider's
+answer, when), so a restart sends the dead token neither. An access token that has not run out
+keeps serving until it does (Claude refreshes four hours before an eight-hour token ends); one the
+provider rejected, or that ran out, makes the credential unavailable at once. A new sign-in, or
+another writer of the token file, brings new tokens and a new chance: the mark is a token payload
+key, which a sign-in never keeps.
+
+Before, an invalid grant was retried every 1 to 30 minutes for good: Machine's log has 1,090 such
+replays of four dead Claude tokens over nine days, none of which ever worked.
+
+Why every `invalid_grant` is terminal, not only the named ends: RFC 6749 §5.2 answers it for a
+refresh token that is "invalid, expired, revoked … or was issued to another client", none of
+which a replay of the same token can change. Claude Code 2.1.332, Anthropic's own client, marks
+the refresh token dead and asks for `/login` on every 400 or 401 `invalid_grant`, whatever its
+description; it records "Refresh token expired" alone as the sign-in's time limit, and names
+"Refresh token not found or invalid" (a spent or revoked token), "No organization associated with
+this token", "No account associated with this token" and `account_on_hold` as the others. Codex
+0.162.1 ends the sign-in on every 401 from the token endpoint. Within this router a refresh token
+is never sent twice at once (a single flight a token and a lock a credential), so an
+`invalid_grant` cannot be a race with itself; the one way it follows a refresh that worked is an
+answer lost on the way back, after which the token is spent for good too. The status still
+names which it was, for the log and for whoever reads the listing.
+
+### A refresh that failed in passing
+
+Any other failure leaves the sign-in retrying (`state: retrying`, `next_try_at` in the listing):
+
+| Why | Next try |
+|---|---|
+| The request never left (`unreachable`: DNS, dial, TLS handshake) | 10 s, doubling to 5 min |
+| A 429 (`rate_limited`) | its Retry-After, at least a minute |
+| No readable answer (`lost`), a 5xx (`server_error`), a Cloudflare page (`blocked`), another 4xx (`rejected`) | 5 min |
+
+The access token serves while it runs, and the next try never comes after it runs out. Once it has
+run out the credential is unavailable meanwhile, with the status `refresh retrying (<why>)`; before,
+that read `token expired`, which Anvil showed as "Sign in again" while the router tried again by
+itself. A refresh that works clears it and logs how long it lasted.
+
+After a wake the refreshes due wait 20 s for the network (`devyre_wake.go`): a pass of the refresh
+loop more than two minutes later than its 30-second timer allows, by the monotonic or the wall
+clock, means the computer slept. A refresh at once would fail before it left at best (tried again
+in 10 s), and at worst leave on a half-up link whose answer is lost, which may spend the token.
+
+The v8 listing's `sign_in` says all of it: `state` (`retrying` or `ended`, absent while fine),
+`reason`, `answer`, `since`, `next_try_at`, `access_expires_at` and `ends_at`.
 
 ## Routing and quota readings
 
@@ -925,7 +986,7 @@ go test ./internal/cmd/ -run 'Lifeline|PasswordLine|ReportListen|TakenPort|KeyLi
 go test ./cmd/server/ -run 'LifelineStdin|PasswordStdin|AuthFilesKeyStdin|DevyreSealAuthDir'
 go test ./internal/authseal/
 go test ./internal/auth/tokenrefresh/ ./internal/auth/claude/ ./internal/auth/codex/ -run "Refresh|Answers|Request|Transport|Unreadable|429|RetryAfter|Answer|OneRefresh|Longer|Devyre"
-go test ./sdk/cliproxy/auth/ ./internal/api/handlers/management/ -run "DevyreA|DevyreTheV8"
+go test ./sdk/cliproxy/auth/ ./internal/api/handlers/management/ -run "DevyreA|DevyreTheV8|DevyreClaudes|DevyreEvery|DevyreANew|InvalidGrant"
 go test ./internal/watcher/ -run Devyre
 go test ./sdk/auth/ -run Devyre
 go test ./internal/managementasset/ -run DevyrePanel

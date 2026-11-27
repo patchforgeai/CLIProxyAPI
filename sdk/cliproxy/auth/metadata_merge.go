@@ -13,8 +13,9 @@ func IsAuthTokenPayloadKey(key string) bool {
 	case "access_token", "refresh_token", "id_token", "session_id",
 		"expired", "last_refresh", "expires_in", "timestamp",
 		"token_type", "user_code", "verification_uri", "verification_uri_complete",
-		// devyre: the end of a sign-in is the sign-in's own; a new one never takes the old one's.
-		MetadataSignInEndsAt:
+		// devyre: the end of a sign-in, and that it ended, are the sign-in's own; a new one never
+		// takes the old one's, and a refresh's always applies.
+		MetadataSignInEndsAt, MetadataSignInEnded:
 		return true
 	default:
 		return false
@@ -71,6 +72,9 @@ func MergeRefreshedAuth(base, current, updated *Auth) *Auth {
 	if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
 		return merged
 	}
+
+	// devyre: a refresh says how the sign-in stands now (devyre_sign_in.go).
+	merged.devyreSignIn = updated.devyreSignIn
 
 	// 1. Refresh Lifecycle Timestamps
 	if !updated.LastRefreshedAt.IsZero() {

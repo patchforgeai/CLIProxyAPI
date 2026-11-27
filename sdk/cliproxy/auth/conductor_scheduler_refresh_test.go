@@ -416,8 +416,13 @@ func TestManager_RefreshAuthUnauthorizedFailure_RetainsUnexpiredAccessToken(t *t
 	if updated.Status == StatusError {
 		t.Fatalf("expected auth status not to be StatusError, got %s", updated.Status)
 	}
-	if updated.NextRefreshAfter.IsZero() {
-		t.Fatal("expected NextRefreshAfter to be scheduled for retry backoff, got zero")
+	// devyre: the provider refused the refresh token for good: never sent again, while the
+	// access token it still has serves.
+	if status := SignInStatusOf(updated); status.State != SignInEnded || !updated.NextRefreshAfter.IsZero() {
+		t.Fatalf("sign-in = %+v, next refresh %v: want ended, never refreshed again", status, updated.NextRefreshAfter)
+	}
+	if blocked, _, _ := isAuthBlockedForModel(updated, "", time.Now()); blocked {
+		t.Fatal("an access token that still runs stopped serving")
 	}
 }
 
@@ -457,15 +462,13 @@ func TestManager_RefreshAuthFailure_PreservesPreexistingUnavailableState(t *test
 	if updated.StatusMessage != "quota_exceeded" {
 		t.Fatalf("StatusMessage = %q, want quota_exceeded", updated.StatusMessage)
 	}
-	if updated.NextRefreshAfter.IsZero() {
-		t.Fatal("expected NextRefreshAfter to have scheduled retry backoff")
-	}
 	if hasUnauthorizedAuthFailure(updated) {
-		t.Fatal("hasUnauthorizedAuthFailure should be false when unexpired access token has scheduled NextRefreshAfter")
+		t.Fatal("hasUnauthorizedAuthFailure should be false while the access token still runs")
 	}
+	// devyre: an invalid grant ends the sign-in; it is never scheduled again.
 	now := time.Now()
-	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); !shouldSchedule {
-		t.Fatal("nextRefreshCheckAt should continue to schedule retry for unexpired access token with pending retry")
+	if _, shouldSchedule := nextRefreshCheckAt(now, updated, time.Second); shouldSchedule {
+		t.Fatal("nextRefreshCheckAt schedules a sign-in the provider ended")
 	}
 }
 

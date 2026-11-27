@@ -23,12 +23,10 @@ type RefreshEvaluator interface {
 }
 
 const (
-	refreshCheckInterval    = 5 * time.Second
-	refreshMaxConcurrency   = 16
-	refreshPendingBackoff   = time.Minute
-	refreshFailureBackoff   = 5 * time.Minute
-	invalidGrantBackoffBase = time.Minute
-	invalidGrantBackoffMax  = 30 * time.Minute
+	refreshCheckInterval  = 5 * time.Second
+	refreshMaxConcurrency = 16
+	refreshPendingBackoff = time.Minute
+	refreshFailureBackoff = 5 * time.Minute
 	// refreshIneffectiveBackoff throttles refresh attempts when an executor returns
 	// success but the auth still evaluates as needing refresh (e.g. token expiry
 	// wasn't updated). Without this guard, the auto-refresh loop can tight-loop and
@@ -118,7 +116,7 @@ func (m *Manager) shouldRefresh(a *Auth, now time.Time) bool {
 	if a == nil {
 		return false
 	}
-	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) {
+	if hasUnauthorizedAuthFailure(a) || hasDisabledInvalidGrantFailure(a) || hasEndedSignIn(a) {
 		return false
 	}
 	if !a.NextRefreshAfter.IsZero() && now.Before(a.NextRefreshAfter) {
@@ -325,7 +323,7 @@ func lookupMetadataTime(meta map[string]any, keys ...string) (time.Time, bool) {
 func (m *Manager) markRefreshPending(loop *authAutoRefreshLoop, id string, registrationEpoch uint64, now time.Time) *authRefreshJob {
 	m.mu.Lock()
 	auth := m.auths[id]
-	if auth == nil || auth.RegistrationEpoch != registrationEpoch || hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {
+	if auth == nil || auth.RegistrationEpoch != registrationEpoch || hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) || hasEndedSignIn(auth) {
 		m.mu.Unlock()
 		return nil
 	}
@@ -523,7 +521,7 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 	if !isUnauthorizedError(execErr) || !authHasRefreshCredential(auth) {
 		return auth, false
 	}
-	if hasUnauthorizedAuthFailure(auth) {
+	if hasUnauthorizedAuthFailure(auth) || hasEndedSignIn(auth) {
 		return auth, false
 	}
 	log.Debugf("unauthorized response for %s (%s), refreshing credentials before fallback", auth.Provider, auth.ID)
@@ -533,21 +531,6 @@ func (m *Manager) tryRefreshAfterUnauthorized(ctx context.Context, auth *Auth, e
 		return auth, false
 	}
 	return refreshed, true
-}
-
-func invalidGrantBackoffDuration(failures int) time.Duration {
-	if failures <= 1 {
-		return invalidGrantBackoffBase
-	}
-	shift := failures - 1
-	if shift > 10 {
-		shift = 10
-	}
-	backoff := invalidGrantBackoffBase * time.Duration(1<<shift)
-	if backoff > invalidGrantBackoffMax {
-		return invalidGrantBackoffMax
-	}
-	return backoff
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
@@ -625,6 +608,9 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if hasUnauthorizedAuthFailure(auth) && !forceRefresh {
 		return nil, errors.New("auth is unauthorized")
 	}
+	if hasEndedSignIn(auth) && !forceRefresh {
+		return nil, errors.New("the provider ended the sign-in")
+	}
 
 	// Another request may already have refreshed this credential.
 	if failedAccessToken != "" {
@@ -642,124 +628,43 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
-		unauthorized := isUnauthorizedError(err)
-		invalidGrant := isInvalidGrantError(err)
-		shouldReschedule := false
-		isDisabled := false
-		shouldUnschedule := false
+		// devyre: what the failure means for the sign-in (devyre_refresh_outcome.go).
+		var failure refreshFailure
 		m.mu.Lock()
-		if current := m.auths[id]; current != nil {
-			if base != nil && current.RegistrationEpoch != base.RegistrationEpoch {
-				m.mu.Unlock()
-				return nil, err
-			}
-			if hasUnauthorizedAuthFailure(current) && !forceRefresh {
-				m.mu.Unlock()
-				return nil, err
-			}
-			wasTerminalUnauthorized := hasUnauthorizedAuthFailure(current)
-			if wasTerminalUnauthorized {
-				current.Generation++
-				current.UpdatedAt = now
-				current.Unavailable = true
-				current.Status = StatusError
-				current.NextRefreshAfter = time.Time{}
-				current.NextRetryAfter = time.Time{}
-				if isUnauthorizedError(err) || isInvalidGrantError(err) {
-					current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
-					current.StatusMessage = "unauthorized (refresh token invalid)"
-				}
-				m.auths[id] = current
-				if m.scheduler != nil {
-					m.scheduler.upsertAuth(current.Clone())
-				}
-				m.mu.Unlock()
-				m.queueRefreshUnschedule(id)
-				return nil, err
-			}
+		current := m.auths[id]
+		if current == nil || (base != nil && current.RegistrationEpoch != base.RegistrationEpoch) {
+			m.mu.Unlock()
+			return nil, err
+		}
+		if hasUnauthorizedAuthFailure(current) && !forceRefresh {
+			m.mu.Unlock()
+			return nil, err
+		}
+		if hasUnauthorizedAuthFailure(current) {
+			// A forced refresh of a credential already out for good failed too: it stays out.
 			current.Generation++
 			current.UpdatedAt = now
-			current.LastError = refreshErrorFromError(err)
-
-			isDisabled = current.Disabled || current.Status == StatusDisabled
-			hasValidAccessToken := current.HasValidAccessToken(now)
-			// failedAccessToken is set only when upstream rejected this exact access
-			// token. Its expiry time no longer proves it is usable.
-			accessTokenRejected := failedAccessToken != "" && authAccessToken(current) == failedAccessToken
-			if isDisabled && invalidGrant {
-				current.Unavailable = true
-				current.Status = StatusDisabled
-				current.NextRefreshAfter = time.Time{}
-				current.RefreshFailures = 0
-				current.StatusMessage = "disabled (invalid grant)"
-				shouldUnschedule = true
-			} else if isDisabled {
-				current.Unavailable = true
-				current.Status = StatusDisabled
-				current.NextRefreshAfter = now.Add(refreshFailureBackoff)
-				if current.StatusMessage == "" {
-					current.StatusMessage = "disabled"
-				}
-				shouldReschedule = true
-			} else if accessTokenRejected && invalidGrant {
-				// Neither token can recover without a new login. Stop selecting the
-				// credential until its tokens change instead of retrying it after
-				// every cooldown and returning the same 401 to clients.
-				current.Unavailable = true
-				current.Status = StatusError
-				current.NextRefreshAfter = time.Time{}
-				current.NextRetryAfter = time.Time{}
-				current.RefreshFailures = 0
+			if outcome := refreshOutcomeOf(err); outcome.kind.Terminal() {
+				markSignInEnded(current, outcome, now)
 				current.LastError = &Error{Code: "unauthorized", Message: err.Error(), HTTPStatus: http.StatusUnauthorized}
-				current.StatusMessage = "unauthorized (refresh token invalid)"
-				shouldUnschedule = true
-			} else if !hasValidAccessToken {
-				current.Unavailable = true
-				current.Status = StatusError
-				if unauthorized {
-					current.NextRefreshAfter = time.Time{}
-					current.NextRetryAfter = time.Time{}
-					current.RefreshFailures = 0
-					current.StatusMessage = "unauthorized"
-				} else if invalidGrant {
-					current.RefreshFailures++
-					current.NextRefreshAfter = now.Add(invalidGrantBackoffDuration(current.RefreshFailures))
-					current.StatusMessage = "invalid grant (retrying)"
-					shouldReschedule = true
-				} else {
-					current.RefreshFailures = 0
-					current.NextRefreshAfter = now.Add(refreshFailureBackoff)
-					current.StatusMessage = "token expired"
-					shouldReschedule = true
-				}
-			} else {
-				// Access token remains valid. Preserve current in-flight/cooldown status without overwrite.
-				nextRetry := now.Add(refreshFailureBackoff)
-				if invalidGrant {
-					current.RefreshFailures++
-					nextRetry = now.Add(invalidGrantBackoffDuration(current.RefreshFailures))
-				} else {
-					current.RefreshFailures = 0
-				}
-				if exp, ok := current.AccessTokenExpirationTime(); ok && !exp.IsZero() && nextRetry.After(exp) {
-					nextRetry = exp
-				}
-				current.NextRefreshAfter = nextRetry
-				shouldReschedule = true
-
-				if !current.Unavailable {
-					log.Warnf("credential refresh failed for %s (%s): %s; retaining active credential as access token is unexpired", current.Provider, current.ID, safeErrorDiagnosticForLog(err))
-				}
+				current.StatusMessage = signInEndedMessage(outcome.kind)
 			}
-			m.auths[id] = current
-			if m.scheduler != nil {
-				m.scheduler.upsertAuth(current.Clone())
-			}
+			failure = refreshFailure{unschedule: true, persist: current.Clone()}
+		} else {
+			failure = applyRefreshFailure(current, err, failedAccessToken, now)
+		}
+		m.auths[id] = current
+		if m.scheduler != nil {
+			m.scheduler.upsertAuth(current.Clone())
 		}
 		m.mu.Unlock()
-		if shouldReschedule {
+		logSignInChange(failure.auth, "refresh", failure.from, failure.to)
+		if failure.persist != nil {
+			m.persistEndedSignIn(ctx, failure.persist)
+		}
+		if failure.reschedule {
 			m.queueRefreshReschedule(id)
-		} else if shouldUnschedule {
+		} else if failure.unschedule {
 			m.queueRefreshUnschedule(id)
 		}
 		return nil, err
@@ -782,6 +687,8 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 		updated.Status = StatusActive
 	}
 	updated.UpdatedAt = now
+	signInBefore := SignInStatusOf(auth)
+	clearSignInState(updated) // devyre: the sign-in works again
 	_ = clearUnauthorizedModelStates(updated, now)
 	if m.shouldRefresh(updated, now) {
 		updated.NextRefreshAfter = now.Add(refreshIneffectiveBackoff)
@@ -795,6 +702,7 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 	if saved == nil {
 		return nil, fmt.Errorf("auth %s not found", id)
 	}
+	logSignInChange(saved, "refresh", signInBefore, SignInStatusOf(saved))
 	targetAuth := saved
 	supportedModels, regEpoch := registry.GetGlobalRegistry().GetModelsAndEpochForClient(id)
 	projections := make([]registry.ClientModelProjection, 0, len(supportedModels))

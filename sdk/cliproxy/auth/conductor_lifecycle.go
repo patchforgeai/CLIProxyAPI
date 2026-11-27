@@ -242,6 +242,8 @@ func (m *Manager) updateInternal(ctx context.Context, base, auth *Auth, mode upd
 			if len(resumed) > 0 {
 				cooldownStateChanged = true
 			}
+		} else if mode == updateModeReplace {
+			devyreKeepSignInState(existing, auth) // devyre: the same tokens keep what their refreshes said
 		}
 		if existing.Quota.Exceeded && existing.Quota.Reason == "credential_quota" && existing.Quota.NextRecoverAt.After(time.Now()) {
 			auth.Unavailable = existing.Unavailable

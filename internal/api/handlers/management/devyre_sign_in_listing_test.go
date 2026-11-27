@@ -56,3 +56,33 @@ func TestDevyreTheV8ListingSaysWhenTheSignInEnds(t *testing.T) {
 		t.Fatalf("v0 lists sign_in: %#v", entry["sign_in"])
 	}
 }
+
+func TestDevyreTheV8ListingSaysHowTheSignInStands(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: t.TempDir()}, manager)
+	if _, err := manager.Register(context.Background(), &coreauth.Auth{
+		ID:         "claude-a@example.com.json",
+		FileName:   "claude-a@example.com.json",
+		Provider:   "claude",
+		Attributes: map[string]string{"runtime_only": "true"},
+		Metadata: map[string]any{
+			"email":        "a@example.com",
+			"access_token": "not-a-real-token",
+			"expired":      "2026-11-26T10:00:00Z",
+			coreauth.MetadataSignInEnded: map[string]any{
+				"reason": "ended", "answer": "invalid_grant: Refresh token expired", "at": "2026-11-26T06:05:04Z",
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	signIn, _ := devyreListCredentials(t, h, true)["sign_in"].(map[string]any)
+	if signIn["state"] != "ended" || signIn["reason"] != "ended" || signIn["answer"] != "invalid_grant: Refresh token expired" ||
+		signIn["since"] != "2026-11-26T06:05:04Z" || signIn["access_expires_at"] != "2026-11-26T10:00:00Z" {
+		t.Fatalf("v8 sign_in = %#v", signIn)
+	}
+	if _, retried := signIn["next_try_at"]; retried {
+		t.Fatalf("an ended sign-in lists a next try: %#v", signIn)
+	}
+}

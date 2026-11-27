@@ -28,6 +28,12 @@ type authAutoRefreshLoop struct {
 
 	wakeCh chan struct{}
 	jobs   chan *authRefreshJob
+
+	// devyre: the loop's last pass, and until when due refreshes wait for the network after a
+	// wake (devyre_wake.go). Touched by the loop's goroutine alone.
+	lastPass    time.Time
+	settleUntil time.Time
+	timerArmed  bool
 }
 
 type authRefreshJob struct {
@@ -162,6 +168,7 @@ func (l *authAutoRefreshLoop) loop(ctx context.Context) {
 	defer timer.Stop()
 
 	var timerCh <-chan time.Time
+	l.notePass(time.Now())
 	l.resetTimer(timer, &timerCh, time.Now())
 
 	for {
@@ -170,10 +177,12 @@ func (l *authAutoRefreshLoop) loop(ctx context.Context) {
 			return
 		case <-l.wakeCh:
 			now := time.Now()
+			l.notePass(now)
 			l.applyDirty(now)
 			l.resetTimer(timer, &timerCh, now)
 		case <-timerCh:
 			now := time.Now()
+			l.notePass(now)
 			l.handleDue(ctx, now)
 			l.applyDirty(now)
 			l.resetTimer(timer, &timerCh, now)
@@ -199,6 +208,7 @@ func (l *authAutoRefreshLoop) nextWait(now time.Time) (time.Duration, bool) {
 
 func (l *authAutoRefreshLoop) resetTimer(timer *time.Timer, timerCh *<-chan time.Time, now time.Time) {
 	wait, ok := l.nextWait(now)
+	l.timerArmed = ok
 	if !ok {
 		if !timer.Stop() {
 			select {
@@ -232,6 +242,9 @@ func (l *authAutoRefreshLoop) peek() (time.Time, bool) {
 func (l *authAutoRefreshLoop) handleDue(ctx context.Context, now time.Time) {
 	due := l.popDue(now)
 	if len(due) == 0 {
+		return
+	}
+	if l.waitForNetwork(due, now) { // devyre: after a wake, the network first
 		return
 	}
 	if log.IsLevelEnabled(log.DebugLevel) {
@@ -396,7 +409,7 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 	if auth == nil {
 		return time.Time{}, false
 	}
-	if hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) {
+	if hasUnauthorizedAuthFailure(auth) || hasDisabledInvalidGrantFailure(auth) || hasEndedSignIn(auth) {
 		return time.Time{}, false
 	}
 
