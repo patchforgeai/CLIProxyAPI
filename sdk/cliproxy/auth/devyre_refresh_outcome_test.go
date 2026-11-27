@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -333,5 +334,17 @@ func TestDevyreAWakeHoldsDueRefreshesForTheNetwork(t *testing.T) {
 	idle.notePass(start.Add(9 * time.Hour))
 	if !idle.settleUntil.IsZero() {
 		t.Fatal("an idle loop read its own sleep as a wake")
+	}
+}
+
+// A refresh given up before it was sent (its caller's deadline, while it waited for a slot) says
+// nothing of the sign-in: no state, no backoff.
+func TestDevyreARefreshNotSentChangesNothing(t *testing.T) {
+	notSent := fmt.Errorf("%w: %w", tokenrefresh.ErrNotSent, context.DeadlineExceeded)
+	manager, _, _, auth := signInTestManager(t, -time.Hour, notSent)
+	manager.refreshAuth(context.Background(), auth.ID)
+	got := currentAuth(t, manager, auth.ID)
+	if status := SignInStatusOf(got); status.State != SignInFine || got.StatusMessage != "" {
+		t.Fatalf("sign-in = %+v, status %q, want untouched", status, got.StatusMessage)
 	}
 }

@@ -127,7 +127,7 @@ Every file the fork adds. Together with the hotspots below, this is exactly the 
 | `internal/authseal/replace.go`, `replace_windows.go`, `replace_darwin.go`, `replace_other.go` | The atomic replace: a temporary file beside the auth file, its creation time kept (Windows, macOS), the rename tried again while another process's handle holds the file (Windows); the router's own reads open the file sharing its deletion (`openShared`), so they never hold the rename up |
 | `internal/auth/tokenrefresh/tokenrefresh.go` | The one refresh policy of Claude's and ChatGPT's accounts (`Refresh`): one request at a time a token, at most two a provider, a 429 holding the provider's next refreshes until its Retry-After, a replay only after a 5xx, and a `Failure` whose `Kind` says what it means for the sign-in (see [A sign-in's life](#a-sign-ins-life)) |
 | `internal/auth/claude/devyre_sign_in_end_test.go` | A sign-in keeps the end Claude's answer gives, a refresh the earlier one, an answer without one leaves it unknown |
-| `internal/auth/tokenrefresh/tokenrefresh_test.go` | Each answer Claude Code 2.1.332 and Codex 0.162.1 name, and what it means; a request that never left told from one whose answer was lost, through a real listener; an unreadable 200 never replayed; a 429's hold on its provider alone; Retry-After's forms and bounds; the end of a sign-in an answer gives; one request a token and two a provider; a refresh that outlives its caller |
+| `internal/auth/tokenrefresh/tokenrefresh_test.go` | Each answer Claude Code 2.1.332 and Codex 0.162.1 name, and what it means; a caller giving up before sending fails no other caller of its token; a request that never left told from one whose answer was lost, through a real listener; an unreadable 200 never replayed; a 429's hold on its provider alone; Retry-After's forms and bounds; the end of a sign-in an answer gives; one request a token and two a provider; a refresh that outlives its caller |
 | `internal/authseal/migrate.go` | `SealDir`: the plaintext auth files sealed at start, the rest left as they are |
 | `internal/authseal/authseal_test.go`, `migrate_test.go`, `replace_windows_test.go`, `replace_darwin_test.go`, `replace_other_test.go` | Round trips and every refusal (another key, another name, a changed byte, malformed, no key); plaintext read with and without a key; the mode, no temporary file left, the creation time kept, the rename while another reader holds the file, and while the router's own does (never waiting), writes through a link, the encoder's bytes; the migration: what it seals and what it leaves, run twice, creation times, without a key |
 | `internal/cmd/devyre_auth_seal.go` | `ReadStdinAuthFilesKey`: the key line on the shared stdin reader |
@@ -362,9 +362,13 @@ copy of before. ChatGPT's sent a request again, three times in three seconds, af
 but `refresh_token_reused`, including one whose answer was lost on the way back: the provider may
 have spent the token, and the replay then fails for good. Now, for both:
 
-- One request at a time a refresh token (a single flight), at most two refreshes at once a
-  provider, and each refresh bounded by its own 30 s, which outlives its caller: a request whose
-  client went away still lands its answer.
+- One request at a time a refresh token (a flight its callers share), at most two refreshes at
+  once a provider, and each refresh bounded by its own 30 s, which outlives its caller: a request
+  whose client went away still lands its answer. The caller that leads a flight waits for the
+  provider's slot with its own context; when it gives up before anything was sent, another
+  caller of the token leads it instead, and the one that gave up gets `ErrNotSent`, which changes
+  nothing of the sign-in. Before, a request's deadline failed the refresh loop's caller beside it
+  too, as a lost answer retried in five minutes.
 - A request goes again only after a 5xx, at +1 s and +2 s: the server took nothing. Never after a
   transport error once the request went out, nor after a 200 that cannot be read.
 - A 429 holds every refresh of its provider until its Retry-After (seconds, a date or

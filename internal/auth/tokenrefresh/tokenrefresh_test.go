@@ -352,3 +352,56 @@ func TestARefreshNeverMakesASignInLastLonger(t *testing.T) {
 		}
 	}
 }
+
+// A caller whose deadline ends while it waits for a slot gives up alone: the caller sharing its
+// refresh (the refresh loop beside a request) leads it once a slot frees, and gets its answer.
+func TestACallerGivingUpBeforeSendingFailsNoOtherCaller(t *testing.T) {
+	Reset()
+	t.Cleanup(Reset)
+	release := make(chan struct{})
+	busy := func(context.Context) (*http.Response, error) {
+		<-release
+		return answerWith(200, `{"access_token":"a"}`, nil)(context.Background())
+	}
+	for _, token := range []string{"busy-1", "busy-2"} {
+		go func() {
+			_, _ = Refresh(context.Background(), Exchange{Provider: "claude", Account: token, RefreshToken: token, Send: busy})
+		}()
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for len(slotsOf("claude")) < perProvider && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	var sends int32
+	send := func(context.Context) (*http.Response, error) {
+		atomic.AddInt32(&sends, 1)
+		return answerWith(200, `{"access_token":"fresh"}`, nil)(context.Background())
+	}
+	x := Exchange{Provider: "claude", Account: "a.json", RefreshToken: "shared", Send: send}
+	hurried, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	first := make(chan error, 1)
+	go func() {
+		_, err := Refresh(hurried, x)
+		first <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	second := make(chan *Answer, 1)
+	go func() {
+		answer, err := Refresh(context.Background(), x)
+		if err != nil {
+			t.Errorf("the patient caller: %v", err)
+		}
+		second <- answer
+	}()
+	if err := <-first; !errors.Is(err, ErrNotSent) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("the hurried caller: %v, want not sent for its deadline", err)
+	}
+	close(release)
+	if answer := <-second; answer == nil || answer.AccessToken != "fresh" {
+		t.Fatalf("the patient caller got %+v", answer)
+	}
+	if got := atomic.LoadInt32(&sends); got != 1 {
+		t.Fatalf("the shared token was sent %d times, want once", got)
+	}
+}

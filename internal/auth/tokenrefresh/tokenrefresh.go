@@ -25,7 +25,6 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
-	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -284,10 +283,11 @@ type Exchange struct {
 }
 
 var (
-	group singleflight.Group
-	mu    sync.Mutex
-	held  = make(map[string]time.Time)
-	slots = make(map[string]chan struct{})
+	// flights are the refreshes under way, by provider and refresh token.
+	flights = make(map[string]*flight)
+	mu      sync.Mutex
+	held    = make(map[string]time.Time)
+	slots   = make(map[string]chan struct{})
 	// now is the clock, and replayWait the pause before a replay (tests).
 	now        = time.Now
 	replayWait = func(attempt int) time.Duration { return time.Duration(attempt-1) * time.Second }
@@ -299,7 +299,7 @@ func Reset() {
 	defer mu.Unlock()
 	held = make(map[string]time.Time)
 	slots = make(map[string]chan struct{})
-	group = singleflight.Group{}
+	flights = make(map[string]*flight)
 }
 
 // HeldUntil is when an earlier 429 stops holding the provider's refreshes; zero when none does.
@@ -348,8 +348,24 @@ func heldFailure(x Exchange) error {
 	}
 }
 
-// Refresh spends x's refresh token and returns the answer, or a *Failure (or the caller's
-// context error when it ended before anything was sent).
+// ErrNotSent: the refresh was given up before its request went out (its caller ended while it
+// waited for a slot). It says nothing of the sign-in: the token is unspent.
+var ErrNotSent = errors.New("token refresh not sent")
+
+// flight is one refresh of a refresh token, which the callers asking for it meanwhile share.
+type flight struct {
+	done    chan struct{}
+	answer  *Answer
+	err     error
+	notSent bool
+}
+
+// Refresh spends x's refresh token and returns the answer, or a *Failure, or an error wrapping
+// ErrNotSent and the caller's context error when the caller ended before anything was sent.
+//
+// Callers of one token share one refresh. The one that leads it waits for a slot of the
+// provider with its own context; when it gives up before sending, the others do not share that:
+// each tries again to lead, so a request's deadline never fails the refresh loop's caller.
 func Refresh(ctx context.Context, x Exchange) (*Answer, error) {
 	if strings.TrimSpace(x.RefreshToken) == "" {
 		return nil, errors.New("refresh token is required")
@@ -357,41 +373,71 @@ func Refresh(ctx context.Context, x Exchange) (*Answer, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := heldFailure(x); err != nil {
-		return nil, err
-	}
-	result, err, _ := group.Do(x.Provider+"\x00"+x.RefreshToken, func() (any, error) {
-		// A free slot is taken even by a caller already gone (its refresh still lands); a
-		// caller that ends while it waits for one sends nothing.
-		s := slotsOf(x.Provider)
-		select {
-		case s <- struct{}{}:
-		default:
+	key := x.Provider + "\x00" + x.RefreshToken
+	for {
+		if err := heldFailure(x); err != nil {
+			return nil, err
+		}
+		mu.Lock()
+		if f := flights[key]; f != nil {
+			mu.Unlock()
 			select {
-			case s <- struct{}{}:
+			case <-f.done:
 			case <-ctx.Done():
-				return nil, fmt.Errorf("token refresh not sent: %w", ctx.Err())
+				return nil, notSent(ctx)
 			}
+			if f.notSent {
+				continue // its leader gave up before sending: lead it ourselves
+			}
+			return f.result()
 		}
-		defer func() { <-s }()
-		// A 429 may have come while this one waited for a slot.
-		if errHeld := heldFailure(x); errHeld != nil {
-			return nil, errHeld
-		}
-		runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
-		defer cancel()
-		return run(runCtx, x)
-	})
-	if err != nil {
-		return nil, err
+		f := &flight{done: make(chan struct{})}
+		flights[key] = f
+		mu.Unlock()
+		f.answer, f.notSent, f.err = lead(ctx, x)
+		mu.Lock()
+		delete(flights, key)
+		mu.Unlock()
+		close(f.done)
+		return f.result()
 	}
-	answer, ok := result.(*Answer)
-	if !ok || answer == nil {
-		return nil, errors.New("token refresh failed: invalid single-flight result")
+}
+
+func (f *flight) result() (*Answer, error) {
+	if f.err != nil {
+		return nil, f.err
 	}
 	// Each caller gets its own copy: they may change it.
-	copied := *answer
+	copied := *f.answer
 	return &copied, nil
+}
+
+func notSent(ctx context.Context) error {
+	return fmt.Errorf("%w: %w", ErrNotSent, ctx.Err())
+}
+
+// lead takes a slot of the provider and runs the refresh: a free slot even for a caller already
+// gone (its refresh still lands), and nothing sent for one that ends while it waits.
+func lead(ctx context.Context, x Exchange) (*Answer, bool, error) {
+	s := slotsOf(x.Provider)
+	select {
+	case s <- struct{}{}:
+	default:
+		select {
+		case s <- struct{}{}:
+		case <-ctx.Done():
+			return nil, true, notSent(ctx)
+		}
+	}
+	defer func() { <-s }()
+	// A 429 may have come while this one waited for a slot.
+	if errHeld := heldFailure(x); errHeld != nil {
+		return nil, false, errHeld
+	}
+	runCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+	defer cancel()
+	answer, err := run(runCtx, x)
+	return answer, false, err
 }
 
 func run(ctx context.Context, x Exchange) (*Answer, error) {

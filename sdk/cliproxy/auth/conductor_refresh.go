@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/tokenrefresh"
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/registry"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -624,7 +625,8 @@ func (m *Manager) refreshAuthForRequestAtEpoch(ctx context.Context, id, failedAc
 
 	base := auth.Clone()
 	updated, err := exec.Refresh(ctx, base.Clone())
-	if err != nil && errors.Is(err, context.Canceled) {
+	// devyre: a refresh given up before it was sent says nothing of the sign-in.
+	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, tokenrefresh.ErrNotSent)) {
 		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
 		return nil, err
 	}
